@@ -1,6 +1,6 @@
 # ListenLab
 
-ListenLab is a Spotify web app that analyzes your real listening behavior to surface overlooked artists, music, and actionable insights.
+ListenLab is a Spotify web app that analyzes real listening behavior to surface overlooked artists, music, and actionable insights.
 
 The core idea is simple: use what you actually listen to, not generic recommendations, to help you rediscover what you already care about.
 
@@ -23,14 +23,13 @@ Planned MVP components:
 
 ## Status
 
-This repository now includes the first implemented milestone:
-- minimal React frontend shell
-- FastAPI backend
-- Spotify OAuth login flow
-- session-based auth
-- authenticated Spotify profile test endpoint
+This repository now includes:
+- React dashboard for authenticated Spotify snapshots
+- FastAPI backend with Spotify OAuth and session-based auth
+- live profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums views
+- local history-based artist and album ranking calibration using exported Spotify extended streaming history
 
-The broader analysis, scoring, ranking, and playlist features are still in planning.
+The core overlooked-artist analysis flow and playlist generation are still not implemented.
 
 ---
 
@@ -53,21 +52,22 @@ ListenLab is built around **"signal over suggestion"**:
 
 ---
 
-## MVP Goal
+## Current Product Direction
 
-Build a web app that:
+Build toward a web app that:
 - connects to a user's Spotify account
-- aggregates engagement signals by artist
-- ranks artists by actual engagement
-- filters out artists the user already follows
+- builds reliable artist and album signals from live Spotify data
+- calibrates scoring heuristics against exported listening history when available
+- eventually ranks overlooked artists by actual engagement
 - explains why each result was surfaced
 - optionally creates a playlist from those artists
 
 ---
 
-## First Implementation Defaults
+## Implementation Defaults
 
-- Spotify is the source of truth
+- Spotify is the source of truth for live account data
+- local exported history can be used for scoring calibration, not as a required product dependency
 - analysis runs on demand
 - no database in MVP
 - local development first, simple cloud deployment later

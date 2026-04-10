@@ -4,7 +4,7 @@
 This roadmap translates the product brief into buildable engineering milestones. It is intentionally implementation-oriented and should be used alongside `docs/architecture.md` and `docs/context.md`.
 
 ## Planning Defaults
-- The repository now has a working auth-only foundation.
+- The repository now has a working authenticated dashboard foundation.
 - MVP uses a React frontend and FastAPI backend.
 - Spotify is the source of truth.
 - MVP uses no persistent database.
@@ -62,15 +62,37 @@ Enable a user to sign in with Spotify and give the backend a valid authenticated
 ### Current status
 - Implemented and manually verified in local development.
 
-## Milestone 2 - Data Collection and Artist Aggregation
+## Milestone 2 - Authenticated Snapshot Dashboard
+### Purpose
+Ship a trustworthy authenticated dashboard that exposes the raw listening signals we plan to build analysis on top of.
+
+### Current status
+- Implemented locally and iterated beyond the original auth milestone.
+
+### Dependencies
+- Milestone 1
+
+### Deliverables
+- connected Spotify profile snapshot
+- recent listening and liked tracks sections
+- playlist section for owned public playlists
+- top artists, top tracks, and top albums sections
+- resilient fallback behavior for missing Spotify scopes and rate limits
+
+### Completion criteria
+- a user can log in and see a stable dashboard without using developer tools
+- UI layout remains aligned even with variable content lengths
+- the dashboard gracefully degrades when Spotify data is partial
+
+## Milestone 3 - Data Collection and Artist Aggregation
 ### Purpose
 Collect the core library signals and normalize them into artist-level records.
 
 ### Current status
-- Not started.
+- Partially started through dashboard-oriented fetches, but the true artist aggregation pipeline for overlooked-artist analysis is not implemented yet.
 
 ### Dependencies
-- Milestone 1
+- Milestone 2
 
 ### Deliverables
 - Spotify client support for liked tracks, saved albums, and followed artists
@@ -82,7 +104,7 @@ Collect the core library signals and normalize them into artist-level records.
 - the backend can build a complete artist-level aggregate from the required MVP data
 - followed state, liked tracks, and saved album counts are reflected correctly per artist
 
-## Milestone 3 - Listening Signals and Fallback Model
+## Milestone 4 - Listening Signals and Fallback Model
 ### Purpose
 Add listening-behavior signals while preserving useful output when rich data is unavailable.
 
@@ -99,7 +121,7 @@ Add listening-behavior signals while preserving useful output when rich data is 
 - the analysis pipeline can run with rich signals when available
 - the same pipeline can still return valid ranked results when those signals are limited
 
-## Milestone 4 - Scoring, Filtering, and Explanation Generation
+## Milestone 5 - Scoring, Filtering, and Explanation Generation
 ### Purpose
 Turn aggregated artist data into ranked overlooked-artist results.
 
@@ -118,7 +140,7 @@ Turn aggregated artist data into ranked overlooked-artist results.
 - results are ranked by engagement score
 - each surfaced artist includes a clear explanation and structured breakdown
 
-## Milestone 5 - Frontend MVP Experience
+## Milestone 6 - Frontend MVP Experience
 ### Purpose
 Ship the core user experience for running analysis and reading results.
 
@@ -136,7 +158,7 @@ Ship the core user experience for running analysis and reading results.
 - a user can log in, run analysis, and understand the results without using developer tools
 - the frontend behavior stays stable across loading, empty, and degraded-signal states
 
-## Milestone 6 - Playlist Creation
+## Milestone 7 - Playlist Creation
 ### Purpose
 Turn useful analysis into an immediate action inside Spotify.
 
@@ -154,7 +176,7 @@ Turn useful analysis into an immediate action inside Spotify.
 - the playlist result includes a usable Spotify URL
 - duplicate or unavailable track scenarios are handled safely
 
-## Milestone 7 - Refinement and Launch Readiness
+## Milestone 8 - Refinement and Launch Readiness
 ### Purpose
 Improve quality until the MVP feels obviously trustworthy on real accounts.
 
@@ -163,6 +185,7 @@ Improve quality until the MVP feels obviously trustworthy on real accounts.
 
 ### Deliverables
 - score tuning against real-user test accounts
+- formula calibration using exported Spotify extended streaming history when available
 - copy improvements for explanations and UI labels
 - bug fixes for edge cases in data aggregation and session handling
 - local deployment checklist and cloud deployment notes

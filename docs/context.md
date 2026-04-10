@@ -38,10 +38,10 @@ After analysis, the user should feel:
 ## In-Scope MVP Outcome
 The MVP should help the user:
 - authenticate with Spotify
-- analyze their own listening-related signals
-- see a ranked list of overlooked artists
-- understand each result through explanation text and signal breakdown
-- optionally create a playlist from selected artists
+- inspect their own listening-related signals in a dashboard
+- build toward a ranked list of overlooked artists
+- understand why artists or albums are surfaced
+- optionally create a playlist from selected artists in a later milestone
 
 ## Out-of-Scope for MVP
 The MVP should not include:
@@ -50,10 +50,13 @@ The MVP should not include:
 - social sharing or multi-user features
 - complex personalization settings
 - album completion detection
-- listening-insights dashboards
 - concert integrations
 
 Those items belong to later phases only.
+
+Current note:
+- the repository already includes a listening-insights style dashboard for profile, tracks, albums, artists, playlists, and recent activity
+- that dashboard is being used as product calibration and UX groundwork, not as the final overlooked-artist MVP experience
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -94,10 +97,10 @@ Good result:
 
 ## Primary User Flow
 1. User logs in with Spotify.
-2. User runs analysis.
-3. Backend gathers available Spotify signals and computes artist rankings.
-4. Frontend shows overlooked artists with explanations and score breakdowns.
-5. User optionally selects artists and creates a playlist.
+2. User sees a profile and listening snapshot dashboard.
+3. Backend gathers available Spotify signals and, when available locally, compares them to exported listening history for calibration.
+4. Frontend shows ranked artists, tracks, albums, playlists, and recent activity.
+5. A later milestone will add overlooked-artist analysis and playlist generation.
 
 ## Data Availability Constraints
 Spotify may not expose every signal needed for perfect behavioral measurement.
@@ -107,6 +110,9 @@ Implementation should therefore assume:
 - listening minutes may be partial or approximated
 - play counts may need proxy or recent-history logic
 - results still need to feel correct even under fallback conditions
+
+Additional implementation rule:
+- exported Spotify extended streaming history can be used as a calibration aid for development and power users, but formulas must remain reliable for users who only grant live Spotify API access
 
 ## UX Priorities
 - Make the main call to action obvious.

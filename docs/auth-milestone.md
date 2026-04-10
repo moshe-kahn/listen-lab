@@ -1,11 +1,13 @@
-# Auth Milestone Run Notes
+# Authenticated Dashboard Run Notes
 
-## What this milestone includes
-- React frontend shell with Spotify login button
+## What this milestone now includes
+- React frontend dashboard with Spotify login
 - frontend callback handling
 - FastAPI backend with Spotify OAuth endpoints
 - backend token exchange and session storage
-- authenticated `GET /me` test endpoint
+- authenticated `GET /me` snapshot endpoint
+- dashboard sections for playlists, recent activity, top tracks, top artists, and top albums
+- optional local history calibration for artist and album rankings
 
 ## Status
 - Implemented
@@ -53,8 +55,18 @@ http://127.0.0.1:8000/auth/callback
 2. Click `Log in with Spotify`.
 3. Complete Spotify authorization.
 4. Confirm you return to the frontend and see an authenticated session.
-5. Click `Test authenticated endpoint`.
-6. Confirm profile data from Spotify appears in the UI.
+5. Confirm the dashboard loads profile data from Spotify.
+6. Confirm playlists, recent activity, and top sections appear without repeated auth errors.
+7. If local history calibration is configured, confirm top artists and albums reflect exported listening history.
+
+## Optional local history calibration
+If you have a Spotify extended streaming history export locally, set:
+
+```text
+SPOTIFY_HISTORY_DIR=C:\path\to\Spotify Extended Streaming History
+```
+
+This is optional and intended for local calibration and richer artist/album ranking. The product should still work for users who only provide live Spotify API access.
 
 ## Known next step
-- Replace the raw debug-style post-login display with a cleaner connected-account summary UI.
+- turn the current snapshot dashboard into the final overlooked-artist analysis experience with explanation-first ranking

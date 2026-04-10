@@ -5,11 +5,11 @@ This document is the implementation-oriented technical source of truth for the L
 
 ## Current State vs Target State
 ### Current state
-- The repository now includes a minimal implemented auth milestone.
-- A React frontend shell and FastAPI backend are scaffolded locally.
-- Spotify OAuth login, callback handling, session persistence, and an authenticated `GET /me` test endpoint are implemented.
-- Analysis, aggregation, scoring, ranking, and playlist creation are not implemented yet.
-- Product intent is currently defined by the roadmap file at `../initial roadmap.txt` relative to the project root.
+- The repository includes a React dashboard and FastAPI backend running locally.
+- Spotify OAuth login, callback handling, session persistence, and authenticated `GET /me` profile loading are implemented.
+- The dashboard currently renders profile identity, playlists, recent listening, liked tracks, top tracks, top artists, and top albums.
+- A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
+- The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
 - A React single-page app handles login, analysis actions, result display, and playlist creation controls.
@@ -35,20 +35,21 @@ This document is the implementation-oriented technical source of truth for the L
 - State model: session-based auth, on-demand computation, no persisted app data
 
 ### Implemented today
-- frontend login shell
+- frontend authenticated dashboard shell
 - frontend callback handling
 - backend OAuth endpoints
 - backend token exchange and session storage
-- authenticated Spotify profile test endpoint
+- authenticated `GET /me` snapshot endpoint
+- best-effort live Spotify data fetches for profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums
+- optional local history-based artist and album ranking calibration
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
 2. The backend runs OAuth with Spotify and stores session state for the logged-in user.
-3. The frontend calls `POST /analysis`.
-4. The backend fetches Spotify data, aggregates it by artist, computes engagement scores, filters followed artists, and returns ranked results with explanations.
-5. The frontend renders ranked overlooked artists and their signal breakdown.
-6. The user optionally submits selected artists to `POST /playlist`.
-7. The backend fetches top tracks for those artists and creates a Spotify playlist.
+3. The frontend calls `GET /auth/session` and `GET /me`.
+4. The backend fetches Spotify profile and listening-related data, and optionally merges in rankings from a local Spotify extended streaming history export.
+5. The frontend renders the dashboard snapshot.
+6. A later milestone will add `POST /analysis` and `POST /playlist`.
 
 ## Recommended Project Layout
 This layout should be used when scaffolding the repository:
@@ -179,6 +180,20 @@ Response shape:
 ### `POST /auth/logout`
 Purpose:
 - Clear the active session.
+
+### `GET /me`
+Purpose:
+- Return the authenticated dashboard snapshot for the current user.
+
+Implemented data today:
+- profile identity and Spotify profile URL
+- playlists owned by the user and marked public by Spotify
+- recently played tracks
+- recently liked tracks
+- top tracks
+- top artists
+- top albums
+- optional `history_insights_available` flag when local exported history is being used to rank artists and albums
 
 ### `POST /analysis`
 Purpose:
@@ -312,12 +327,21 @@ Fields:
 ### Required Spotify data
 - liked tracks from `/me/tracks`
 - followed artists from `/me/following`
-- saved albums from `/me/albums`
+- recent listening from `/me/player/recently-played`
+- top artists from `/me/top/artists`
+- top tracks from `/me/top/tracks`
+- playlists from `/me/playlists`
 - top tracks for playlist creation from `/artists/{id}/top-tracks`
 
 ### Optional or best-effort Spotify data
-- recent play history if available through the chosen Spotify scopes and endpoints
-- top artists or other listening proxies when direct listening-time data is incomplete
+- saved albums from `/me/albums` in later milestones
+- local extended streaming history export for calibration and richer artist/album ranking
+- best-effort album enrichment through lightweight Spotify album search when history-ranked albums need images and URLs
+
+### Local history calibration path
+- When `SPOTIFY_HISTORY_DIR` points to a valid Spotify extended streaming history export, the backend loads the local JSON files and derives artist and album rankings from them.
+- This path is meant to calibrate formulas and support power-user local development.
+- It must not become a hard dependency for the MVP, because most users will only provide live Spotify API access.
 
 ### Two scoring paths
 #### Rich-signal path

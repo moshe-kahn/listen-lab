@@ -18,7 +18,10 @@ class Settings:
     frontend_url: str
     session_secret: str
     allowed_origin: str
-    spotify_scope: str = "user-read-email user-read-private"
+    spotify_history_dir: str
+    spotify_scope: str = (
+        "user-read-email user-read-private user-read-recently-played playlist-read-private user-follow-read user-library-read user-top-read"
+    )
 
     @property
     def spotify_authorize_url(self) -> str:
@@ -41,8 +44,12 @@ def get_settings() -> Settings:
     return Settings(
         spotify_client_id=_read_env("SPOTIFY_CLIENT_ID"),
         spotify_client_secret=_read_env("SPOTIFY_CLIENT_SECRET"),
-        spotify_redirect_uri=_read_env("SPOTIFY_REDIRECT_URI", "http://localhost:8000/auth/callback"),
-        frontend_url=_read_env("FRONTEND_URL", "http://localhost:5173"),
+        spotify_redirect_uri=_read_env("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback"),
+        frontend_url=_read_env("FRONTEND_URL", "http://127.0.0.1:5173"),
         session_secret=_read_env("SESSION_SECRET", "change-me"),
-        allowed_origin=_read_env("ALLOWED_ORIGIN", "http://localhost:5173"),
+        allowed_origin=_read_env("ALLOWED_ORIGIN", "http://127.0.0.1:5173"),
+        spotify_history_dir=_read_env(
+            "SPOTIFY_HISTORY_DIR",
+            "C:\\Users\\kahnt\\OneDrive\\Programming\\Projects\\ListenLab\\Spotify Extended Streaming History",
+        ),
     )
