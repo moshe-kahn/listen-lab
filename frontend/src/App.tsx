@@ -1,10 +1,20 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 type SessionResponse = {
   authenticated: boolean;
   display_name: string | null;
   spotify_user_id: string | null;
   email?: string | null;
+};
+
+type ProfileProgressResponse = {
+  active: boolean;
+  phase: string | null;
+  elapsed_seconds: number;
+  events?: Array<{
+    phase: string;
+    at_seconds: number;
+  }>;
 };
 
 type RecentTrack = {
@@ -115,11 +125,23 @@ type ProfileResponse = {
   owned_playlists_available: boolean;
   recent_likes_tracks: RecentTrack[];
   recent_likes_available: boolean;
+  extended_loaded?: boolean;
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const githubRepoUrl = "https://github.com/moshe-kahn/listen-labs";
 const PAGE_SIZE = 5;
 const PLAYLISTS_PAGE_SIZE = 10;
+const spotifyLogoDataUrl =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 168 168">
+      <circle cx="84" cy="84" r="84" fill="#1ed760"/>
+      <path d="M121.2 113.3a6 6 0 0 1-8.3 2C90.2 101.5 61.6 98.6 27.8 106.6a6 6 0 1 1-2.8-11.7c36.8-8.8 68.3-5.5 93.8 9.9a6 6 0 0 1 2.4 8.5z" fill="#0b120f"/>
+      <path d="M130.5 89.8a7.4 7.4 0 0 1-10.2 2.4c-26-16-65.6-20.7-96.3-11.4a7.4 7.4 0 0 1-4.3-14.1c35.2-10.7 79.2-5.3 108.3 12.6a7.4 7.4 0 0 1 2.5 10.5z" fill="#0b120f"/>
+      <path d="M131.6 65.3C100.9 47 50.2 45.4 20.9 54.2A8.9 8.9 0 0 1 15.8 37c33.7-10.2 89.7-8.3 124.9 12.7a8.9 8.9 0 1 1-9.1 15.6z" fill="#0b120f"/>
+    </svg>`,
+  );
 
 type SectionKey =
   | "artists"
@@ -186,15 +208,23 @@ export function App() {
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [profile, setProfile] = useState<ProfileResponse | null>(null);
   const [statusMessage, setStatusMessage] = useState("Checking authentication state...");
+  const [statusHistory, setStatusHistory] = useState<string[]>([]);
+  const [authTransitioning, setAuthTransitioning] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(false);
+  const [loadingExtendedProfile, setLoadingExtendedProfile] = useState(false);
   const [profileLoadAttempted, setProfileLoadAttempted] = useState(false);
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(INITIAL_OPEN_SECTIONS);
   const [sectionPages, setSectionPages] = useState<Record<SectionKey, number>>(INITIAL_SECTION_PAGES);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [brandMenuOpen, setBrandMenuOpen] = useState(false);
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const brandMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.pathname === "/auth/callback") {
       const status = url.searchParams.get("status");
+      setAuthTransitioning(status === "success");
       setStatusMessage(
         status === "success"
           ? "Spotify login succeeded. Session restored."
@@ -214,6 +244,22 @@ export function App() {
     }
   }, [loadingProfile, profile, profileLoadAttempted, session]);
 
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (!profileMenuRef.current?.contains(event.target as Node)) {
+        setProfileMenuOpen(false);
+      }
+      if (!brandMenuRef.current?.contains(event.target as Node)) {
+        setBrandMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, []);
+
   async function loadSession() {
     try {
       const response = await fetch(`${apiBaseUrl}/auth/session`, {
@@ -232,9 +278,15 @@ export function App() {
 
       if (data.authenticated) {
         setStatusMessage("");
+        setStatusHistory([]);
+        setAuthTransitioning(true);
       } else {
         setProfile(null);
+        setProfileMenuOpen(false);
+        setBrandMenuOpen(false);
         setStatusMessage("Not connected yet. Use Spotify login to start the auth flow.");
+        setStatusHistory([]);
+        setAuthTransitioning(false);
       }
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Failed to load session.");
@@ -245,11 +297,46 @@ export function App() {
     window.location.href = `${apiBaseUrl}/auth/login`;
   }
 
+  async function reconnectSpotify() {
+    await fetch(`${apiBaseUrl}/cache/rebuild`, {
+      method: "POST",
+      credentials: "include",
+    });
+    startLogin();
+  }
+
+  function handleAuthAction() {
+    if (session?.authenticated) {
+      void reconnectSpotify();
+      return;
+    }
+    startLogin();
+  }
+
   function toggleSection(section: SectionKey) {
     setOpenSections((current) => ({
       ...current,
       [section]: !current[section],
     }));
+  }
+
+  function openAndScrollToSection(section: SectionKey, anchorId: string) {
+    setOpenSections((current) => ({
+      ...current,
+      artists: false,
+      tracks: false,
+      albums: false,
+      playlists: false,
+      recent: false,
+      [section]: true,
+    }));
+
+    window.setTimeout(() => {
+      const element = document.getElementById(anchorId);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 0);
   }
 
   function moveSectionPage(section: SectionKey, direction: -1 | 1, itemCount: number, pageSize: number = PAGE_SIZE) {
@@ -335,6 +422,11 @@ export function App() {
     return [hours, plays, tracks].filter(Boolean).join(" | ");
   }
 
+  function formatLoadingStatus(phase: string | null, elapsedSeconds: number) {
+    const elapsed = `${elapsedSeconds.toFixed(1)}s`;
+    return phase ? `Loading ${phase}... (${elapsed})` : `Loading your Spotify data... (${elapsed})`;
+  }
+
   function formatPlaylistSummary(playlist: TopPlaylist, mode: "recent" | "allTime") {
     const matches =
       mode === "recent"
@@ -366,8 +458,58 @@ export function App() {
     setLoadingProfile(true);
     setProfileLoadAttempted(true);
     setStatusMessage("Loading your Spotify data...");
+    setStatusHistory(["Initial load started."]);
+    let pollingActive = true;
+    let progressTimer: number | null = null;
+    const startedAt = performance.now();
+
+    const updateProgress = async () => {
+      const fallbackElapsed = (performance.now() - startedAt) / 1000;
+      try {
+        const response = await fetch(`${apiBaseUrl}/me/progress`, {
+          credentials: "include",
+        });
+        if (!response.ok) {
+          if (pollingActive) {
+            setStatusMessage(formatLoadingStatus(null, fallbackElapsed));
+          }
+          return;
+        }
+        const data = (await response.json()) as ProfileProgressResponse;
+        if (!pollingActive) {
+          return;
+        }
+        setStatusMessage(
+          formatLoadingStatus(
+            data.active ? data.phase : null,
+            data.active ? data.elapsed_seconds : fallbackElapsed,
+          ),
+        );
+        if (data.events?.length) {
+          setStatusHistory(
+            [
+              "Initial load started.",
+              ...data.events.map((event) => `initial ${event.at_seconds.toFixed(1)}s: ${event.phase}`),
+            ],
+          );
+        } else {
+          setStatusHistory(["Initial load started.", `initial ${formatLoadingStatus(null, fallbackElapsed)}`]);
+        }
+      } catch {
+        if (pollingActive) {
+          setStatusMessage(formatLoadingStatus(null, fallbackElapsed));
+          setStatusHistory(["Initial load started.", `initial ${formatLoadingStatus(null, fallbackElapsed)}`]);
+        }
+      }
+    };
+
+    await updateProgress();
+    progressTimer = window.setInterval(() => {
+      void updateProgress();
+    }, 500);
     try {
       const response = await fetch(`${apiBaseUrl}/me`, {
+        method: "GET",
         credentials: "include",
       });
 
@@ -389,13 +531,109 @@ export function App() {
 
       const data = (await response.json()) as ProfileResponse;
       setProfile(data);
+      setAuthTransitioning(false);
       setSectionPages(INITIAL_SECTION_PAGES);
       setStatusMessage("");
+      setStatusHistory((current) =>
+        current.length > 0 ? [...current, "Initial load complete."] : ["Initial load started.", "Initial load complete."],
+      );
+      void loadExtendedProfile();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to load Spotify profile.";
       setStatusMessage(message);
+      setAuthTransitioning(false);
+      setStatusHistory((current) => (current.length > 0 ? [...current, `Error: ${message}`] : [message]));
     } finally {
+      pollingActive = false;
+      if (progressTimer != null) {
+        window.clearInterval(progressTimer);
+      }
       setLoadingProfile(false);
+    }
+  }
+
+  async function loadExtendedProfile() {
+    setLoadingExtendedProfile(true);
+    setStatusHistory((current) => [...current, "Background expansion started."]);
+    let pollingActive = true;
+    let progressTimer: number | null = null;
+    const startedAt = performance.now();
+
+    const updateProgress = async () => {
+      const fallbackElapsed = (performance.now() - startedAt) / 1000;
+      try {
+        const response = await fetch(`${apiBaseUrl}/me/progress`, {
+          credentials: "include",
+        });
+        if (!response.ok) {
+          return;
+        }
+        const data = (await response.json()) as ProfileProgressResponse;
+        if (!pollingActive) {
+          return;
+        }
+        if (data.events?.length) {
+          setStatusHistory((current) => {
+            const prefix = current.filter((entry) => !entry.startsWith("background "));
+            const extensionEvents = (data.events ?? []).map(
+              (event) => `background ${event.at_seconds.toFixed(1)}s: ${event.phase}`,
+            );
+            return [...prefix, ...extensionEvents];
+          });
+        } else {
+          setStatusHistory((current) => {
+            const prefix = current.filter((entry) => !entry.startsWith("background "));
+            return [...prefix, `background ${formatLoadingStatus(null, fallbackElapsed)}`];
+          });
+        }
+      } catch {
+        // ignore background progress failures
+      }
+    };
+
+    progressTimer = window.setInterval(() => {
+      void updateProgress();
+    }, 500);
+    try {
+      const response = await fetch(`${apiBaseUrl}/me?mode=extended`, {
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        let detail = "Failed to load Spotify profile.";
+        try {
+          const payload = (await response.json()) as { detail?: string };
+          if (payload.detail) {
+            detail = payload.detail;
+          }
+        } catch {
+          // ignore invalid error payloads
+        }
+        if (response.status === 403) {
+          detail = "Spotify permission missing. Log out and log back in to grant the latest scopes.";
+        }
+        throw new Error(detail);
+      }
+
+      const data = (await response.json()) as ProfileResponse;
+      setProfile(data);
+      setStatusMessage("");
+      setStatusHistory((current) => {
+        const filtered = current.filter((entry) => !entry.startsWith("background "));
+        return [...filtered, "Background expansion complete."];
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load extended Spotify profile.";
+      setStatusHistory((current) => {
+        const filtered = current.filter((entry) => !entry.startsWith("background "));
+        return [...filtered, `Background expansion error: ${message}`];
+      });
+    } finally {
+      pollingActive = false;
+      if (progressTimer != null) {
+        window.clearInterval(progressTimer);
+      }
+      setLoadingExtendedProfile(false);
     }
   }
 
@@ -415,6 +653,10 @@ export function App() {
     setOpenSections(INITIAL_OPEN_SECTIONS);
     setSectionPages(INITIAL_SECTION_PAGES);
     setStatusMessage("Signed out.");
+    setStatusHistory([]);
+    setAuthTransitioning(false);
+    setProfileMenuOpen(false);
+    setBrandMenuOpen(false);
   }
 
   function renderPaging(section: SectionKey, itemCount: number) {
@@ -674,6 +916,7 @@ export function App() {
   function renderDualSectionCard(props: {
     title: string;
     section: SectionKey;
+    anchorId: string;
     leftTitle: string;
     rightTitle: string;
     leftContent: ReactNode;
@@ -684,6 +927,7 @@ export function App() {
     const {
       title,
       section,
+      anchorId,
       leftTitle,
       rightTitle,
       leftContent,
@@ -693,7 +937,7 @@ export function App() {
     } = props;
 
     return (
-      <section className="info-card info-card-wide">
+      <section className="info-card info-card-wide" id={anchorId}>
         <button className="section-toggle section-toggle-header" onClick={() => toggleSection(section)} type="button">
           <h2>{title}</h2>
         </button>
@@ -749,7 +993,7 @@ export function App() {
     const playlistColumns = splitItems(visiblePlaylists);
 
     return (
-      <section className="info-card info-card-wide">
+      <section className="info-card info-card-wide" id="playlists">
         <button className="section-toggle section-toggle-header" onClick={() => toggleSection("playlists")} type="button">
           <h2>Playlists</h2>
         </button>
@@ -814,92 +1058,224 @@ export function App() {
     );
   }
 
+  function renderLoadingScreen() {
+    const latestHistory = statusHistory.length > 0 ? statusHistory[statusHistory.length - 1] : null;
+    const loadingLabel =
+      statusMessage && !statusMessage.startsWith("Spotify login succeeded")
+        ? statusMessage
+        : latestHistory ?? "Analyzing your music...";
+
+    return (
+      <main className="app-shell">
+        <section className="loading-screen">
+          <div className="loading-graphic" aria-hidden="true">
+            <div className="loading-headphones">
+              <div className="loading-headphones-band" />
+              <div className="loading-headphones-cup loading-headphones-cup-left" />
+              <div className="loading-headphones-cup loading-headphones-cup-right" />
+            </div>
+          </div>
+          <p className="eyebrow">ListenLab</p>
+          <h1>Your music is being analyzed</h1>
+          <p className="loading-copy two-line-clamp">
+            We&apos;re pulling together your recent activity, favorites, and history-backed listening patterns.
+          </p>
+          <p className="loading-phase single-line-ellipsis">{loadingLabel}</p>
+        </section>
+      </main>
+    );
+  }
+
+  const showLoadingScreen = (authTransitioning || session?.authenticated) && !profile;
+  const heroTitle = "ListenLab";
+  const heroCopy =
+    "Connect your account and browse the listening, library, and profile details Spotify already makes available to ListenLab.";
+
+  if (showLoadingScreen) {
+    return renderLoadingScreen();
+  }
+
   return (
     <main className="app-shell">
       <section className="hero-card">
-        <div className="top-bar">
-          <div className="top-copy">
-            <p className="eyebrow">ListenLab</p>
-            <h1>Your Spotify snapshot</h1>
-            <p className="lede three-line-clamp">
-              Connect your account and browse the listening, library, and profile details Spotify
-              already makes available to ListenLab.
-            </p>
-          </div>
-
-          <div className="top-side">
-            {profile ? (
-              <section className="profile-card top-profile-card">
-                <div className="profile-header">
-                  <a
-                    className="profile-identity"
-                    href={profile.profile_url ?? undefined}
-                    rel="noreferrer"
-                    target="_blank"
-                  >
-                    {profile.image_url ? (
-                      <img
-                        alt={`${profile.display_name ?? "Spotify user"} profile`}
-                        className="profile-image"
-                        src={profile.image_url}
-                      />
-                    ) : (
-                      <div className="profile-image profile-image-fallback" aria-hidden="true">
-                        {(profile.display_name ?? "S").slice(0, 1).toUpperCase()}
-                      </div>
-                    )}
-
-                    <div>
-                      <h2 className="two-line-clamp">{profile.display_name ?? "Spotify user"}</h2>
-                      <p className="profile-username single-line-ellipsis">@{profile.username ?? "spotify-user"}</p>
-                    </div>
-                  </a>
-                </div>
-
-                <div className="profile-links">
-                  {statusMessage ? <p className="inline-status">{statusMessage}</p> : null}
-                </div>
-              </section>
-            ) : null}
-
-            <div className="actions actions-right">
-              <button className="primary-button" onClick={startLogin} type="button">
-                {session?.authenticated ? "Reconnect Spotify" : "Log in with Spotify"}
-              </button>
-              {session?.authenticated ? (
-                <button className="secondary-button" onClick={() => void logout()} type="button">
-                  Log out
-                </button>
-              ) : null}
-            </div>
-          </div>
-        </div>
-
         {!profile ? (
-          <>
-            <div className="status-panel">
-              <h2>Status</h2>
-              <p>
-                {statusMessage ||
-                  (loadingProfile
-                    ? "Loading your Spotify data..."
-                    : "Connected to Spotify. Waiting for profile data to finish loading.")}
-              </p>
+          <div className="top-bar">
+            <div className="top-copy">
+              <p className="eyebrow">ListenLab</p>
+              <h1>{heroTitle}</h1>
+              <p className="lede three-line-clamp">{heroCopy}</p>
             </div>
 
-            <div className="info-card">
-              <h2>Waiting for Spotify data</h2>
-              <p className="empty-copy">
-                Sign in to load your Spotify profile summary here. Once connected, this page will
-                show your account snapshot, recent listening, and playlists you own.
-              </p>
+            <div className="top-side">
+              <div className="profile-menu-shell" ref={profileMenuRef}>
+                <button
+                  aria-expanded={profileMenuOpen}
+                  className="profile-trigger"
+                  onClick={() => setProfileMenuOpen((current) => !current)}
+                  type="button"
+                >
+                  <img alt="Spotify logo" className="profile-image profile-image-compact" src={spotifyLogoDataUrl} />
+                  <span className="profile-trigger-copy">
+                    <span className="profile-username single-line-ellipsis">@spotify</span>
+                  </span>
+                </button>
+
+                {profileMenuOpen ? (
+                  <section className="profile-card top-profile-card profile-menu-card">
+                    <div className="profile-header">
+                      <div className="profile-identity">
+                        <img alt="Spotify logo" className="profile-image" src={spotifyLogoDataUrl} />
+                        <div>
+                          <h2 className="two-line-clamp">Spotify</h2>
+                          <p className="profile-username single-line-ellipsis">@spotify</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="actions actions-right actions-in-card">
+                      <button
+                        className="primary-button"
+                        onClick={handleAuthAction}
+                        type="button"
+                      >
+                        Log in with Spotify
+                      </button>
+                    </div>
+                  </section>
+                ) : null}
+              </div>
             </div>
-          </>
-        ) : (
+          </div>
+        ) : null}
+
+        {!profile ? null : (
+          <>
+            <nav className="jump-links jump-links-sticky" aria-label="Dashboard sections">
+              <div className="sticky-bar-left">
+                <div className="profile-menu-shell profile-menu-shell-inline" ref={brandMenuRef}>
+                  <button
+                    aria-expanded={brandMenuOpen}
+                    className="bar-trigger bar-trigger-brand"
+                    onClick={() => {
+                      setBrandMenuOpen((current) => !current);
+                      setProfileMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    ListenLab
+                  </button>
+
+                  {brandMenuOpen ? (
+                    <section className="profile-card top-profile-card profile-menu-card">
+                      <div className="profile-header">
+                        <div>
+                          <h2>ListenLab</h2>
+                          <p className="empty-copy">
+                            A local Spotify listening dashboard for exploring recent activity, favorites, albums, artists,
+                            and playlists.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="actions actions-right actions-in-card">
+                        <a className="secondary-button bar-link-button" href={githubRepoUrl} rel="noreferrer" target="_blank">
+                          View on GitHub
+                        </a>
+                      </div>
+                    </section>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="sticky-bar-center">
+                <button className="jump-link" onClick={() => openAndScrollToSection("artists", "artists")} type="button">
+                  Artists
+                </button>
+                <button className="jump-link" onClick={() => openAndScrollToSection("tracks", "tracks")} type="button">
+                  Tracks
+                </button>
+                <button className="jump-link" onClick={() => openAndScrollToSection("albums", "albums")} type="button">
+                  Albums
+                </button>
+                <button
+                  className="jump-link"
+                  onClick={() => openAndScrollToSection("playlists", "playlists")}
+                  type="button"
+                >
+                  Playlists
+                </button>
+                <button className="jump-link" onClick={() => openAndScrollToSection("recent", "activity")} type="button">
+                  Activity
+                </button>
+              </div>
+
+              <div className="sticky-bar-right">
+                <div className="profile-menu-shell profile-menu-shell-inline" ref={profileMenuRef}>
+                  <button
+                    aria-expanded={profileMenuOpen}
+                    className="bar-trigger bar-trigger-user"
+                    onClick={() => {
+                      setProfileMenuOpen((current) => !current);
+                      setBrandMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <span className="profile-username profile-username-nav single-line-ellipsis">
+                      @{profile.username ?? "spotify-user"}
+                    </span>
+                  </button>
+
+                  {profileMenuOpen ? (
+                    <section className="profile-card top-profile-card profile-menu-card">
+                      <div className="profile-header">
+                        <a
+                          className="profile-identity"
+                          href={profile.profile_url ?? undefined}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          {profile.image_url ? (
+                            <img
+                              alt={`${profile.display_name ?? "Spotify user"} profile`}
+                              className="profile-image"
+                              src={profile.image_url}
+                            />
+                          ) : (
+                            <div className="profile-image profile-image-fallback" aria-hidden="true">
+                              {(profile.display_name ?? "S").slice(0, 1).toUpperCase()}
+                            </div>
+                          )}
+
+                          <div>
+                            <h2 className="two-line-clamp">{profile.display_name ?? "Spotify user"}</h2>
+                            <p className="profile-username single-line-ellipsis">@{profile.username ?? "spotify-user"}</p>
+                          </div>
+                        </a>
+                      </div>
+
+                      <div className="actions actions-right actions-in-card">
+                        <button
+                          className="primary-button"
+                          onClick={handleAuthAction}
+                          type="button"
+                        >
+                          Reconnect Spotify
+                        </button>
+                        <button className="secondary-button" onClick={() => void logout()} type="button">
+                          Log out
+                        </button>
+                      </div>
+                    </section>
+                  ) : null}
+                </div>
+              </div>
+            </nav>
+
           <div className="dashboard-grid">
             {renderDualSectionCard({
               title: "Top Artists",
               section: "artists",
+              anchorId: "artists",
               leftTitle: "All time",
               rightTitle: "Recent",
               leftContent: renderArtistColumn(
@@ -923,6 +1299,7 @@ export function App() {
             {renderDualSectionCard({
               title: "Top Tracks",
               section: "tracks",
+              anchorId: "tracks",
               leftTitle: "All time",
               rightTitle: "Recent",
               leftContent: renderTrackColumn(
@@ -946,6 +1323,7 @@ export function App() {
             {renderDualSectionCard({
               title: "Top Albums",
               section: "albums",
+              anchorId: "albums",
               leftTitle: "All time",
               rightTitle: "Recent",
               leftContent: renderAlbumColumn(
@@ -971,6 +1349,7 @@ export function App() {
             {renderDualSectionCard({
               title: "Current Activity",
               section: "recent",
+              anchorId: "activity",
               leftTitle: "Recently played",
               rightTitle: "Recently liked",
               leftContent: renderTrackColumn(
@@ -991,6 +1370,7 @@ export function App() {
               previewItemsRight: previewItems(profile.recent_likes_tracks),
             })}
           </div>
+          </>
         )}
       </section>
     </main>

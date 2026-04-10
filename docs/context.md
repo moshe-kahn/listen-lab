@@ -57,6 +57,7 @@ Those items belong to later phases only.
 Current note:
 - the repository already includes a listening-insights style dashboard for profile, tracks, albums, artists, playlists, and recent activity
 - that dashboard is being used as product calibration and UX groundwork, not as the final overlooked-artist MVP experience
+- the dashboard now includes a loading handoff after Spotify auth plus a persistent top navigation bar for jumping between sections
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -97,10 +98,11 @@ Good result:
 
 ## Primary User Flow
 1. User logs in with Spotify.
-2. User sees a profile and listening snapshot dashboard.
-3. Backend gathers available Spotify signals and, when available locally, compares them to exported listening history for calibration.
-4. Frontend shows ranked artists, tracks, albums, playlists, and recent activity.
-5. A later milestone will add overlooked-artist analysis and playlist generation.
+2. User sees a short loading handoff while the first dashboard snapshot is prepared.
+3. User lands in a listening snapshot dashboard with sticky navigation and section-level browsing.
+4. Backend gathers available Spotify signals and, when available locally, compares them to exported listening history for calibration.
+5. Frontend shows ranked artists, tracks, albums, playlists, and recent activity.
+6. A later milestone will add overlooked-artist analysis and playlist generation.
 
 ## Data Availability Constraints
 Spotify may not expose every signal needed for perfect behavioral measurement.
@@ -113,10 +115,12 @@ Implementation should therefore assume:
 
 Additional implementation rule:
 - exported Spotify extended streaming history can be used as a calibration aid for development and power users, but formulas must remain reliable for users who only grant live Spotify API access
+- stable favorites and history-enriched sections may be cached, but recent activity should stay fresh enough to reflect current listening
 
 ## UX Priorities
 - Make the main call to action obvious.
 - Show ranked results quickly once analysis completes.
+- Use staged loading when it helps first paint happen faster.
 - Put explanation text near the artist name and score.
 - Keep the interface simple enough that the insight feels immediate.
 - Prefer clarity over dashboard complexity.

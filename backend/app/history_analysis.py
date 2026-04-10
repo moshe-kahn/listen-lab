@@ -70,6 +70,20 @@ def _history_signature(history_dir: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple((file.name, int(file.stat().st_mtime), file.stat().st_size) for file in files)
 
 
+def get_history_signature(history_dir: str) -> tuple[tuple[str, int, int], ...] | None:
+    path = Path(history_dir)
+    if not path.exists() or not path.is_dir():
+        return None
+
+    signature = _history_signature(path)
+    return signature or None
+
+
+def clear_history_insights_cache() -> None:
+    _CACHE["signature"] = None
+    _CACHE["summary"] = None
+
+
 def _iter_history_rows(history_dir: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for file_path in sorted(history_dir.glob("Streaming_History_Audio_*.json")):

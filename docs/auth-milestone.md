@@ -3,11 +3,16 @@
 ## What this milestone now includes
 - React frontend dashboard with Spotify login
 - frontend callback handling
+- frontend loading screen after successful Spotify auth
+- sticky dashboard navigation with section jump controls
 - FastAPI backend with Spotify OAuth endpoints
 - backend token exchange and session storage
 - authenticated `GET /me` snapshot endpoint
+- authenticated `GET /me/progress` timing endpoint for load debugging
+- `POST /cache/rebuild` endpoint used by reconnect to force a cold rebuild
 - dashboard sections for playlists, recent activity, top tracks, top artists, and top albums
 - optional local history calibration for artist and album rankings
+- section-level caching for live sections and persistent history-derived favorites
 
 ## Status
 - Implemented
@@ -54,10 +59,11 @@ http://127.0.0.1:8000/auth/callback
 1. Open the frontend at `http://127.0.0.1:5173`.
 2. Click `Log in with Spotify`.
 3. Complete Spotify authorization.
-4. Confirm you return to the frontend and see an authenticated session.
-5. Confirm the dashboard loads profile data from Spotify.
+4. Confirm you return to a loading screen rather than the generic signed-out dashboard shell.
+5. Confirm the dashboard loads profile data from Spotify after the loading handoff.
 6. Confirm playlists, recent activity, and top sections appear without repeated auth errors.
 7. If local history calibration is configured, confirm top artists and albums reflect exported listening history.
+8. If reconnect is used, confirm the dashboard rebuilds from a cleared cache.
 
 ## Optional local history calibration
 If you have a Spotify extended streaming history export locally, set:
@@ -67,6 +73,12 @@ SPOTIFY_HISTORY_DIR=C:\path\to\Spotify Extended Streaming History
 ```
 
 This is optional and intended for local calibration and richer artist/album ranking. The product should still work for users who only provide live Spotify API access.
+
+## Runtime cache notes
+- Short-lived dashboard caches and persistent history-ranked favorites are stored under `backend/data/cache/` at runtime.
+- `history_sections.json` stores the final cached history-ranked payload, not just raw inputs.
+- `dashboard-progress.log` records load timing phases for debugging local performance.
+- These files are runtime artifacts and should not be committed.
 
 ## Known next step
 - turn the current snapshot dashboard into the final overlooked-artist analysis experience with explanation-first ranking

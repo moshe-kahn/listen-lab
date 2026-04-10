@@ -19,6 +19,7 @@ class Settings:
     session_secret: str
     allowed_origin: str
     spotify_history_dir: str
+    cache_dir: str
     spotify_scope: str = (
         "user-read-email user-read-private user-read-recently-played playlist-read-private user-follow-read user-library-read user-top-read"
     )
@@ -52,4 +53,5 @@ def get_settings() -> Settings:
             "SPOTIFY_HISTORY_DIR",
             "C:\\Users\\kahnt\\OneDrive\\Programming\\Projects\\ListenLab\\Spotify Extended Streaming History",
         ),
+        cache_dir=_read_env("CACHE_DIR", str(BACKEND_DIR / "data" / "cache")),
     )

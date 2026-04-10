@@ -28,6 +28,8 @@ This repository now includes:
 - FastAPI backend with Spotify OAuth and session-based auth
 - live profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums views
 - local history-based artist and album ranking calibration using exported Spotify extended streaming history
+- section-level caching for live data, history-derived favorites, and history enrichment
+- a post-login loading handoff plus sticky dashboard navigation and account/project popovers
 
 The core overlooked-artist analysis flow and playlist generation are still not implemented.
 
@@ -48,6 +50,7 @@ ListenLab is built around **"signal over suggestion"**:
 - [Architecture](docs/architecture.md)
 - [Context](docs/context.md)
 - [Roadmap](docs/roadmap.md)
+- [Formula Calibration](docs/formula-calibration.md)
 - [Auth Milestone Notes](docs/auth-milestone.md)
 
 ---
@@ -68,6 +71,7 @@ Build toward a web app that:
 
 - Spotify is the source of truth for live account data
 - local exported history can be used for scoring calibration, not as a required product dependency
+- recent sections should stay fresh while stable favorites can come from cache
 - analysis runs on demand
 - no database in MVP
 - local development first, simple cloud deployment later

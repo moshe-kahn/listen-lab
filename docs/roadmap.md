@@ -186,6 +186,7 @@ Improve quality until the MVP feels obviously trustworthy on real accounts.
 ### Deliverables
 - score tuning against real-user test accounts
 - formula calibration using exported Spotify extended streaming history when available
+- documented live-only scoring formulas derived from calibration work
 - copy improvements for explanations and UI labels
 - bug fixes for edge cases in data aggregation and session handling
 - local deployment checklist and cloud deployment notes

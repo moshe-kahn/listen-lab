@@ -9,6 +9,8 @@ This document is the implementation-oriented technical source of truth for the L
 - Spotify OAuth login, callback handling, session persistence, and authenticated `GET /me` profile loading are implemented.
 - The dashboard currently renders profile identity, playlists, recent listening, liked tracks, top tracks, top artists, and top albums.
 - A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
+- The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
+- Backend section-level caching is implemented for moderate-freshness live sections and long-lived history-derived favorites.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
@@ -37,18 +39,23 @@ This document is the implementation-oriented technical source of truth for the L
 ### Implemented today
 - frontend authenticated dashboard shell
 - frontend callback handling
+- frontend loading handoff after Spotify auth
+- frontend persistent sticky navigation with project/account popovers
 - backend OAuth endpoints
 - backend token exchange and session storage
 - authenticated `GET /me` snapshot endpoint
+- authenticated `GET /me/progress` timing endpoint for debugging load phases
+- authenticated `POST /cache/rebuild` endpoint for clearing dashboard caches before reconnect
 - best-effort live Spotify data fetches for profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums
 - optional local history-based artist and album ranking calibration
+- section-level caching for live sections and persistent history-based favorites
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
 2. The backend runs OAuth with Spotify and stores session state for the logged-in user.
 3. The frontend calls `GET /auth/session` and `GET /me`.
-4. The backend fetches Spotify profile and listening-related data, and optionally merges in rankings from a local Spotify extended streaming history export.
-5. The frontend renders the dashboard snapshot.
+4. The backend fetches fresh recent sections, short-cache live ranking sections, and optionally serves persistent history-derived favorites when valid.
+5. The frontend first renders a loading handoff, then the dashboard snapshot, then optionally fills in the extended view.
 6. A later milestone will add `POST /analysis` and `POST /playlist`.
 
 ## Recommended Project Layout
@@ -80,6 +87,7 @@ docs/
 The React SPA is responsible for:
 - showing authenticated vs unauthenticated states
 - starting the Spotify login flow
+- showing a dedicated loading state while the first dashboard snapshot is computed
 - providing an "Analyze my listening" action
 - rendering ranked overlooked artists
 - rendering explanation text and signal breakdowns
@@ -97,6 +105,7 @@ The FastAPI backend is responsible for:
 - Spotify OAuth start and callback handling
 - secure session management for the active user
 - fetching Spotify data from required and optional endpoints
+- splitting dashboard sections by freshness and cache policy
 - normalizing source data into artist-level aggregates
 - computing engagement scores through a dedicated scoring service
 - generating plain-language explanations
@@ -113,11 +122,36 @@ The FastAPI backend is responsible for:
 - Use server-side in-memory session storage keyed by a signed session cookie.
 - Store Spotify access token, refresh token, expiry metadata, and minimal user identity in the session.
 - Assume a single backend instance for MVP and early cloud deployment.
+- Use local filesystem cache files only for dashboard caches and history-derived favorites, not as a user database.
 
 ### Implications
 - Sessions may be lost on server restart in local development.
 - Horizontal scaling is out of scope for MVP.
 - Moving to Redis or a database-backed session store is a future enhancement, not an MVP requirement.
+- Persistent dashboard caches should be treated as disposable runtime artifacts and can be rebuilt.
+
+## Dashboard Cache Strategy
+### Fresh sections
+- recently played tracks
+- recently liked tracks
+- other current-activity style sections
+
+### Short-cache sections
+- live top tracks
+- live top artists
+- live top albums
+- playlist summaries
+- followed-artist totals
+
+### Persistent cache sections
+- history-calibrated artist favorites
+- history-calibrated album favorites
+- stable image and URL enrichment for those history-ranked results
+
+### Invalidation
+- Short-cache entries expire by TTL.
+- Persistent history cache is invalidated when the Spotify exported-history file signature changes or when `POST /cache/rebuild` is called.
+- Generated cache files under `backend/data/cache/` are runtime artifacts and should not be committed.
 
 ## Internal Service Boundaries
 ### Spotify client or adapters
@@ -194,6 +228,22 @@ Implemented data today:
 - top artists
 - top albums
 - optional `history_insights_available` flag when local exported history is being used to rank artists and albums
+- `mode=initial` for first-paint snapshot and `mode=extended` for larger background payloads
+
+### `GET /me/progress`
+Purpose:
+- Return in-flight dashboard load timing information for the active session.
+
+Notes:
+- Used for debugging and load instrumentation.
+- Progress is also appended to a local runtime log file under `backend/data/cache/dashboard-progress.log`.
+
+### `POST /cache/rebuild`
+Purpose:
+- Clear short-lived dashboard caches and persistent history-derived caches.
+
+Notes:
+- Used by the reconnect flow to force a cold-cache dashboard rebuild.
 
 ### `POST /analysis`
 Purpose:
@@ -342,6 +392,7 @@ Fields:
 - When `SPOTIFY_HISTORY_DIR` points to a valid Spotify extended streaming history export, the backend loads the local JSON files and derives artist and album rankings from them.
 - This path is meant to calibrate formulas and support power-user local development.
 - It must not become a hard dependency for the MVP, because most users will only provide live Spotify API access.
+- Final history-ranked sections are cached as payloads so they can be reused without reparsing the export on every load.
 
 ### Two scoring paths
 #### Rich-signal path
