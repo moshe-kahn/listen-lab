@@ -21,7 +21,9 @@ class Settings:
     spotify_history_dir: str
     cache_dir: str
     spotify_scope: str = (
-        "user-read-email user-read-private user-read-recently-played playlist-read-private user-follow-read user-library-read user-top-read"
+        "user-read-email user-read-private user-read-recently-played playlist-read-private "
+        "user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
+        "user-read-playback-state user-read-currently-playing"
     )
 
     @property

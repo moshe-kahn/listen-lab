@@ -27,11 +27,19 @@ This repository now includes:
 - React dashboard for authenticated Spotify snapshots
 - FastAPI backend with Spotify OAuth and session-based auth
 - live profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums views
+- playback controls and session-aware player UI
+- restricted local mode, full mode, and a test path for probing Spotify availability
 - local history-based artist and album ranking calibration using exported Spotify extended streaming history
-- section-level caching for live data, history-derived favorites, and history enrichment
-- a post-login loading handoff plus sticky dashboard navigation and account/project popovers
+- section-level caching for live data, history-derived favorites, history enrichment, and saved Spotify-only sections
+- on-disk local analysis cache plus shared static metadata cache for artist and album artwork
+- a post-login loading handoff plus sticky dashboard navigation, account/project popovers, and multiple dashboard UI polish passes
 
 The core overlooked-artist analysis flow and playlist generation are still not implemented.
+
+Known gaps still being worked:
+- album ranking and album breadth counts still need correction in some cases
+- some local-mode artist and album images still fail to persist or hydrate reliably
+- recent album lists can still become too sparse for certain accounts and windows
 
 ---
 
@@ -61,6 +69,7 @@ Build toward a web app that:
 - connects to a user's Spotify account
 - builds reliable artist and album signals from live Spotify data
 - calibrates scoring heuristics against exported listening history when available
+- remains usable in a local cached mode when Spotify is unavailable or rate-limited
 - eventually ranks overlooked artists by actual engagement
 - explains why each result was surfaced
 - optionally creates a playlist from those artists
@@ -70,8 +79,8 @@ Build toward a web app that:
 ## Implementation Defaults
 
 - Spotify is the source of truth for live account data
-- local exported history can be used for scoring calibration, not as a required product dependency
-- recent sections should stay fresh while stable favorites can come from cache
+- local exported history can be used for scoring calibration and local-mode fallback, not as a required product dependency
+- recent sections should stay fresh while stable favorites and saved Spotify-only sections can come from cache
 - analysis runs on demand
-- no database in MVP
+- no standalone application database in MVP beyond local cache files
 - local development first, simple cloud deployment later

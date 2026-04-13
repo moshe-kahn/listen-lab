@@ -9,6 +9,7 @@ This roadmap translates the product brief into buildable engineering milestones.
 - Spotify is the source of truth.
 - MVP uses no persistent database.
 - Local development comes first, with a simple cloud deployment path later.
+- The current dashboard also supports local cached operation when Spotify is rate-limited or intentionally disabled.
 
 ## MVP Boundary
 The MVP includes:
@@ -83,6 +84,13 @@ Ship a trustworthy authenticated dashboard that exposes the raw listening signal
 - a user can log in and see a stable dashboard without using developer tools
 - UI layout remains aligned even with variable content lengths
 - the dashboard gracefully degrades when Spotify data is partial
+
+### Implemented additions beyond the original milestone
+- local mode, full mode, and test-mode switching for Spotify availability handling
+- local snapshot fallback for selected Spotify-only sections
+- on-disk cache layers for local history insights, per-user recent sections, and shared static metadata
+- playback controls and related player UI states
+- multiple dashboard and popover usability refinements
 
 ## Milestone 3 - Data Collection and Artist Aggregation
 ### Purpose
@@ -195,6 +203,15 @@ Improve quality until the MVP feels obviously trustworthy on real accounts.
 - results feel consistently credible across multiple accounts
 - explanation text reads clearly
 - the team has enough setup guidance to run and demo the app reliably
+
+## Immediate Follow-Ups
+These are active issues discovered during current dashboard work and should be treated as near-term tasks before more product expansion.
+
+- Fix album ranking so recent 4-week and 6-month album lists do not collapse to a single entry when broader listening exists.
+- Fix album breadth counting so duplicate track variants do not inflate album track totals.
+- Specifically fix the incorrect history count still shown for "Chronicles of a Diamond."
+- Improve local-mode image persistence so artist and album artwork remains available after switching out of full mode.
+- Continue tightening documentation and instrumentation around cache behavior and local-mode freshness.
 
 ## Post-MVP Backlog
 These items are explicitly deferred until after the MVP is stable.

@@ -58,6 +58,7 @@ Current note:
 - the repository already includes a listening-insights style dashboard for profile, tracks, albums, artists, playlists, and recent activity
 - that dashboard is being used as product calibration and UX groundwork, not as the final overlooked-artist MVP experience
 - the dashboard now includes a loading handoff after Spotify auth plus a persistent top navigation bar for jumping between sections
+- the dashboard also supports a restricted local mode so saved history- and cache-backed sections remain usable when Spotify is unavailable or rate-limited
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -101,8 +102,9 @@ Good result:
 2. User sees a short loading handoff while the first dashboard snapshot is prepared.
 3. User lands in a listening snapshot dashboard with sticky navigation and section-level browsing.
 4. Backend gathers available Spotify signals and, when available locally, compares them to exported listening history for calibration.
-5. Frontend shows ranked artists, tracks, albums, playlists, and recent activity.
-6. A later milestone will add overlooked-artist analysis and playlist generation.
+5. Frontend shows ranked artists, tracks, albums, playlists, recent activity, and playback controls where available.
+6. If Spotify is limited or intentionally disabled, the frontend can fall back to local cached sections and clearly indicate when cached data may be stale.
+7. A later milestone will add overlooked-artist analysis and playlist generation.
 
 ## Data Availability Constraints
 Spotify may not expose every signal needed for perfect behavioral measurement.
@@ -116,6 +118,7 @@ Implementation should therefore assume:
 Additional implementation rule:
 - exported Spotify extended streaming history can be used as a calibration aid for development and power users, but formulas must remain reliable for users who only grant live Spotify API access
 - stable favorites and history-enriched sections may be cached, but recent activity should stay fresh enough to reflect current listening
+- once static artist or album metadata such as names, covers, and Spotify URLs is observed, it should be reusable from shared cache rather than treated as per-user state
 
 ## UX Priorities
 - Make the main call to action obvious.
@@ -139,3 +142,10 @@ The MVP succeeds when:
 - Keep scoring weights configurable in code, not in the public UI.
 - Keep the backend as the owner of ranking, filtering, and explanation generation.
 - Keep Spotify as the source of truth rather than copying user data into app storage.
+- Use local runtime caches and snapshot files to preserve usability during rate limits or local-only sessions.
+
+## Current Follow-Ups
+- Fix album breadth/counting so albums do not overcount duplicate or alternate track variants.
+- Fix the incorrect track count still shown for "Chronicles of a Diamond."
+- Improve local-mode image persistence and hydration so artist and album artwork survives mode switches more reliably.
+- Improve recent album ranking so 4-week and 6-month windows do not collapse to overly sparse results.

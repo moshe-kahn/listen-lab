@@ -5,6 +5,8 @@
 - frontend callback handling
 - frontend loading screen after successful Spotify auth
 - sticky dashboard navigation with section jump controls
+- local/full/test mode controls for Spotify availability and rate-limit fallback
+- playback controls and player-state UI
 - FastAPI backend with Spotify OAuth endpoints
 - backend token exchange and session storage
 - authenticated `GET /me` snapshot endpoint
@@ -13,6 +15,7 @@
 - dashboard sections for playlists, recent activity, top tracks, top artists, and top albums
 - optional local history calibration for artist and album rankings
 - section-level caching for live sections and persistent history-derived favorites
+- saved local snapshots for Spotify-only sections plus shared static metadata cache for artwork and URLs
 
 ## Status
 - Implemented
@@ -77,8 +80,13 @@ This is optional and intended for local calibration and richer artist/album rank
 ## Runtime cache notes
 - Short-lived dashboard caches and persistent history-ranked favorites are stored under `backend/data/cache/` at runtime.
 - `history_sections.json` stores the final cached history-ranked payload, not just raw inputs.
+- `local_history_insights.json` stores precomputed local-analysis payloads keyed by history signature and window.
+- `user_recent_sections.json` stores per-user recent-section snapshots used for fallback behavior.
+- `user_profile_snapshots.json` stores selected saved Spotify-only sections for local-mode browsing.
+- `spotify_static_metadata.json` stores shared static artist, album, and track metadata for reuse across users.
 - `dashboard-progress.log` records load timing phases for debugging local performance.
 - These files are runtime artifacts and should not be committed.
 
 ## Known next step
 - turn the current snapshot dashboard into the final overlooked-artist analysis experience with explanation-first ranking
+- fix outstanding album-ranking and local-image hydration bugs uncovered during the dashboard expansion work

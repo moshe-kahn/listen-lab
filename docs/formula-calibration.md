@@ -63,6 +63,7 @@ Examples from the calibration run:
 Conclusion:
 - album ranking should prioritize distinct-track breadth more heavily than single-track dominance
 - recent album formulas should emphasize recent breadth and recent repeated listening together
+- duplicate track variants and alternate Spotify track IDs must not inflate album breadth counts
 
 ### Recent Windows
 For exported history, `recent` should be anchored to the latest timestamp in the export, not the current machine date.
@@ -206,3 +207,8 @@ Use live-only formulas for:
 - the actual product path
 - all default user scoring
 - future overlooked-artist ranking
+
+## Active Calibration Gaps
+- The current album implementation still has correctness gaps in breadth counting for some albums.
+- "Chronicles of a Diamond" is still a known bad example where album track breadth is overstated.
+- Recent album ranking for 4-week and 6-month windows can still become too sparse and needs another calibration pass.

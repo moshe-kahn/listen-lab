@@ -8,9 +8,10 @@ This document is the implementation-oriented technical source of truth for the L
 - The repository includes a React dashboard and FastAPI backend running locally.
 - Spotify OAuth login, callback handling, session persistence, and authenticated `GET /me` profile loading are implemented.
 - The dashboard currently renders profile identity, playlists, recent listening, liked tracks, top tracks, top artists, and top albums.
+- The dashboard also includes playback controls plus a local/full/test mode model for working through Spotify rate limits and local-only sessions.
 - A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
 - The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
-- Backend section-level caching is implemented for moderate-freshness live sections and long-lived history-derived favorites.
+- Backend section-level caching is implemented for moderate-freshness live sections, long-lived history-derived favorites, shared static Spotify metadata, and saved user snapshot sections for local mode.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
@@ -41,6 +42,8 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend callback handling
 - frontend loading handoff after Spotify auth
 - frontend persistent sticky navigation with project/account popovers
+- frontend playback controls and player state presentation
+- frontend local/full/test mode controls with cached-state indicators
 - backend OAuth endpoints
 - backend token exchange and session storage
 - authenticated `GET /me` snapshot endpoint
@@ -49,14 +52,16 @@ This document is the implementation-oriented technical source of truth for the L
 - best-effort live Spotify data fetches for profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums
 - optional local history-based artist and album ranking calibration
 - section-level caching for live sections and persistent history-based favorites
+- on-disk local analysis cache, per-user snapshot cache, and shared static metadata cache for artists, albums, and tracks
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
 2. The backend runs OAuth with Spotify and stores session state for the logged-in user.
 3. The frontend calls `GET /auth/session` and `GET /me`.
-4. The backend fetches fresh recent sections, short-cache live ranking sections, and optionally serves persistent history-derived favorites when valid.
+4. The backend fetches fresh recent sections, short-cache live ranking sections, and optionally serves persistent history-derived favorites or local snapshot sections when valid.
 5. The frontend first renders a loading handoff, then the dashboard snapshot, then optionally fills in the extended view.
-6. A later milestone will add `POST /analysis` and `POST /playlist`.
+6. When Spotify is unavailable or the user explicitly chooses local mode, the backend returns a locally assembled payload backed by history and cached Spotify-derived metadata.
+7. A later milestone will add `POST /analysis` and `POST /playlist`.
 
 ## Recommended Project Layout
 This layout should be used when scaffolding the repository:
@@ -122,7 +127,7 @@ The FastAPI backend is responsible for:
 - Use server-side in-memory session storage keyed by a signed session cookie.
 - Store Spotify access token, refresh token, expiry metadata, and minimal user identity in the session.
 - Assume a single backend instance for MVP and early cloud deployment.
-- Use local filesystem cache files only for dashboard caches and history-derived favorites, not as a user database.
+- Use local filesystem cache files only for dashboard caches, shared static metadata, local analysis payloads, and user snapshot fallbacks, not as a general-purpose user database.
 
 ### Implications
 - Sessions may be lost on server restart in local development.
@@ -147,10 +152,14 @@ The FastAPI backend is responsible for:
 - history-calibrated artist favorites
 - history-calibrated album favorites
 - stable image and URL enrichment for those history-ranked results
+- local history insights keyed by history signature and time window
+- per-user saved Spotify-only sections used by local mode
+- shared static Spotify metadata for artists, albums, and tracks
 
 ### Invalidation
 - Short-cache entries expire by TTL.
 - Persistent history cache is invalidated when the Spotify exported-history file signature changes or when `POST /cache/rebuild` is called.
+- Shared static metadata is schema-versioned, fail-safe on corrupt JSON, and bounded per bucket with deterministic trim rules.
 - Generated cache files under `backend/data/cache/` are runtime artifacts and should not be committed.
 
 ## Internal Service Boundaries
@@ -228,6 +237,7 @@ Implemented data today:
 - top artists
 - top albums
 - optional `history_insights_available` flag when local exported history is being used to rank artists and albums
+- optional local-mode metadata such as cached-section status and last-sync timestamps
 - `mode=initial` for first-paint snapshot and `mode=extended` for larger background payloads
 
 ### `GET /me/progress`
@@ -387,12 +397,20 @@ Fields:
 - saved albums from `/me/albums` in later milestones
 - local extended streaming history export for calibration and richer artist/album ranking
 - best-effort album enrichment through lightweight Spotify album search when history-ranked albums need images and URLs
+- playback state and related controls when Spotify allows active player access
 
 ### Local history calibration path
 - When `SPOTIFY_HISTORY_DIR` points to a valid Spotify extended streaming history export, the backend loads the local JSON files and derives artist and album rankings from them.
 - This path is meant to calibrate formulas and support power-user local development.
 - It must not become a hard dependency for the MVP, because most users will only provide live Spotify API access.
 - Final history-ranked sections are cached as payloads so they can be reused without reparsing the export on every load.
+- The same local-history path now also supports restricted local mode, where navigation stays available without making new Spotify requests.
+
+## Known Open Issues
+- Album breadth and eligibility still need refinement; some albums remain undercounted or overcounted depending on the path.
+- The history-derived count for "Chronicles of a Diamond" is still incorrect and must be fixed before album rankings are considered reliable.
+- Local mode still loses too many artist and album images on some transitions, which means snapshot and static-cache hydration is incomplete.
+- Recent album lists for 4-week and 6-month views can still collapse to only one item for some accounts.
 
 ### Two scoring paths
 #### Rich-signal path
