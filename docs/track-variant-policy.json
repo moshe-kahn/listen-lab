@@ -1,0 +1,409 @@
+{
+  "model_version": 3,
+  "description": "Conservative track variant family policy draft using normalized confidence scores and a separate semantic layer.",
+  "confidence_scale": {
+    "same_recording_or_song_family": 1.0,
+    "same_song_family_meaningfully_different_listening_object": 0.8,
+    "do_not_default_into_same_song_family": 0.0
+  },
+  "families": [
+    {
+      "family": "remaster",
+      "same_composition_default": true,
+      "base_confidence": 1.0,
+      "separate_default": false,
+      "needs_review": false,
+      "semantic_category": "mastering_or_reissue_label",
+      "notes": "Usually the same composition and same core recording lineage with different mastering."
+    },
+    {
+      "family": "live",
+      "same_composition_default": true,
+      "base_confidence": 0.8,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "performance_context",
+      "example_labels": ["live", "live 1977", "live at the bbc, london / 1975"],
+      "notes": "Same composition, but often meaningfully different performance context for analysis."
+    },
+    {
+      "family": "acoustic",
+      "same_composition_default": true,
+      "base_confidence": 0.8,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "arrangement_change",
+      "example_labels": ["acoustic", "stripped", "acoustic demo version"],
+      "notes": "Often the same composition, but arrangement may matter for some analyses."
+    },
+    {
+      "family": "demo",
+      "same_composition_default": true,
+      "base_confidence": 0.75,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "recording_state",
+      "example_labels": ["demo", "home demo", "acoustic demo version"],
+      "notes": "Usually the same composition, but rough/demo-state recordings may deserve separate treatment in some views."
+    },
+    {
+      "family": "instrumental",
+      "same_composition_default": true,
+      "base_confidence": 0.8,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "arrangement_or_vocal_subtraction",
+      "example_labels": ["instrumental", "instrumental version", "instrumental album version"],
+      "notes": "Same composition, but missing vocals can materially change genre or taste analysis."
+    },
+    {
+      "family": "version",
+      "same_composition_default": false,
+      "base_confidence": 0.55,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "version_label_umbrella",
+      "example_labels": ["single version", "original version", "Natureboy Flako Version"],
+      "notes": "More ambiguous than previously labeled. Generic labels like single version may be same-composition, but attributed versions can behave more like remixes or alternate arrangements.",
+      "subtypes": [
+        {
+          "observed_subfamily": "generic_version",
+          "example_labels": ["single version", "album version", "extended version", "short version", "full version", "radio version", "version"],
+          "semantic_category": "packaging_version",
+          "notes": "Usually editorial or release-format labeling rather than a deeply different creative object."
+        },
+        {
+          "observed_subfamily": "generic_version",
+          "example_labels": ["clean version", "explicit version", "mono version", "stereo version"],
+          "semantic_category": "content_or_format_version",
+          "notes": "Same composition, but altered presentation or format."
+        },
+        {
+          "observed_subfamily": "generic_version",
+          "example_labels": ["instrumental version"],
+          "semantic_category": "arrangement_version",
+          "notes": "Same composition, but arrangement or presentation is meaningfully different."
+        },
+        {
+          "observed_subfamily": "generic_version",
+          "example_labels": ["original version"],
+          "semantic_category": "generic_originality_label",
+          "notes": "Usually points back to a base version, but still vague without more context."
+        },
+        {
+          "observed_subfamily": "alternate_version",
+          "example_labels": ["alternate version"],
+          "semantic_category": "alternate_take_or_arrangement",
+          "notes": "Broad different-from-main-issue bucket; usually still the same composition and often safe to group conservatively."
+        },
+        {
+          "observed_subfamily": "performance_style_version",
+          "example_labels": ["solo version", "orchestral version"],
+          "semantic_category": "arrangement_version",
+          "notes": "Same composition, clearly different arrangement or performance style."
+        },
+        {
+          "observed_subfamily": "rerecorded_version",
+          "example_labels": ["re-recorded version", "rerecorded 2014 version"],
+          "semantic_category": "recording_lineage_change",
+          "notes": "Same composition, but not the same recording lineage."
+        },
+        {
+          "observed_subfamily": "year_version",
+          "example_labels": ["1975 version", "2000 version"],
+          "semantic_category": "dated_revision",
+          "notes": "Year-labeled revisions are ambiguous and should usually stay review-heavy."
+        },
+        {
+          "observed_subfamily": "remaster_version",
+          "example_labels": ["remastered version", "2006 remastered version"],
+          "semantic_category": "mastering_or_reissue_label",
+          "notes": "Often belongs near remaster, but appears through the overloaded version wording."
+        },
+        {
+          "observed_subfamily": "attributed_or_named_version",
+          "example_labels": ["Natureboy Flako Version", "Djungelns Lag Version", "Lamentations Version"],
+          "semantic_category": "attributed_derived_version",
+          "notes": "Often closer to remix or edit logic than to harmless packaging."
+        },
+        {
+          "observed_subfamily": "other_version",
+          "example_labels": ["version 2 of 2", "soundtrack version", "studio version duet"],
+          "semantic_category": "ambiguous_version_misc",
+          "notes": "Catch-all for remaining version phrasing that needs further splitting."
+        }
+      ]
+    },
+    {
+      "family": "edit",
+      "same_composition_default": false,
+      "base_confidence": 0.55,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "edit_label_umbrella",
+      "example_labels": ["edit", "single edit", "radio edit", "Local Natives Edit"],
+      "notes": "Generic edits may be same-composition; attributed edits may behave like remixes. Needs more signals.",
+      "subtypes": [
+        {
+          "observed_subfamily": "generic_edit",
+          "example_labels": ["edit", "album edit", "extended edit", "single edit", "video edit"],
+          "semantic_category": "packaging_edit",
+          "notes": "Often shortened or reissued for format or radio purposes."
+        },
+        {
+          "observed_subfamily": "radio_edit",
+          "example_labels": ["radio edit", "tribal radio edit"],
+          "semantic_category": "broadcast_length_or_content_edit",
+          "notes": "Usually same composition, but not always trivial."
+        },
+        {
+          "observed_subfamily": "attributed_edit",
+          "example_labels": ["Local Natives Edit", "Arnold Palmer Edit"],
+          "semantic_category": "attributed_derived_version",
+          "notes": "Often behaves much closer to remix logic."
+        },
+        {
+          "observed_subfamily": "compound_edit",
+          "example_labels": ["glassforms version edit", "studio edit"],
+          "semantic_category": "ambiguous_edit_misc",
+          "notes": "Mixed phrasing that likely needs artist-credit or context signals."
+        }
+      ]
+    },
+    {
+      "family": "remix",
+      "same_composition_default": false,
+      "base_confidence": 0.0,
+      "separate_default": true,
+      "needs_review": false,
+      "semantic_category": "attributed_derived_version",
+      "notes": "Usually a distinct derived version and should stay separate by default."
+    },
+    {
+      "family": "rework",
+      "same_composition_default": false,
+      "base_confidence": 0.0,
+      "separate_default": true,
+      "needs_review": false,
+      "semantic_category": "attributed_derived_version",
+      "notes": "Same reasoning as remix."
+    },
+    {
+      "family": "cover",
+      "same_composition_default": false,
+      "base_confidence": 0.0,
+      "separate_default": true,
+      "needs_review": false,
+      "semantic_category": "different_recording_identity",
+      "notes": "Separate recording and usually separate artist identity, but should later connect via relationship edges."
+    },
+    {
+      "family": "mix",
+      "same_composition_default": false,
+      "base_confidence": 0.5,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "mix_label_umbrella",
+      "example_labels": ["original mix", "radio mix", "ambient mix", "Spike Stent Mix"],
+      "notes": "Original mix may be same-composition; other mix labels can imply materially different versions.",
+      "subtypes": [
+        {
+          "observed_subfamily": "original_mix",
+          "example_labels": ["original mix"],
+          "semantic_category": "base_release_mix_label",
+          "notes": "Often same composition and near-base issue within dance or electronic catalogs."
+        },
+        {
+          "observed_subfamily": "radio_mix",
+          "example_labels": ["radio mix"],
+          "semantic_category": "broadcast_mix_treatment",
+          "notes": "Usually a broadcast-oriented treatment of the same mix lineage and often safe to group within that lineage."
+        },
+        {
+          "observed_subfamily": "presentation_mix",
+          "example_labels": ["stereo mix", "mono mix", "new stereo mix", "2021 stereo mix"],
+          "semantic_category": "format_or_presentation_change",
+          "notes": "Usually a presentation or channel-layout change rather than a distinct creative remix lineage."
+        },
+        {
+          "observed_subfamily": "generic_mix",
+          "example_labels": ["extended mix", "ambient mix"],
+          "semantic_category": "mix_treatment",
+          "notes": "Usually same composition, but meaningfully different listening object."
+        },
+        {
+          "observed_subfamily": "attributed_mix",
+          "example_labels": ["Spike Stent Mix", "Iggy Mix"],
+          "semantic_category": "attributed_derived_version",
+          "notes": "Strong producer or mixer identity; often remix-adjacent."
+        },
+        {
+          "observed_subfamily": "misc_mix",
+          "example_labels": ["mixed", "mixtape"],
+          "semantic_category": "ambiguous_mix_misc",
+          "notes": "Needs more careful handling."
+        }
+      ]
+    },
+    {
+      "family": "session",
+      "same_composition_default": true,
+      "base_confidence": 0.78,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "special_recording_context",
+      "example_labels": ["mahogany sessions", "john peel session", "spotify session 2015"],
+      "notes": "Usually the same composition in a special recording context; may be sibling-level rather than canonical-equal."
+    },
+    {
+      "family": "recording_context",
+      "same_composition_default": true,
+      "base_confidence": 0.82,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "capture_context",
+      "example_labels": ["recorded at spotify studios nyc", "live from spotify nyc", "studio"],
+      "notes": "Labels like recorded at Spotify Studios usually look same-composition, but context may matter analytically."
+    },
+    {
+      "family": "featured_credit",
+      "same_composition_default": true,
+      "base_confidence": 0.88,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "credit_annotation_or_collab_delta",
+      "example_labels": ["feat. guest", "featuring pharoe monch", "with ..."],
+      "notes": "Same composition if the suffix is just a credit annotation; extra credited artists may also signal a derived version."
+    },
+    {
+      "family": "packaging",
+      "same_composition_default": true,
+      "base_confidence": 0.95,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "release_packaging",
+      "example_labels": ["bonus track", "bonus", "expanded"],
+      "notes": "Bonus track and similar packaging labels usually should not split the composition."
+    },
+    {
+      "family": "content_rating",
+      "same_composition_default": true,
+      "base_confidence": 0.97,
+      "separate_default": false,
+      "needs_review": false,
+      "semantic_category": "content_or_format_version",
+      "notes": "Clean and explicit are usually packaging or content variants of the same composition."
+    },
+    {
+      "family": "format",
+      "same_composition_default": true,
+      "base_confidence": 0.85,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "format_or_presentation_change",
+      "example_labels": ["mono version", "stereo version", "mono"],
+      "notes": "Mono or stereo often belong together compositionally, but listening-character differences may matter downstream."
+    },
+    {
+      "family": "score_soundtrack",
+      "same_composition_default": false,
+      "base_confidence": 0.55,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "placement_or_context_label",
+      "example_labels": ["from \"...\"", "soundtrack version", "score"],
+      "notes": "Often context-only labeling, but sometimes attached to alternate recordings or soundtrack-specific versions.",
+      "subtypes": [
+        {
+          "observed_subfamily": "placement_context_label",
+          "example_labels": ["from \"better call saul\"", "from \"london suite\"", "from the original motion picture soundtrack \"n.y. is red hot\""],
+          "semantic_category": "placement_or_context_label",
+          "notes": "Usually contextual placement metadata rather than a distinct recording identity."
+        },
+        {
+          "observed_subfamily": "score_cue_context",
+          "example_labels": ["from \"eternal sunshine of the spotless mind\"/score", "score"],
+          "semantic_category": "score_or_cue_context",
+          "notes": "More ambiguous soundtrack or cue-context wording that may point to a soundtrack-specific object."
+        }
+      ]
+    },
+    {
+      "family": "structural",
+      "same_composition_default": false,
+      "base_confidence": 0.0,
+      "separate_default": true,
+      "needs_review": false,
+      "semantic_category": "distinct_track_form",
+      "notes": "Intro, interlude, pt. 1, skit usually indicate distinct track forms rather than simple variants."
+    },
+    {
+      "family": "featured_credit_inline",
+      "same_composition_default": true,
+      "base_confidence": 0.88,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "inline_credit_annotation",
+      "example_labels": ["(feat. ...)", "with ..."],
+      "notes": "Not currently extracted as a suffix family; inline feat. or with in the main title may need separate handling."
+    },
+    {
+      "family": "bonus",
+      "same_composition_default": true,
+      "base_confidence": 0.95,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "release_packaging",
+      "example_labels": ["bonus", "bonus track"],
+      "notes": "Legacy exact-label term; folds into packaging."
+    },
+    {
+      "family": "commentary",
+      "same_composition_default": false,
+      "base_confidence": 0.0,
+      "separate_default": true,
+      "needs_review": false,
+      "semantic_category": "spoken_context_track",
+      "notes": "Spoken or commentary tracks should stay separate."
+    },
+    {
+      "family": "wellness_frequency",
+      "same_composition_default": false,
+      "base_confidence": 0.0,
+      "separate_default": true,
+      "needs_review": false,
+      "semantic_category": "wellness_or_frequency_program",
+      "notes": "Frequency, sleep, and meditation variants behave like distinct listening objects."
+    },
+    {
+      "family": "year_tag",
+      "same_composition_default": true,
+      "base_confidence": 0.68,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "dated_revision_or_reissue_marker",
+      "example_labels": ["2020", "1975 version"],
+      "notes": "Bare year suffixes are often contextual dating metadata and usually safe to group conservatively, but should stay review-weighted."
+    },
+    {
+      "family": "performance_style",
+      "same_composition_default": true,
+      "base_confidence": 0.72,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "arrangement_change",
+      "example_labels": ["solo version", "orchestral version", "duet"],
+      "notes": "Piano solo, orchestral, duet often imply same composition but materially different arrangement."
+    },
+    {
+      "family": "other",
+      "same_composition_default": false,
+      "base_confidence": 0.25,
+      "separate_default": false,
+      "needs_review": true,
+      "semantic_category": "unclassified_long_tail",
+      "example_labels": ["misc long-tail labels"],
+      "notes": "Long-tail bucket; do not auto-group by family alone."
+    }
+  ]
+}

@@ -231,6 +231,8 @@ These are active issues discovered during current dashboard work and should be t
 - Improve local-mode image persistence so artist and album artwork remains available after switching out of full mode.
 - Continue tightening documentation and instrumentation around cache behavior and local-mode freshness.
 - Continue tightening documentation and instrumentation around raw ingest performance and batch import timing.
+- Decide how to choose the canonical Spotify-backed winner when multiple `source_track` rows collapse onto one `release_track`, instead of relying only on a stable internal-ID tie-break.
+- Review the generated ambiguous track-variant queue and convert repeated judgments into policy/config updates instead of expanding hardcoded suffix rules.
 
 ## Current Raw Ingest Status
 - `raw_play_event`, `ingest_run`, and `spotify_sync_state` are implemented in SQLite.

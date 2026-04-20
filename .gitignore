@@ -14,8 +14,11 @@ frontend/.env
 backend/data/cache/
 backend/data/logs/
 backend/data/validation/
+backend/data/*.db
+backend/data/*.db-*
 backend/data/*.sqlite3
 backend/data/*.sqlite3-*
+backend/data/listenlabs.pre_*
 backend/data/*.copy
 backend/data/*.copy-*
 backend/scripts/__pycache__/

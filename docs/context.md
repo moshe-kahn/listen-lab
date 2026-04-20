@@ -61,6 +61,11 @@ Current note:
 - the dashboard also supports a restricted local mode so saved history- and cache-backed sections remain usable when Spotify is unavailable or rate-limited
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
+- track identity work now also includes a conservative three-layer model:
+  - `source_track`
+  - `release_track`
+  - `analysis_track`
+- track variant grouping is now policy-driven, with an explicit ambiguous-review queue generated after refresh passes so borderline title families can be inspected with artist context
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -170,3 +175,5 @@ The MVP succeeds when:
 - Improve local-mode image persistence and hydration so artist and album artwork survives mode switches more reliably.
 - Improve recent album ranking so 4-week and 6-month windows do not collapse to overly sparse results.
 - Use the new track-formula comparison page, live-playback observations, and raw-data validation scripts to tighten ranking confidence before broader product expansion.
+- Decide how canonical Spotify-backed winner selection should work when multiple `source_track` rows are merged into one `release_track`.
+- Review the ambiguous track-variant queue and tighten policy family-by-family instead of adding more hardcoded title rules.

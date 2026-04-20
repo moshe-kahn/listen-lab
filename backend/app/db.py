@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import hashlib
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import re
 from typing import Any, Iterator
 
 from backend.app.config import get_settings
+from backend.app.track_variant_policy import classify_label_families
 
 SCHEMA_VERSION_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -475,6 +479,246 @@ CREATE INDEX idx_live_playback_event_user_observed_at
 CREATE INDEX idx_live_playback_event_item_id
   ON live_playback_event(item_id);
 """,
+    10: """
+CREATE TABLE artist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  canonical_name TEXT NOT NULL,
+  sort_name TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE source_artist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_name TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  external_uri TEXT,
+  source_name_raw TEXT,
+  raw_payload_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(source_name, external_id)
+);
+
+CREATE TABLE source_artist_map (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_artist_id INTEGER NOT NULL REFERENCES source_artist(id),
+  artist_id INTEGER NOT NULL REFERENCES artist(id),
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(source_artist_id, artist_id)
+);
+
+CREATE TABLE release_album (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  primary_name TEXT NOT NULL,
+  normalized_name TEXT,
+  release_year INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE source_album (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_name TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  external_uri TEXT,
+  source_name_raw TEXT,
+  raw_payload_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(source_name, external_id)
+);
+
+CREATE TABLE source_album_map (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_album_id INTEGER NOT NULL REFERENCES source_album(id),
+  release_album_id INTEGER NOT NULL REFERENCES release_album(id),
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(source_album_id, release_album_id)
+);
+
+CREATE TABLE release_track (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  primary_name TEXT NOT NULL,
+  normalized_name TEXT,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE source_track (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_name TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  external_uri TEXT,
+  isrc TEXT,
+  source_name_raw TEXT,
+  raw_payload_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(source_name, external_id)
+);
+
+CREATE TABLE source_track_map (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_track_id INTEGER NOT NULL REFERENCES source_track(id),
+  release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(source_track_id, release_track_id)
+);
+
+CREATE TABLE album_artist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_album_id INTEGER NOT NULL REFERENCES release_album(id),
+  artist_id INTEGER NOT NULL REFERENCES artist(id),
+  role TEXT NOT NULL DEFAULT 'primary',
+  billing_index INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(release_album_id, artist_id, role)
+);
+
+CREATE TABLE track_artist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  artist_id INTEGER NOT NULL REFERENCES artist(id),
+  role TEXT NOT NULL DEFAULT 'primary',
+  billing_index INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(release_track_id, artist_id, role)
+);
+
+CREATE TABLE album_track (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_album_id INTEGER NOT NULL REFERENCES release_album(id),
+  release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(release_album_id, release_track_id)
+);
+
+CREATE INDEX idx_source_artist_map_artist_id
+  ON source_artist_map(artist_id);
+
+CREATE INDEX idx_source_album_map_release_album_id
+  ON source_album_map(release_album_id);
+
+CREATE INDEX idx_source_track_map_release_track_id
+  ON source_track_map(release_track_id);
+
+CREATE INDEX idx_album_artist_artist_id
+  ON album_artist(artist_id);
+
+CREATE INDEX idx_track_artist_artist_id
+  ON track_artist(artist_id);
+
+CREATE INDEX idx_album_track_release_track_id
+  ON album_track(release_track_id);
+""",
+    11: """
+ALTER TABLE track_artist
+ADD COLUMN credited_as TEXT;
+
+ALTER TABLE track_artist
+ADD COLUMN match_method TEXT NOT NULL DEFAULT 'backfill';
+
+ALTER TABLE track_artist
+ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;
+
+ALTER TABLE track_artist
+ADD COLUMN source_basis TEXT;
+
+ALTER TABLE album_artist
+ADD COLUMN credited_as TEXT;
+
+ALTER TABLE album_artist
+ADD COLUMN match_method TEXT NOT NULL DEFAULT 'backfill';
+
+ALTER TABLE album_artist
+ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;
+
+ALTER TABLE album_artist
+ADD COLUMN source_basis TEXT;
+""",
+    12: """
+CREATE TABLE analysis_track (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  primary_name TEXT NOT NULL,
+  grouping_note TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE analysis_track_map (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  analysis_track_id INTEGER NOT NULL REFERENCES analysis_track(id),
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(release_track_id, analysis_track_id)
+);
+
+CREATE TABLE track_relationship (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  to_release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  relationship_type TEXT NOT NULL,
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(from_release_track_id, to_release_track_id, relationship_type)
+);
+
+CREATE INDEX idx_analysis_track_map_analysis_track_id
+  ON analysis_track_map(analysis_track_id);
+
+CREATE INDEX idx_track_relationship_to_release_track_id
+  ON track_relationship(to_release_track_id);
+""",
+    13: """
+CREATE TABLE release_track_merge_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  obsolete_release_track_id INTEGER NOT NULL,
+  canonical_release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  release_album_id INTEGER REFERENCES release_album(id),
+  obsolete_primary_name TEXT,
+  canonical_primary_name TEXT,
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  explanation TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(obsolete_release_track_id, canonical_release_track_id)
+);
+
+CREATE INDEX idx_release_track_merge_log_canonical_release_track_id
+  ON release_track_merge_log(canonical_release_track_id);
+""",
 }
 
 
@@ -556,8 +800,7 @@ def insert_raw_play_event(
     spotify_album_id: str | None = None,
     spotify_artist_ids_json: str | None = None,
 ) -> int:
-    with sqlite3.connect(get_sqlite_db_path()) as connection:
-        connection.row_factory = sqlite3.Row
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
         cursor = connection.execute(
             """
             INSERT INTO raw_play_event (
@@ -652,8 +895,7 @@ def insert_raw_play_event_if_new(
     spotify_album_id: str | None = None,
     spotify_artist_ids_json: str | None = None,
 ) -> int | None:
-    with sqlite3.connect(get_sqlite_db_path()) as connection:
-        connection.row_factory = sqlite3.Row
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO raw_play_event (
@@ -1021,7 +1263,7 @@ def insert_or_upgrade_raw_play_event(
     spotify_album_id: str | None = None,
     spotify_artist_ids_json: str | None = None,
 ) -> dict[str, Any]:
-    with sqlite3.connect(get_sqlite_db_path()) as connection:
+    with sqlite_connection(write=True) as connection:
         return _insert_or_upgrade_raw_play_event_with_connection(
             connection,
             source_type=source_type,
@@ -1052,8 +1294,7 @@ def insert_or_upgrade_raw_play_event(
 
 
 def get_raw_play_event_by_source_row_key(source_row_key: str) -> dict[str, Any] | None:
-    with sqlite3.connect(get_sqlite_db_path()) as connection:
-        connection.row_factory = sqlite3.Row
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
         row = connection.execute(
             """
             SELECT r.*
@@ -1069,8 +1310,7 @@ def get_raw_play_event_by_source_row_key(source_row_key: str) -> dict[str, Any] 
 
 
 def list_raw_play_events(limit: int = 50) -> list[dict[str, Any]]:
-    with sqlite3.connect(get_sqlite_db_path()) as connection:
-        connection.row_factory = sqlite3.Row
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
         rows = connection.execute(
             """
             SELECT *
@@ -1097,8 +1337,7 @@ def list_unified_top_tracks(
     recent_cutoff = (as_of_dt - timedelta(days=max(0, int(recent_window_days)))).astimezone(UTC)
     recent_cutoff_iso = recent_cutoff.isoformat().replace("+00:00", "Z")
 
-    with sqlite3.connect(get_sqlite_db_path()) as connection:
-        connection.row_factory = sqlite3.Row
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
         rows = connection.execute(
             """
             WITH normalized AS (
@@ -1162,7 +1401,7 @@ def raw_play_event_exists(
     source_row_key: str,
     cross_source_event_key: str | None = None,
 ) -> bool:
-    with sqlite3.connect(get_sqlite_db_path()) as connection:
+    with sqlite_connection() as connection:
         row = connection.execute(
             """
             SELECT 1
@@ -1667,6 +1906,1794 @@ def insert_live_playback_event(
             ),
         )
     return int(cursor.lastrowid)
+
+
+def _normalize_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(str(value).strip().lower().split())
+    return normalized or None
+
+
+def _stable_text_key(*parts: str | None) -> str:
+    payload = "|".join("" if part is None else str(part).strip() for part in parts)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _parse_spotify_track_id_from_uri(uri: str | None) -> str | None:
+    if uri is None:
+        return None
+    candidate = str(uri).strip()
+    prefix = "spotify:track:"
+    if not candidate.startswith(prefix):
+        return None
+    external_id = candidate[len(prefix) :].strip()
+    return external_id or None
+
+
+TRACK_ANALYSIS_GROUPING_BLOCK_PATTERN = re.compile(
+    r"(\bremix\b|\brework\b|\bcover\b)",
+    re.IGNORECASE,
+)
+TRACK_ANALYSIS_GROUPABLE_FIXED_VARIANT_PATTERN = re.compile(
+    r"(\blive\b|\bremaster(?:ed)?\b|\bacoustic\b|\bdemo\b|\binstrumental\b|\bradio edit\b|\bexplicit\b|\bclean\b)",
+    re.IGNORECASE,
+)
+TRAILING_BRACKET_BLOCK_PATTERN = re.compile(r"\s*[\(\[]([^\)\]]+)[\)\]]\s*$")
+TRAILING_DASH_BLOCK_PATTERN = re.compile(r"\s*[-–—:]\s*([^–—:\(\)\[\]]+)\s*$")
+CONSERVATIVE_ANALYSIS_TRACK_GROUPING_NOTE_PREFIX = "conservative_exact_title_primary_artist:"
+SONG_FAMILY_ANALYSIS_MATCH_METHOD = "song_family_title_primary_artist"
+
+def _analysis_variant_label_candidates(value: str | None) -> set[str]:
+    if value is None:
+        return set()
+    text = str(value)
+    candidates: set[str] = set()
+    bracket_match = TRAILING_BRACKET_BLOCK_PATTERN.search(text)
+    if bracket_match:
+        candidates.add(_normalized_variant_label(bracket_match.group(1)))
+    dash_match = TRAILING_DASH_BLOCK_PATTERN.search(text)
+    if dash_match:
+        candidates.add(_normalized_variant_label(dash_match.group(1)))
+    return candidates
+
+
+def _normalized_variant_label(value: str) -> str:
+    return " ".join(str(value).strip().lower().split())
+
+
+def _is_groupable_analysis_variant_text(value: str) -> bool:
+    if TRACK_ANALYSIS_GROUPABLE_FIXED_VARIANT_PATTERN.search(value):
+        return True
+    return any(component.groupable_by_default for component in classify_label_families(value))
+
+
+def _analysis_grouping_base_title(value: str | None) -> str | None:
+    if value is None:
+        return None
+    working = str(value).strip()
+    if not working:
+        return None
+    if TRACK_ANALYSIS_GROUPING_BLOCK_PATTERN.search(working):
+        return None
+
+    changed = True
+    while changed and working:
+        changed = False
+        bracket_match = TRAILING_BRACKET_BLOCK_PATTERN.search(working)
+        if bracket_match and _is_groupable_analysis_variant_text(bracket_match.group(1)):
+            working = working[: bracket_match.start()].strip()
+            changed = True
+            continue
+
+        dash_match = TRAILING_DASH_BLOCK_PATTERN.search(working)
+        if dash_match and _is_groupable_analysis_variant_text(dash_match.group(1)):
+            working = working[: dash_match.start()].strip()
+            changed = True
+
+    normalized = _normalize_name(working)
+    return normalized
+
+
+def _analysis_variant_categories(value: str | None) -> set[str]:
+    if value is None:
+        return set()
+    categories: set[str] = set()
+    for component in classify_label_families(value):
+        if component.family == "edit" and component.semantic_category == "broadcast_length_or_content_edit":
+            categories.add("radio_edit")
+            continue
+        if component.family == "content_rating":
+            if "explicit" in component.normalized_label:
+                categories.add("explicit")
+            if "clean" in component.normalized_label:
+                categories.add("clean")
+            continue
+        categories.add(component.family)
+    return categories
+
+
+def _analysis_group_confidence(group_rows: list[sqlite3.Row]) -> float:
+    confidence = 0.9
+    category_penalties = {
+        "live": 0.2,
+        "acoustic": 0.08,
+        "demo": 0.1,
+        "instrumental": 0.08,
+        "remaster": 0.03,
+        "radio_edit": 0.04,
+        "edit": 0.05,
+        "explicit": 0.02,
+        "clean": 0.02,
+        "version": 0.05,
+        "packaging": 0.03,
+        "mix": 0.04,
+        "featured_credit": 0.04,
+        "session": 0.08,
+        "recording_context": 0.08,
+    }
+
+    seen_categories: set[str] = set()
+    plain_title_present = False
+    distinct_titles: set[str] = set()
+    distinct_albums: set[str] = set()
+
+    for row in group_rows:
+        title = str(row["primary_name"])
+        distinct_titles.add(title)
+        categories = _analysis_variant_categories(title)
+        if categories:
+            seen_categories.update(categories)
+        else:
+            plain_title_present = True
+
+        album_names = str(row["album_names"]) if "album_names" in row.keys() and row["album_names"] is not None else ""
+        if album_names:
+            distinct_albums.add(album_names)
+
+    for category in seen_categories:
+        confidence -= category_penalties.get(category, 0.0)
+
+    if plain_title_present and seen_categories:
+        confidence -= 0.03
+    if len(distinct_titles) > 1:
+        confidence -= min(0.08, 0.02 * (len(distinct_titles) - 1))
+    if len(distinct_albums) > 1:
+        confidence -= min(0.08, 0.01 * (len(distinct_albums) - 1))
+
+    return max(0.45, round(confidence, 2))
+
+
+def _parse_grouping_note(grouping_note: str | None) -> tuple[str | None, str | None]:
+    if grouping_note is None:
+        return None, None
+    value = str(grouping_note).strip()
+    prefix = CONSERVATIVE_ANALYSIS_TRACK_GROUPING_NOTE_PREFIX
+    if not value.startswith(prefix):
+        return None, value
+    payload = value[len(prefix) :]
+    parts = payload.split("|", 1)
+    if len(parts) == 2:
+        return parts[0] or None, parts[1] or None
+    return parts[0] or None, None
+
+
+def _extract_spotify_artist_refs(
+    *,
+    spotify_artist_ids_json: str | None,
+    artist_name_raw: str | None,
+    raw_payload_json: str | None,
+) -> list[dict[str, str | None]]:
+    artist_ids: list[str] = []
+    try:
+        parsed_ids = json.loads(spotify_artist_ids_json) if spotify_artist_ids_json else []
+        if isinstance(parsed_ids, list):
+            artist_ids = [str(value).strip() for value in parsed_ids if str(value).strip()]
+    except json.JSONDecodeError:
+        artist_ids = []
+
+    payload_artists: list[dict[str, str | None]] = []
+    try:
+        payload = json.loads(raw_payload_json) if raw_payload_json else None
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, dict):
+        item = payload.get("track") if isinstance(payload.get("track"), dict) else payload.get("item")
+        if isinstance(item, dict):
+            artists = item.get("artists")
+            if isinstance(artists, list):
+                for artist in artists:
+                    if isinstance(artist, dict):
+                        payload_artists.append(
+                            {
+                                "external_id": str(artist.get("id")).strip() if artist.get("id") else None,
+                                "name": str(artist.get("name")).strip() if artist.get("name") else None,
+                                "external_uri": str(artist.get("uri")).strip() if artist.get("uri") else None,
+                            }
+                        )
+
+    if payload_artists:
+        refs: list[dict[str, str | None]] = []
+        seen_ids: set[str] = set()
+        for artist in payload_artists:
+            external_id = artist.get("external_id")
+            if external_id:
+                seen_ids.add(external_id)
+                refs.append(artist)
+        for artist_id in artist_ids:
+            if artist_id not in seen_ids:
+                refs.append({"external_id": artist_id, "name": None, "external_uri": None})
+        return refs
+
+    if len(artist_ids) == 1:
+        return [
+            {
+                "external_id": artist_ids[0],
+                "name": artist_name_raw.strip() if artist_name_raw else None,
+                "external_uri": None,
+            }
+        ]
+
+    return [
+        {
+            "external_id": artist_id,
+            "name": None,
+            "external_uri": None,
+        }
+        for artist_id in artist_ids
+    ]
+
+
+def _create_artist_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    artist_name: str | None,
+) -> int:
+    canonical_name = artist_name.strip() if artist_name and artist_name.strip() else "Unknown artist"
+    normalized_name = _normalize_name(canonical_name)
+    cursor = connection.execute(
+        """
+        INSERT INTO artist (
+          canonical_name,
+          sort_name
+        )
+        VALUES (?, ?)
+        """,
+        (canonical_name, normalized_name),
+    )
+    return int(cursor.lastrowid)
+
+
+def _ensure_source_artist_mapping_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    external_id: str,
+    external_uri: str | None,
+    artist_name: str | None,
+    raw_payload_json: str | None,
+) -> int:
+    existing = connection.execute(
+        """
+        SELECT
+          sa.id AS source_artist_id,
+          sam.artist_id AS artist_id
+        FROM source_artist sa
+        LEFT JOIN source_artist_map sam
+          ON sam.source_artist_id = sa.id
+        WHERE sa.source_name = 'spotify'
+          AND sa.external_id = ?
+        ORDER BY sam.id ASC, sa.id ASC
+        LIMIT 1
+        """,
+        (external_id,),
+    ).fetchone()
+    if existing is not None and existing["artist_id"] is not None:
+        return int(existing["artist_id"])
+
+    source_artist_id: int
+    if existing is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_artist (
+              source_name,
+              external_id,
+              external_uri,
+              source_name_raw,
+              raw_payload_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("spotify", external_id, external_uri, artist_name, raw_payload_json),
+        )
+        source_artist_id = int(cursor.lastrowid)
+    else:
+        source_artist_id = int(existing["source_artist_id"])
+        connection.execute(
+            """
+            UPDATE source_artist
+            SET
+              external_uri = COALESCE(external_uri, ?),
+              source_name_raw = COALESCE(source_name_raw, ?),
+              raw_payload_json = COALESCE(raw_payload_json, ?),
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE id = ?
+            """,
+            (external_uri, artist_name, raw_payload_json, source_artist_id),
+        )
+
+    artist_id = _create_artist_with_connection(connection, artist_name=artist_name)
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO source_artist_map (
+          source_artist_id,
+          artist_id,
+          match_method,
+          confidence,
+          status,
+          is_user_confirmed,
+          explanation
+        )
+        VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'Exact Spotify artist ID backfill')
+        """,
+        (source_artist_id, artist_id),
+    )
+    return artist_id
+
+
+def _ensure_history_text_artist_mapping_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    artist_name_raw: str | None,
+) -> int | None:
+    artist_label = artist_name_raw.strip() if artist_name_raw and artist_name_raw.strip() else None
+    if artist_label is None:
+        return None
+
+    external_id = _stable_text_key("history_raw_artist", artist_label)
+    existing = connection.execute(
+        """
+        SELECT
+          sa.id AS source_artist_id,
+          sam.artist_id AS artist_id
+        FROM source_artist sa
+        LEFT JOIN source_artist_map sam
+          ON sam.source_artist_id = sa.id
+        WHERE sa.source_name = 'history_raw'
+          AND sa.external_id = ?
+        ORDER BY sam.id ASC, sa.id ASC
+        LIMIT 1
+        """,
+        (external_id,),
+    ).fetchone()
+    if existing is not None and existing["artist_id"] is not None:
+        return int(existing["artist_id"])
+
+    if existing is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_artist (
+              source_name,
+              external_id,
+              external_uri,
+              source_name_raw,
+              raw_payload_json
+            )
+            VALUES (?, ?, NULL, ?, NULL)
+            """,
+            ("history_raw", external_id, artist_label),
+        )
+        source_artist_id = int(cursor.lastrowid)
+    else:
+        source_artist_id = int(existing["source_artist_id"])
+
+    cursor = connection.execute(
+        """
+        INSERT INTO artist (
+          canonical_name,
+          sort_name
+        )
+        VALUES (?, ?)
+        """,
+        (artist_label, _normalize_name(artist_label)),
+    )
+    artist_id = int(cursor.lastrowid)
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO source_artist_map (
+          source_artist_id,
+          artist_id,
+          match_method,
+          confidence,
+          status,
+          is_user_confirmed,
+          explanation
+        )
+        VALUES (?, ?, 'history_raw_text', 0.6, 'accepted', 0, 'Backfilled from raw artist_name_raw')
+        """,
+        (source_artist_id, artist_id),
+    )
+    return artist_id
+
+
+def _ensure_source_album_mapping_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    external_id: str,
+    external_uri: str | None,
+    album_name: str | None,
+    raw_payload_json: str | None,
+) -> int:
+    existing = connection.execute(
+        """
+        SELECT
+          sa.id AS source_album_id,
+          sam.release_album_id AS release_album_id
+        FROM source_album sa
+        LEFT JOIN source_album_map sam
+          ON sam.source_album_id = sa.id
+        WHERE sa.source_name = 'spotify'
+          AND sa.external_id = ?
+        ORDER BY sam.id ASC, sa.id ASC
+        LIMIT 1
+        """,
+        (external_id,),
+    ).fetchone()
+    if existing is not None and existing["release_album_id"] is not None:
+        return int(existing["release_album_id"])
+
+    source_album_id: int
+    if existing is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_album (
+              source_name,
+              external_id,
+              external_uri,
+              source_name_raw,
+              raw_payload_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("spotify", external_id, external_uri, album_name, raw_payload_json),
+        )
+        source_album_id = int(cursor.lastrowid)
+    else:
+        source_album_id = int(existing["source_album_id"])
+        connection.execute(
+            """
+            UPDATE source_album
+            SET
+              external_uri = COALESCE(external_uri, ?),
+              source_name_raw = COALESCE(source_name_raw, ?),
+              raw_payload_json = COALESCE(raw_payload_json, ?),
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE id = ?
+            """,
+            (external_uri, album_name, raw_payload_json, source_album_id),
+        )
+
+    album_title = album_name.strip() if album_name and album_name.strip() else "Unknown album"
+    normalized_name = _normalize_name(album_title)
+    cursor = connection.execute(
+        """
+        INSERT INTO release_album (
+          primary_name,
+          normalized_name
+        )
+        VALUES (?, ?)
+        """,
+        (album_title, normalized_name),
+    )
+    release_album_id = int(cursor.lastrowid)
+
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO source_album_map (
+          source_album_id,
+          release_album_id,
+          match_method,
+          confidence,
+          status,
+          is_user_confirmed,
+          explanation
+        )
+        VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'Exact Spotify album ID backfill')
+        """,
+        (source_album_id, release_album_id),
+    )
+    return release_album_id
+
+
+def _ensure_history_text_album_mapping_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    album_name_raw: str | None,
+    artist_name_raw: str | None,
+) -> int | None:
+    album_title = album_name_raw.strip() if album_name_raw and album_name_raw.strip() else None
+    if album_title is None:
+        return None
+
+    external_id = _stable_text_key("history_raw_album", album_title, artist_name_raw)
+    existing = connection.execute(
+        """
+        SELECT
+          sa.id AS source_album_id,
+          sam.release_album_id AS release_album_id
+        FROM source_album sa
+        LEFT JOIN source_album_map sam
+          ON sam.source_album_id = sa.id
+        WHERE sa.source_name = 'history_raw'
+          AND sa.external_id = ?
+        ORDER BY sam.id ASC, sa.id ASC
+        LIMIT 1
+        """,
+        (external_id,),
+    ).fetchone()
+    if existing is not None and existing["release_album_id"] is not None:
+        return int(existing["release_album_id"])
+
+    if existing is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_album (
+              source_name,
+              external_id,
+              external_uri,
+              source_name_raw,
+              raw_payload_json
+            )
+            VALUES (?, ?, NULL, ?, NULL)
+            """,
+            ("history_raw", external_id, album_title),
+        )
+        source_album_id = int(cursor.lastrowid)
+    else:
+        source_album_id = int(existing["source_album_id"])
+
+    cursor = connection.execute(
+        """
+        INSERT INTO release_album (
+          primary_name,
+          normalized_name
+        )
+        VALUES (?, ?)
+        """,
+        (album_title, _normalize_name(album_title)),
+    )
+    release_album_id = int(cursor.lastrowid)
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO source_album_map (
+          source_album_id,
+          release_album_id,
+          match_method,
+          confidence,
+          status,
+          is_user_confirmed,
+          explanation
+        )
+        VALUES (?, ?, 'history_raw_text', 0.7, 'accepted', 0, 'Backfilled from raw album_name_raw + artist_name_raw')
+        """,
+        (source_album_id, release_album_id),
+    )
+    return release_album_id
+
+
+def _ensure_source_track_mapping_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    source_name: str,
+    external_id: str,
+    external_uri: str | None,
+    isrc: str | None = None,
+    track_name: str | None,
+    track_duration_ms: int | None,
+    raw_payload_json: str | None,
+    create_match_method: str,
+    create_confidence: float,
+    create_explanation: str,
+) -> int:
+    existing_release_track_id = _find_release_track_mapping_with_connection(
+        connection,
+        source_name=source_name,
+        external_id=external_id,
+    )
+    if existing_release_track_id is not None:
+        return existing_release_track_id
+
+    source_track_id = _ensure_source_track_with_connection(
+        connection,
+        source_name=source_name,
+        external_id=external_id,
+        external_uri=external_uri,
+        isrc=isrc,
+        track_name=track_name,
+        raw_payload_json=raw_payload_json,
+    )
+
+    equivalent_release_track_id, equivalent_match_method, equivalent_explanation = (
+        _find_equivalent_release_track_for_source_track_with_connection(
+            connection,
+            source_name=source_name,
+            external_id=external_id,
+            external_uri=external_uri,
+        )
+    )
+
+    if equivalent_release_track_id is not None:
+        _upsert_source_track_map_with_connection(
+            connection,
+            source_track_id=source_track_id,
+            release_track_id=equivalent_release_track_id,
+            match_method=equivalent_match_method or create_match_method,
+            confidence=1.0,
+            status="accepted",
+            explanation=equivalent_explanation or create_explanation,
+        )
+        return equivalent_release_track_id
+
+    release_track_id = _create_release_track_with_connection(
+        connection,
+        track_name=track_name,
+        track_duration_ms=track_duration_ms,
+    )
+    _upsert_source_track_map_with_connection(
+        connection,
+        source_track_id=source_track_id,
+        release_track_id=release_track_id,
+        match_method=create_match_method,
+        confidence=create_confidence,
+        status="accepted",
+        explanation=create_explanation,
+    )
+    return release_track_id
+
+
+def _find_release_track_mapping_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    source_name: str,
+    external_id: str,
+) -> int | None:
+    row = connection.execute(
+        """
+        SELECT stm.release_track_id
+        FROM source_track st
+        JOIN source_track_map stm
+          ON stm.source_track_id = st.id
+        WHERE st.source_name = ?
+          AND st.external_id = ?
+          AND stm.status = 'accepted'
+        ORDER BY
+          stm.is_user_confirmed DESC,
+          stm.confidence DESC,
+          stm.id ASC
+        LIMIT 1
+        """,
+        (source_name, external_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
+def _ensure_source_track_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    source_name: str,
+    external_id: str,
+    external_uri: str | None,
+    isrc: str | None,
+    track_name: str | None,
+    raw_payload_json: str | None,
+) -> int:
+    existing = connection.execute(
+        """
+        SELECT id
+        FROM source_track
+        WHERE source_name = ?
+          AND external_id = ?
+        LIMIT 1
+        """,
+        (source_name, external_id),
+    ).fetchone()
+    if existing is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_track (
+              source_name,
+              external_id,
+              external_uri,
+              isrc,
+              source_name_raw,
+              raw_payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (source_name, external_id, external_uri, isrc, track_name, raw_payload_json),
+        )
+        return int(cursor.lastrowid)
+
+    source_track_id = int(existing[0])
+    connection.execute(
+        """
+        UPDATE source_track
+        SET
+          external_uri = COALESCE(external_uri, ?),
+          isrc = COALESCE(isrc, ?),
+          source_name_raw = COALESCE(source_name_raw, ?),
+          raw_payload_json = COALESCE(raw_payload_json, ?),
+          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE id = ?
+        """,
+        (external_uri, isrc, track_name, raw_payload_json, source_track_id),
+    )
+    return source_track_id
+
+
+def _find_equivalent_release_track_for_source_track_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    source_name: str,
+    external_id: str,
+    external_uri: str | None,
+) -> tuple[int | None, str | None, str | None]:
+    if source_name == "spotify":
+        equivalent_uri = external_uri or f"spotify:track:{external_id}"
+        release_track_id = _find_release_track_mapping_with_connection(
+            connection,
+            source_name="spotify_uri",
+            external_id=equivalent_uri,
+        )
+        if release_track_id is not None:
+            return (
+                release_track_id,
+                "spotify_id_uri_equivalent",
+                "Matched Spotify track ID to an existing spotify:track URI representation",
+            )
+        return None, None, None
+
+    if source_name == "spotify_uri":
+        spotify_track_id = _parse_spotify_track_id_from_uri(external_id)
+        if spotify_track_id is None and external_uri is not None:
+            spotify_track_id = _parse_spotify_track_id_from_uri(external_uri)
+        if spotify_track_id is None:
+            return None, None, None
+        release_track_id = _find_release_track_mapping_with_connection(
+            connection,
+            source_name="spotify",
+            external_id=spotify_track_id,
+        )
+        if release_track_id is not None:
+            return (
+                release_track_id,
+                "spotify_id_uri_equivalent",
+                "Matched spotify:track URI to an existing Spotify track ID representation",
+            )
+    return None, None, None
+
+
+def _create_release_track_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    track_name: str | None,
+    track_duration_ms: int | None,
+) -> int:
+    release_title = track_name.strip() if track_name and track_name.strip() else "Unknown track"
+    normalized_name = _normalize_name(release_title)
+    cursor = connection.execute(
+        """
+        INSERT INTO release_track (
+          primary_name,
+          normalized_name,
+          duration_ms
+        )
+        VALUES (?, ?, ?)
+        """,
+        (release_title, normalized_name, track_duration_ms),
+    )
+    return int(cursor.lastrowid)
+
+
+def _upsert_source_track_map_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    source_track_id: int,
+    release_track_id: int,
+    match_method: str,
+    confidence: float,
+    status: str,
+    explanation: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO source_track_map (
+          source_track_id,
+          release_track_id,
+          match_method,
+          confidence,
+          status,
+          is_user_confirmed,
+          explanation
+        )
+        VALUES (?, ?, ?, ?, ?, 0, ?)
+        ON CONFLICT(source_track_id, release_track_id) DO UPDATE SET
+          match_method = CASE
+            WHEN source_track_map.is_user_confirmed = 1 THEN source_track_map.match_method
+            WHEN excluded.confidence > source_track_map.confidence THEN excluded.match_method
+            ELSE source_track_map.match_method
+          END,
+          confidence = CASE
+            WHEN source_track_map.is_user_confirmed = 1 THEN source_track_map.confidence
+            WHEN excluded.confidence > source_track_map.confidence THEN excluded.confidence
+            ELSE source_track_map.confidence
+          END,
+          status = CASE
+            WHEN source_track_map.is_user_confirmed = 1 THEN source_track_map.status
+            WHEN excluded.confidence > source_track_map.confidence THEN excluded.status
+            ELSE source_track_map.status
+          END,
+          explanation = CASE
+            WHEN source_track_map.explanation IS NULL OR trim(source_track_map.explanation) = '' THEN excluded.explanation
+            WHEN excluded.confidence > source_track_map.confidence THEN excluded.explanation
+            ELSE source_track_map.explanation
+          END,
+          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        """,
+        (source_track_id, release_track_id, match_method, confidence, status, explanation),
+    )
+
+
+def _find_analysis_track_id_by_grouping_note_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    grouping_note: str,
+) -> int | None:
+    row = connection.execute(
+        """
+        SELECT id
+        FROM analysis_track
+        WHERE grouping_note = ?
+        LIMIT 1
+        """,
+        (grouping_note,),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0])
+
+
+def _ensure_analysis_track_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    primary_name: str,
+    grouping_note: str,
+) -> int:
+    existing_analysis_track_id = _find_analysis_track_id_by_grouping_note_with_connection(
+        connection,
+        grouping_note=grouping_note,
+    )
+    if existing_analysis_track_id is not None:
+        return existing_analysis_track_id
+
+    cursor = connection.execute(
+        """
+        INSERT INTO analysis_track (
+          primary_name,
+          grouping_note
+        )
+        VALUES (?, ?)
+        """,
+        (primary_name, grouping_note),
+    )
+    return int(cursor.lastrowid)
+
+
+def _upsert_analysis_track_map_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    release_track_id: int,
+    analysis_track_id: int,
+    match_method: str,
+    confidence: float,
+    status: str,
+    explanation: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO analysis_track_map (
+          release_track_id,
+          analysis_track_id,
+          match_method,
+          confidence,
+          status,
+          is_user_confirmed,
+          explanation
+        )
+        VALUES (?, ?, ?, ?, ?, 0, ?)
+        ON CONFLICT(release_track_id, analysis_track_id) DO UPDATE SET
+          match_method = CASE
+            WHEN analysis_track_map.is_user_confirmed = 1 THEN analysis_track_map.match_method
+            WHEN excluded.confidence > analysis_track_map.confidence THEN excluded.match_method
+            ELSE analysis_track_map.match_method
+          END,
+          confidence = CASE
+            WHEN analysis_track_map.is_user_confirmed = 1 THEN analysis_track_map.confidence
+            WHEN excluded.confidence > analysis_track_map.confidence THEN excluded.confidence
+            ELSE analysis_track_map.confidence
+          END,
+          status = CASE
+            WHEN analysis_track_map.is_user_confirmed = 1 THEN analysis_track_map.status
+            WHEN excluded.confidence > analysis_track_map.confidence THEN excluded.status
+            ELSE analysis_track_map.status
+          END,
+          explanation = CASE
+            WHEN analysis_track_map.explanation IS NULL OR trim(analysis_track_map.explanation) = '' THEN excluded.explanation
+            WHEN excluded.confidence > analysis_track_map.confidence THEN excluded.explanation
+            ELSE analysis_track_map.explanation
+          END,
+          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        """,
+        (release_track_id, analysis_track_id, match_method, confidence, status, explanation),
+    )
+
+
+def _resolve_release_track_id_for_local_backfill_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    spotify_track_id: str | None,
+    spotify_track_uri: str | None,
+    track_name_raw: str | None,
+    artist_name_raw: str | None,
+    album_name_raw: str | None,
+    track_duration_ms: int | None,
+) -> int | None:
+    if spotify_track_id:
+        release_track_id = _find_release_track_mapping_with_connection(
+            connection,
+            source_name="spotify",
+            external_id=spotify_track_id,
+        )
+        if release_track_id is not None:
+            return release_track_id
+
+    if spotify_track_uri and spotify_track_uri.strip():
+        external_id = spotify_track_uri.strip()
+        return _ensure_source_track_mapping_with_connection(
+            connection,
+            source_name="spotify_uri",
+            external_id=external_id,
+            external_uri=external_id,
+            track_name=track_name_raw,
+            track_duration_ms=track_duration_ms,
+            raw_payload_json=None,
+            create_match_method="spotify_track_uri",
+            create_confidence=1.0,
+            create_explanation="Backfilled from raw spotify_track_uri",
+        )
+
+    track_title = track_name_raw.strip() if track_name_raw and track_name_raw.strip() else None
+    if track_title is None:
+        return None
+
+    external_id = _stable_text_key("history_raw_track", track_title, artist_name_raw, album_name_raw)
+    return _ensure_source_track_mapping_with_connection(
+        connection,
+        source_name="history_raw",
+        external_id=external_id,
+        external_uri=None,
+        track_name=track_title,
+        track_duration_ms=track_duration_ms,
+        raw_payload_json=None,
+        create_match_method="history_raw_text",
+        create_confidence=0.75,
+        create_explanation="Backfilled from raw track/artist/album text",
+    )
+
+
+def backfill_spotify_source_entities() -> dict[str, int]:
+    counts = {
+        "rows_scanned": 0,
+        "artists_created": 0,
+        "source_artists_created": 0,
+        "artist_maps_created": 0,
+        "release_albums_created": 0,
+        "source_albums_created": 0,
+        "album_maps_created": 0,
+        "release_tracks_created": 0,
+        "source_tracks_created": 0,
+        "track_maps_created": 0,
+        "album_artist_links_created": 0,
+        "track_artist_links_created": 0,
+        "album_track_links_created": 0,
+    }
+
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        before = {
+            "artists": int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]),
+            "source_artists": int(connection.execute("SELECT count(*) FROM source_artist").fetchone()[0]),
+            "artist_maps": int(connection.execute("SELECT count(*) FROM source_artist_map").fetchone()[0]),
+            "release_albums": int(connection.execute("SELECT count(*) FROM release_album").fetchone()[0]),
+            "source_albums": int(connection.execute("SELECT count(*) FROM source_album").fetchone()[0]),
+            "album_maps": int(connection.execute("SELECT count(*) FROM source_album_map").fetchone()[0]),
+            "release_tracks": int(connection.execute("SELECT count(*) FROM release_track").fetchone()[0]),
+            "source_tracks": int(connection.execute("SELECT count(*) FROM source_track").fetchone()[0]),
+            "track_maps": int(connection.execute("SELECT count(*) FROM source_track_map").fetchone()[0]),
+            "album_artist": int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]),
+            "track_artist": int(connection.execute("SELECT count(*) FROM track_artist").fetchone()[0]),
+            "album_track": int(connection.execute("SELECT count(*) FROM album_track").fetchone()[0]),
+        }
+        rows = connection.execute(
+            """
+            SELECT
+              spotify_track_id,
+              spotify_track_uri,
+              track_name_raw,
+              track_duration_ms,
+              artist_name_raw,
+              album_name_raw,
+              spotify_album_id,
+              spotify_artist_ids_json,
+              raw_payload_json
+            FROM raw_play_event
+            WHERE spotify_track_id IS NOT NULL
+               OR spotify_album_id IS NOT NULL
+               OR spotify_artist_ids_json IS NOT NULL
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+        for row in rows:
+            counts["rows_scanned"] += 1
+
+            release_album_id: int | None = None
+            if row["spotify_album_id"]:
+                release_album_id = _ensure_source_album_mapping_with_connection(
+                    connection,
+                    external_id=str(row["spotify_album_id"]),
+                    external_uri=f"spotify:album:{row['spotify_album_id']}",
+                    album_name=row["album_name_raw"],
+                    raw_payload_json=row["raw_payload_json"],
+                )
+
+            release_track_id: int | None = None
+            if row["spotify_track_id"]:
+                release_track_id = _ensure_source_track_mapping_with_connection(
+                    connection,
+                    source_name="spotify",
+                    external_id=str(row["spotify_track_id"]),
+                    external_uri=row["spotify_track_uri"] or f"spotify:track:{row['spotify_track_id']}",
+                    track_name=row["track_name_raw"],
+                    track_duration_ms=row["track_duration_ms"],
+                    raw_payload_json=row["raw_payload_json"],
+                    create_match_method="provider_identity",
+                    create_confidence=1.0,
+                    create_explanation="Exact Spotify track ID backfill",
+                )
+
+            artist_ids: list[int] = []
+            for artist_ref in _extract_spotify_artist_refs(
+                spotify_artist_ids_json=row["spotify_artist_ids_json"],
+                artist_name_raw=row["artist_name_raw"],
+                raw_payload_json=row["raw_payload_json"],
+            ):
+                external_id = artist_ref.get("external_id")
+                if not external_id:
+                    continue
+                artist_id = _ensure_source_artist_mapping_with_connection(
+                    connection,
+                    external_id=external_id,
+                    external_uri=artist_ref.get("external_uri") or f"spotify:artist:{external_id}",
+                    artist_name=artist_ref.get("name"),
+                    raw_payload_json=row["raw_payload_json"],
+                )
+                if artist_id not in artist_ids:
+                    artist_ids.append(artist_id)
+
+            for billing_index, artist_id in enumerate(artist_ids):
+                if release_track_id is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO track_artist (
+                          release_track_id,
+                          artist_id,
+                          role,
+                          billing_index,
+                          credited_as,
+                          match_method,
+                          confidence,
+                          source_basis
+                        )
+                        VALUES (?, ?, 'primary', ?, ?, 'provider_identity', 1.0, 'spotify_structured_artist_ids')
+                        ON CONFLICT(release_track_id, artist_id, role) DO UPDATE SET
+                          billing_index = COALESCE(track_artist.billing_index, excluded.billing_index),
+                          credited_as = COALESCE(track_artist.credited_as, excluded.credited_as),
+                          match_method = CASE
+                            WHEN track_artist.match_method = 'backfill' THEN excluded.match_method
+                            ELSE track_artist.match_method
+                          END,
+                          confidence = CASE
+                            WHEN track_artist.match_method = 'backfill' THEN excluded.confidence
+                            ELSE track_artist.confidence
+                          END,
+                          source_basis = COALESCE(track_artist.source_basis, excluded.source_basis)
+                        """,
+                        (release_track_id, artist_id, billing_index, artist_ref.get("name") or row["artist_name_raw"]),
+                    )
+                if release_album_id is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO album_artist (
+                          release_album_id,
+                          artist_id,
+                          role,
+                          billing_index,
+                          credited_as,
+                          match_method,
+                          confidence,
+                          source_basis
+                        )
+                        VALUES (?, ?, 'primary', ?, ?, 'provider_identity', 1.0, 'spotify_structured_artist_ids')
+                        ON CONFLICT(release_album_id, artist_id, role) DO UPDATE SET
+                          billing_index = COALESCE(album_artist.billing_index, excluded.billing_index),
+                          credited_as = COALESCE(album_artist.credited_as, excluded.credited_as),
+                          match_method = CASE
+                            WHEN album_artist.match_method = 'backfill' THEN excluded.match_method
+                            ELSE album_artist.match_method
+                          END,
+                          confidence = CASE
+                            WHEN album_artist.match_method = 'backfill' THEN excluded.confidence
+                            ELSE album_artist.confidence
+                          END,
+                          source_basis = COALESCE(album_artist.source_basis, excluded.source_basis)
+                        """,
+                        (release_album_id, artist_id, billing_index, artist_ref.get("name") or row["artist_name_raw"]),
+                    )
+
+            if release_album_id is not None and release_track_id is not None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO album_track (
+                      release_album_id,
+                      release_track_id
+                    )
+                    VALUES (?, ?)
+                    """,
+                    (release_album_id, release_track_id),
+                )
+
+        after = {
+            "artists": int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]),
+            "source_artists": int(connection.execute("SELECT count(*) FROM source_artist").fetchone()[0]),
+            "artist_maps": int(connection.execute("SELECT count(*) FROM source_artist_map").fetchone()[0]),
+            "release_albums": int(connection.execute("SELECT count(*) FROM release_album").fetchone()[0]),
+            "source_albums": int(connection.execute("SELECT count(*) FROM source_album").fetchone()[0]),
+            "album_maps": int(connection.execute("SELECT count(*) FROM source_album_map").fetchone()[0]),
+            "release_tracks": int(connection.execute("SELECT count(*) FROM release_track").fetchone()[0]),
+            "source_tracks": int(connection.execute("SELECT count(*) FROM source_track").fetchone()[0]),
+            "track_maps": int(connection.execute("SELECT count(*) FROM source_track_map").fetchone()[0]),
+            "album_artist": int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]),
+            "track_artist": int(connection.execute("SELECT count(*) FROM track_artist").fetchone()[0]),
+            "album_track": int(connection.execute("SELECT count(*) FROM album_track").fetchone()[0]),
+        }
+
+    counts["artists_created"] = after["artists"] - before["artists"]
+    counts["source_artists_created"] = after["source_artists"] - before["source_artists"]
+    counts["artist_maps_created"] = after["artist_maps"] - before["artist_maps"]
+    counts["release_albums_created"] = after["release_albums"] - before["release_albums"]
+    counts["source_albums_created"] = after["source_albums"] - before["source_albums"]
+    counts["album_maps_created"] = after["album_maps"] - before["album_maps"]
+    counts["release_tracks_created"] = after["release_tracks"] - before["release_tracks"]
+    counts["source_tracks_created"] = after["source_tracks"] - before["source_tracks"]
+    counts["track_maps_created"] = after["track_maps"] - before["track_maps"]
+    counts["album_artist_links_created"] = after["album_artist"] - before["album_artist"]
+    counts["track_artist_links_created"] = after["track_artist"] - before["track_artist"]
+    counts["album_track_links_created"] = after["album_track"] - before["album_track"]
+
+    return counts
+
+
+def backfill_local_text_entities() -> dict[str, int]:
+    counts = {
+        "rows_scanned": 0,
+        "artists_created": 0,
+        "source_artists_created": 0,
+        "artist_maps_created": 0,
+        "release_albums_created": 0,
+        "source_albums_created": 0,
+        "album_maps_created": 0,
+        "release_tracks_created": 0,
+        "source_tracks_created": 0,
+        "track_maps_created": 0,
+        "album_artist_links_created": 0,
+        "track_artist_links_created": 0,
+        "album_track_links_created": 0,
+    }
+
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        before = {
+            "artists": int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]),
+            "source_artists": int(connection.execute("SELECT count(*) FROM source_artist").fetchone()[0]),
+            "artist_maps": int(connection.execute("SELECT count(*) FROM source_artist_map").fetchone()[0]),
+            "release_albums": int(connection.execute("SELECT count(*) FROM release_album").fetchone()[0]),
+            "source_albums": int(connection.execute("SELECT count(*) FROM source_album").fetchone()[0]),
+            "album_maps": int(connection.execute("SELECT count(*) FROM source_album_map").fetchone()[0]),
+            "release_tracks": int(connection.execute("SELECT count(*) FROM release_track").fetchone()[0]),
+            "source_tracks": int(connection.execute("SELECT count(*) FROM source_track").fetchone()[0]),
+            "track_maps": int(connection.execute("SELECT count(*) FROM source_track_map").fetchone()[0]),
+            "album_artist": int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]),
+            "track_artist": int(connection.execute("SELECT count(*) FROM track_artist").fetchone()[0]),
+            "album_track": int(connection.execute("SELECT count(*) FROM album_track").fetchone()[0]),
+        }
+
+        rows = connection.execute(
+            """
+            SELECT
+              spotify_track_id,
+              spotify_track_uri,
+              track_name_raw,
+              track_duration_ms,
+              artist_name_raw,
+              album_name_raw,
+              spotify_album_id
+            FROM raw_play_event
+            WHERE
+              (track_name_raw IS NOT NULL AND trim(track_name_raw) != '')
+              OR (artist_name_raw IS NOT NULL AND trim(artist_name_raw) != '')
+              OR (album_name_raw IS NOT NULL AND trim(album_name_raw) != '')
+              OR (spotify_track_uri IS NOT NULL AND trim(spotify_track_uri) != '')
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+        for row in rows:
+            counts["rows_scanned"] += 1
+            release_track_id = _resolve_release_track_id_for_local_backfill_with_connection(
+                connection,
+                spotify_track_id=row["spotify_track_id"],
+                spotify_track_uri=row["spotify_track_uri"],
+                track_name_raw=row["track_name_raw"],
+                artist_name_raw=row["artist_name_raw"],
+                album_name_raw=row["album_name_raw"],
+                track_duration_ms=row["track_duration_ms"],
+            )
+
+            release_album_id: int | None = None
+            if row["spotify_album_id"]:
+                release_album_row = connection.execute(
+                    """
+                    SELECT sam.release_album_id
+                    FROM source_album sa
+                    JOIN source_album_map sam
+                      ON sam.source_album_id = sa.id
+                    WHERE sa.source_name = 'spotify'
+                      AND sa.external_id = ?
+                    ORDER BY sam.id ASC
+                    LIMIT 1
+                    """,
+                    (str(row["spotify_album_id"]),),
+                ).fetchone()
+                if release_album_row is not None:
+                    release_album_id = int(release_album_row[0])
+            if release_album_id is None:
+                release_album_id = _ensure_history_text_album_mapping_with_connection(
+                    connection,
+                    album_name_raw=row["album_name_raw"],
+                    artist_name_raw=row["artist_name_raw"],
+                )
+
+            if row["artist_name_raw"] and row["artist_name_raw"].strip():
+                artist_id = _ensure_history_text_artist_mapping_with_connection(
+                    connection,
+                    artist_name_raw=row["artist_name_raw"],
+                )
+                if artist_id is not None:
+                    if release_track_id is not None:
+                        connection.execute(
+                            """
+                            INSERT INTO track_artist (
+                              release_track_id,
+                              artist_id,
+                              role,
+                              billing_index,
+                              credited_as,
+                              match_method,
+                              confidence,
+                              source_basis
+                            )
+                            VALUES (?, ?, 'primary', 0, ?, 'history_raw_text', 0.6, 'artist_name_raw')
+                            ON CONFLICT(release_track_id, artist_id, role) DO UPDATE SET
+                              billing_index = COALESCE(track_artist.billing_index, excluded.billing_index),
+                              credited_as = COALESCE(track_artist.credited_as, excluded.credited_as),
+                              match_method = CASE
+                                WHEN track_artist.match_method = 'backfill' THEN excluded.match_method
+                                ELSE track_artist.match_method
+                              END,
+                              confidence = CASE
+                                WHEN track_artist.match_method = 'backfill' THEN excluded.confidence
+                                ELSE track_artist.confidence
+                              END,
+                              source_basis = COALESCE(track_artist.source_basis, excluded.source_basis)
+                            """,
+                            (release_track_id, artist_id, row["artist_name_raw"]),
+                        )
+                    if release_album_id is not None:
+                        connection.execute(
+                            """
+                            INSERT INTO album_artist (
+                              release_album_id,
+                              artist_id,
+                              role,
+                              billing_index,
+                              credited_as,
+                              match_method,
+                              confidence,
+                              source_basis
+                            )
+                            VALUES (?, ?, 'primary', 0, ?, 'history_raw_text', 0.6, 'artist_name_raw')
+                            ON CONFLICT(release_album_id, artist_id, role) DO UPDATE SET
+                              billing_index = COALESCE(album_artist.billing_index, excluded.billing_index),
+                              credited_as = COALESCE(album_artist.credited_as, excluded.credited_as),
+                              match_method = CASE
+                                WHEN album_artist.match_method = 'backfill' THEN excluded.match_method
+                                ELSE album_artist.match_method
+                              END,
+                              confidence = CASE
+                                WHEN album_artist.match_method = 'backfill' THEN excluded.confidence
+                                ELSE album_artist.confidence
+                              END,
+                              source_basis = COALESCE(album_artist.source_basis, excluded.source_basis)
+                            """,
+                            (release_album_id, artist_id, row["artist_name_raw"]),
+                        )
+
+            if release_album_id is not None and release_track_id is not None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO album_track (
+                      release_album_id,
+                      release_track_id
+                    )
+                    VALUES (?, ?)
+                    """,
+                    (release_album_id, release_track_id),
+                )
+
+        after = {
+            "artists": int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]),
+            "source_artists": int(connection.execute("SELECT count(*) FROM source_artist").fetchone()[0]),
+            "artist_maps": int(connection.execute("SELECT count(*) FROM source_artist_map").fetchone()[0]),
+            "release_albums": int(connection.execute("SELECT count(*) FROM release_album").fetchone()[0]),
+            "source_albums": int(connection.execute("SELECT count(*) FROM source_album").fetchone()[0]),
+            "album_maps": int(connection.execute("SELECT count(*) FROM source_album_map").fetchone()[0]),
+            "release_tracks": int(connection.execute("SELECT count(*) FROM release_track").fetchone()[0]),
+            "source_tracks": int(connection.execute("SELECT count(*) FROM source_track").fetchone()[0]),
+            "track_maps": int(connection.execute("SELECT count(*) FROM source_track_map").fetchone()[0]),
+            "album_artist": int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]),
+            "track_artist": int(connection.execute("SELECT count(*) FROM track_artist").fetchone()[0]),
+            "album_track": int(connection.execute("SELECT count(*) FROM album_track").fetchone()[0]),
+        }
+
+    counts["artists_created"] = after["artists"] - before["artists"]
+    counts["source_artists_created"] = after["source_artists"] - before["source_artists"]
+    counts["artist_maps_created"] = after["artist_maps"] - before["artist_maps"]
+    counts["release_albums_created"] = after["release_albums"] - before["release_albums"]
+    counts["source_albums_created"] = after["source_albums"] - before["source_albums"]
+    counts["album_maps_created"] = after["album_maps"] - before["album_maps"]
+    counts["release_tracks_created"] = after["release_tracks"] - before["release_tracks"]
+    counts["source_tracks_created"] = after["source_tracks"] - before["source_tracks"]
+    counts["track_maps_created"] = after["track_maps"] - before["track_maps"]
+    counts["album_artist_links_created"] = after["album_artist"] - before["album_artist"]
+    counts["track_artist_links_created"] = after["track_artist"] - before["track_artist"]
+    counts["album_track_links_created"] = after["album_track"] - before["album_track"]
+
+    return counts
+
+
+def suggest_conservative_analysis_track_links() -> dict[str, int]:
+    counts = {
+        "groups_considered": 0,
+        "groups_suggested": 0,
+        "analysis_tracks_created": 0,
+        "analysis_track_maps_created": 0,
+    }
+
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        before_analysis_tracks = int(connection.execute("SELECT count(*) FROM analysis_track").fetchone()[0])
+        before_analysis_track_maps = int(connection.execute("SELECT count(*) FROM analysis_track_map").fetchone()[0])
+
+        rows = connection.execute(
+            """
+            WITH primary_artists AS (
+              SELECT
+                ordered.release_track_id,
+                group_concat(ordered.artist_name, ' | ') AS artist_signature
+              FROM (
+                SELECT
+                  ta.release_track_id,
+                  a.canonical_name AS artist_name
+                FROM track_artist ta
+                JOIN artist a
+                  ON a.id = ta.artist_id
+                WHERE ta.role = 'primary'
+                ORDER BY
+                  ta.release_track_id ASC,
+                  COALESCE(ta.billing_index, 999999) ASC,
+                  ta.id ASC,
+                  a.canonical_name ASC
+              ) ordered
+              GROUP BY ordered.release_track_id
+            )
+            SELECT
+              rt.id AS release_track_id,
+              rt.primary_name,
+              rt.normalized_name,
+              coalesce(ral.album_names, '') AS album_names,
+              pa.artist_signature
+            FROM release_track rt
+            JOIN primary_artists pa
+              ON pa.release_track_id = rt.id
+            LEFT JOIN (
+              SELECT
+                at.release_track_id,
+                group_concat(ra.primary_name, ' | ') AS album_names
+              FROM album_track at
+              JOIN release_album ra
+                ON ra.id = at.release_album_id
+              GROUP BY at.release_track_id
+            ) ral
+              ON ral.release_track_id = rt.id
+            WHERE rt.normalized_name IS NOT NULL
+            ORDER BY
+              rt.normalized_name ASC,
+              pa.artist_signature ASC,
+              rt.id ASC
+            """
+        ).fetchall()
+
+        grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for row in rows:
+            analysis_title_key = _analysis_grouping_base_title(row["primary_name"])
+            if analysis_title_key is None:
+                continue
+            key = (analysis_title_key, str(row["artist_signature"]))
+            grouped.setdefault(key, []).append(row)
+
+        for (analysis_title_key, artist_signature), group_rows in grouped.items():
+            if len(group_rows) < 2:
+                continue
+            counts["groups_considered"] += 1
+
+            grouping_note = (
+                CONSERVATIVE_ANALYSIS_TRACK_GROUPING_NOTE_PREFIX
+                + _stable_text_key(analysis_title_key, artist_signature)
+                + "|"
+                + analysis_title_key
+            )
+            analysis_track_id = _ensure_analysis_track_with_connection(
+                connection,
+                primary_name=str(group_rows[0]["primary_name"]),
+                grouping_note=grouping_note,
+            )
+            counts["groups_suggested"] += 1
+            confidence = _analysis_group_confidence(group_rows)
+
+            explanation = (
+                "Suggested from the same song-family title key and identical ordered primary artist set; "
+                "groupable labels such as live, remaster, acoustic, demo, radio edit, explicit, clean, and generic "
+                "packaging labels like album/single/extended version or edit were normalized together, while "
+                "remix/rework/cover-marked titles and attributed edit/version labels were excluded"
+            )
+            for row in group_rows:
+                _upsert_analysis_track_map_with_connection(
+                    connection,
+                    release_track_id=int(row["release_track_id"]),
+                    analysis_track_id=analysis_track_id,
+                    match_method=SONG_FAMILY_ANALYSIS_MATCH_METHOD,
+                    confidence=confidence,
+                    status="suggested",
+                    explanation=explanation,
+                )
+
+        after_analysis_tracks = int(connection.execute("SELECT count(*) FROM analysis_track").fetchone()[0])
+        after_analysis_track_maps = int(connection.execute("SELECT count(*) FROM analysis_track_map").fetchone()[0])
+
+    counts["analysis_tracks_created"] = after_analysis_tracks - before_analysis_tracks
+    counts["analysis_track_maps_created"] = after_analysis_track_maps - before_analysis_track_maps
+    return counts
+
+
+def refresh_conservative_analysis_track_links() -> dict[str, int]:
+    counts = {
+        "suggested_maps_deleted": 0,
+        "analysis_tracks_deleted": 0,
+        "groups_considered": 0,
+        "groups_suggested": 0,
+        "analysis_tracks_created": 0,
+        "analysis_track_maps_created": 0,
+    }
+
+    with sqlite_connection(write=True) as connection:
+        suggested_maps_deleted = connection.execute(
+            """
+            DELETE FROM analysis_track_map
+            WHERE status = 'suggested'
+              AND analysis_track_id IN (
+                SELECT id
+                FROM analysis_track
+                WHERE grouping_note LIKE ?
+              )
+            """,
+            (f"{CONSERVATIVE_ANALYSIS_TRACK_GROUPING_NOTE_PREFIX}%",),
+        ).rowcount
+        analysis_tracks_deleted = connection.execute(
+            """
+            DELETE FROM analysis_track
+            WHERE grouping_note LIKE ?
+            """,
+            (f"{CONSERVATIVE_ANALYSIS_TRACK_GROUPING_NOTE_PREFIX}%",),
+        ).rowcount
+
+    counts["suggested_maps_deleted"] = int(suggested_maps_deleted)
+    counts["analysis_tracks_deleted"] = int(analysis_tracks_deleted)
+
+    suggestion_counts = suggest_conservative_analysis_track_links()
+    counts["groups_considered"] = suggestion_counts["groups_considered"]
+    counts["groups_suggested"] = suggestion_counts["groups_suggested"]
+    counts["analysis_tracks_created"] = suggestion_counts["analysis_tracks_created"]
+    counts["analysis_track_maps_created"] = suggestion_counts["analysis_track_maps_created"]
+    return counts
+
+
+def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
+    counts = {
+        "groups_considered": 0,
+        "groups_merged": 0,
+        "release_tracks_deleted": 0,
+        "source_track_maps_repointed": 0,
+        "analysis_track_maps_repointed": 0,
+        "merge_logs_created": 0,
+    }
+
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        before_merge_logs = int(connection.execute("SELECT count(*) FROM release_track_merge_log").fetchone()[0])
+
+        rows = connection.execute(
+            """
+            WITH single_album_tracks AS (
+              SELECT
+                at.release_track_id,
+                min(at.release_album_id) AS release_album_id
+              FROM album_track at
+              GROUP BY at.release_track_id
+              HAVING count(DISTINCT at.release_album_id) = 1
+            )
+            SELECT
+              rt.id AS release_track_id,
+              rt.primary_name,
+              rt.normalized_name,
+              rt.duration_ms,
+              sat.release_album_id
+            FROM release_track rt
+            JOIN single_album_tracks sat
+              ON sat.release_track_id = rt.id
+            WHERE rt.normalized_name IS NOT NULL
+            ORDER BY
+              sat.release_album_id ASC,
+              rt.normalized_name ASC,
+              rt.id ASC
+            """
+        ).fetchall()
+
+        grouped: dict[tuple[int, str], list[sqlite3.Row]] = {}
+        for row in rows:
+            key = (
+                int(row["release_album_id"]),
+                str(row["normalized_name"]),
+            )
+            grouped.setdefault(key, []).append(row)
+
+        for (_, _), group_rows in grouped.items():
+            if len(group_rows) < 2:
+                continue
+            counts["groups_considered"] += 1
+
+            non_null_durations = [
+                int(row["duration_ms"])
+                for row in group_rows
+                if row["duration_ms"] is not None
+            ]
+            if len(non_null_durations) >= 2 and (max(non_null_durations) - min(non_null_durations)) > 2000:
+                continue
+
+            winner_row = min(group_rows, key=lambda row: int(row["release_track_id"]))
+            winner_release_track_id = int(winner_row["release_track_id"])
+            release_album_id = int(winner_row["release_album_id"])
+            any_group_merged = False
+
+            for loser_row in group_rows:
+                loser_release_track_id = int(loser_row["release_track_id"])
+                if loser_release_track_id == winner_release_track_id:
+                    continue
+
+                existing_merge = connection.execute(
+                    """
+                    SELECT 1
+                    FROM release_track_merge_log
+                    WHERE obsolete_release_track_id = ?
+                      AND canonical_release_track_id = ?
+                    LIMIT 1
+                    """,
+                    (loser_release_track_id, winner_release_track_id),
+                ).fetchone()
+                if existing_merge is not None:
+                    continue
+
+                explanation = (
+                    "Merged duplicate same-album release_track inferred from identical normalized title "
+                    "and identical single album context"
+                )
+
+                connection.execute(
+                    """
+                    INSERT INTO release_track_merge_log (
+                      obsolete_release_track_id,
+                      canonical_release_track_id,
+                      release_album_id,
+                      obsolete_primary_name,
+                      canonical_primary_name,
+                      match_method,
+                      confidence,
+                      status,
+                      explanation
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'same_album_exact_title_primary_artist', 0.95, 'accepted', ?)
+                    """,
+                    (
+                        loser_release_track_id,
+                        winner_release_track_id,
+                        release_album_id,
+                        loser_row["primary_name"],
+                        winner_row["primary_name"],
+                        explanation,
+                    ),
+                )
+
+                repointed_source_rows = connection.execute(
+                    """
+                    UPDATE source_track_map
+                    SET
+                      release_track_id = ?,
+                      match_method = 'same_album_exact_title_primary_artist',
+                      confidence = 0.95,
+                      status = 'accepted',
+                      explanation = ?,
+                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    WHERE release_track_id = ?
+                    """,
+                    (winner_release_track_id, explanation, loser_release_track_id),
+                ).rowcount
+                counts["source_track_maps_repointed"] += int(repointed_source_rows)
+
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO track_artist (
+                      release_track_id,
+                      artist_id,
+                      role,
+                      billing_index,
+                      created_at,
+                      credited_as,
+                      match_method,
+                      confidence,
+                      source_basis
+                    )
+                    SELECT
+                      ?,
+                      artist_id,
+                      role,
+                      billing_index,
+                      created_at,
+                      credited_as,
+                      match_method,
+                      confidence,
+                      source_basis
+                    FROM track_artist
+                    WHERE release_track_id = ?
+                    """,
+                    (winner_release_track_id, loser_release_track_id),
+                )
+
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO album_track (
+                      release_album_id,
+                      release_track_id,
+                      created_at
+                    )
+                    SELECT
+                      release_album_id,
+                      ?,
+                      created_at
+                    FROM album_track
+                    WHERE release_track_id = ?
+                    """,
+                    (winner_release_track_id, loser_release_track_id),
+                )
+
+                analysis_track_rows = connection.execute(
+                    """
+                    SELECT
+                      analysis_track_id,
+                      match_method,
+                      confidence,
+                      status,
+                      explanation
+                    FROM analysis_track_map
+                    WHERE release_track_id = ?
+                    """,
+                    (loser_release_track_id,),
+                ).fetchall()
+                for analysis_row in analysis_track_rows:
+                    _upsert_analysis_track_map_with_connection(
+                        connection,
+                        release_track_id=winner_release_track_id,
+                        analysis_track_id=int(analysis_row["analysis_track_id"]),
+                        match_method=str(analysis_row["match_method"]),
+                        confidence=float(analysis_row["confidence"]),
+                        status=str(analysis_row["status"]),
+                        explanation=str(analysis_row["explanation"] or ""),
+                    )
+                counts["analysis_track_maps_repointed"] += len(analysis_track_rows)
+
+                connection.execute(
+                    """
+                    UPDATE release_track
+                    SET
+                      duration_ms = COALESCE(duration_ms, ?),
+                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    WHERE id = ?
+                    """,
+                    (loser_row["duration_ms"], winner_release_track_id),
+                )
+
+                connection.execute(
+                    "DELETE FROM analysis_track_map WHERE release_track_id = ?",
+                    (loser_release_track_id,),
+                )
+                connection.execute(
+                    "DELETE FROM track_artist WHERE release_track_id = ?",
+                    (loser_release_track_id,),
+                )
+                connection.execute(
+                    "DELETE FROM album_track WHERE release_track_id = ?",
+                    (loser_release_track_id,),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM track_relationship
+                    WHERE from_release_track_id = ?
+                       OR to_release_track_id = ?
+                    """,
+                    (loser_release_track_id, loser_release_track_id),
+                )
+                connection.execute(
+                    "DELETE FROM release_track WHERE id = ?",
+                    (loser_release_track_id,),
+                )
+
+                counts["release_tracks_deleted"] += 1
+                any_group_merged = True
+
+            if any_group_merged:
+                counts["groups_merged"] += 1
+
+        after_merge_logs = int(connection.execute("SELECT count(*) FROM release_track_merge_log").fetchone()[0])
+
+    counts["merge_logs_created"] = after_merge_logs - before_merge_logs
+    return counts
 
 
 def apply_pending_migrations() -> None:
