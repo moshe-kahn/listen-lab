@@ -28,7 +28,7 @@ This repository now includes:
 - FastAPI backend with Spotify OAuth, encrypted token persistence, and token-backed session restore
 - live profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums views
 - playback controls and session-aware player UI
-- a track-detail overlay with album-song playback controls, inline last-played context, and same-album track switching
+- a track-detail overlay with in-place same-album switching, clickable artist/album links, preview snippets, and richer top-player controls (pause/resume, progress, and seek)
 - a recent debug page for sessionized recent-play inspection plus DB archive paging
 - restricted local mode, full mode, and a test path for probing Spotify availability
 - local history-based artist and album ranking calibration using exported Spotify extended streaming history

@@ -61,7 +61,7 @@ Current note:
 - the dashboard also supports a restricted local mode so saved history- and cache-backed sections remain usable when Spotify is unavailable or rate-limited
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
-- the dashboard now also includes a track-detail overlay iteration with album-song playback controls and a recent-debug inspection page for missing-play investigation
+- the dashboard now also includes a track-detail overlay iteration with same-album in-place switching, preview playback, richer player controls, and a recent-debug inspection page for missing-play investigation
 - track identity work now also includes a conservative three-layer model:
   - `source_track`
   - `release_track`
