@@ -22,12 +22,20 @@ from backend.app.config import get_settings
 from backend.app.db import (
     apply_pending_migrations,
     ensure_sqlite_db,
-    list_raw_spotify_recent_rows,
     list_spotify_auth_users,
     recover_stale_ingest_runs,
 )
 from backend.app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
+from backend.app.listening_log import query_listening_log
 from backend.app.logging_config import configure_logging
+from backend.app.merged_track_aggregate import get_merged_track_aggregate
+from backend.app.recent_debug_compare import build_recent_comparison_summary
+from backend.app.recent_top_tracks_db import build_recent_top_tracks_section_from_db
+from backend.app.recent_tracks_db import (
+    build_recent_tracks_section_from_db,
+    map_recent_track_row_to_canonical_item,
+    query_recent_track_rows,
+)
 from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
 from backend.app.spotify_current_playback import get_current_playback_for_user
 from backend.app.spotify_recent_polling import poll_recent_for_user
@@ -194,6 +202,37 @@ def _expires_at_from_expires_in(expires_in: int | str | None) -> str:
 
 def _parse_iso_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _format_recent_track_played_at_for_route(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = _parse_iso_utc(value)
+    except ValueError:
+        return value
+    milliseconds = int(parsed.microsecond / 1000)
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S.") + f"{milliseconds:03d}Z"
+
+
+def _normalize_recent_track_item_for_route(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = {key: value for key, value in item.items() if key != "debug"}
+    normalized["spotify_played_at"] = _format_recent_track_played_at_for_route(item.get("spotify_played_at"))
+    artists = item.get("artists")
+    if isinstance(artists, list):
+        normalized["artists"] = [
+            {
+                "artist_id": artist.get("artist_id"),
+                "name": artist.get("name"),
+            }
+            for artist in artists
+            if isinstance(artist, dict) and (artist.get("artist_id") or artist.get("name"))
+        ]
+    return normalized
+
+
+def _normalize_recent_tracks_payload_for_route(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_normalize_recent_track_item_for_route(item) for item in items]
 
 
 def _require_token(request: Request) -> str:
@@ -3838,8 +3877,14 @@ async def me_recent(
 
         try:
             _set_load_progress(request, "recent listening")
-            recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, SPOTIFY_RECENT_MAX_ITEMS)
             await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh")
+            db_recent_tracks_payload = build_recent_tracks_section_from_db(
+                limit=SPOTIFY_RECENT_MAX_ITEMS,
+                recent_range=recent_range,
+                recent_window_days=recent_window_days,
+            )
+            recent_tracks = _normalize_recent_tracks_payload_for_route(list(db_recent_tracks_payload.get("items") or []))
+            recent_tracks_available = bool(db_recent_tracks_payload.get("available"))
 
             _set_load_progress(request, "liked tracks")
             recent_likes_tracks, recent_likes_available = await _fetch_recent_liked_tracks(token, item_limit)
@@ -3922,6 +3967,181 @@ async def me_recent(
         _clear_load_progress(request)
 
 
+async def _build_legacy_recent_payload_for_debug(
+    *,
+    request: Request,
+    recent_range: str,
+    item_limit: int,
+) -> dict[str, Any]:
+    token = _require_token(request)
+    recent_window_days = 28 if recent_range == "short_term" else 180
+    try:
+        profile = await _fetch_spotify_profile(token)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            raise
+        token = await _refresh_spotify_access_token(request)
+        profile = await _fetch_spotify_profile(token)
+    user_id = profile.get("id")
+
+    try:
+        recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, SPOTIFY_RECENT_MAX_ITEMS)
+        await _sync_recent_to_db_best_effort(token, source_ref="me_recent_debug_compare")
+
+        recent_likes_tracks, recent_likes_available = await _fetch_recent_liked_tracks(token, item_limit)
+
+        cached_top_tracks_recent = _get_short_cache(f"top_tracks_{recent_range}", user_id, item_limit)
+        if cached_top_tracks_recent is not None:
+            top_tracks_recent, top_tracks_recent_available = cached_top_tracks_recent
+        else:
+            top_tracks_recent, top_tracks_recent_available = await _fetch_top_tracks(token, recent_range, item_limit)
+            _set_short_cache(
+                f"top_tracks_{recent_range}",
+                user_id,
+                item_limit,
+                (top_tracks_recent, top_tracks_recent_available),
+            )
+
+        cached_top_artists_recent = _get_short_cache(f"top_artists_{recent_range}", user_id, item_limit)
+        if cached_top_artists_recent is not None:
+            top_artists_recent, top_artists_recent_available = cached_top_artists_recent
+        else:
+            top_artists_recent, top_artists_recent_available = await _fetch_top_artists(token, recent_range, item_limit)
+            _set_short_cache(
+                f"top_artists_{recent_range}",
+                user_id,
+                item_limit,
+                (top_artists_recent, top_artists_recent_available),
+            )
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_429_TOO_MANY_REQUESTS:
+            raise
+        cached_snapshot = _load_user_recent_snapshot(user_id, recent_range)
+        if cached_snapshot:
+            return cached_snapshot
+        raise
+
+    _, top_albums_recent = _normalize_live_top_albums(
+        long_term_top_tracks=[],
+        recent_top_tracks=top_tracks_recent,
+        recent_tracks=recent_tracks,
+        liked_tracks=recent_likes_tracks,
+    )
+    top_albums_recent_available = bool(top_albums_recent)
+
+    payload = {
+        "recent_range": recent_range,
+        "recent_window_days": recent_window_days,
+        "recent_top_artists": top_artists_recent,
+        "recent_top_artists_available": top_artists_recent_available,
+        "recent_top_tracks": top_tracks_recent,
+        "recent_top_tracks_available": top_tracks_recent_available,
+        "recent_top_albums": top_albums_recent,
+        "recent_top_albums_available": top_albums_recent_available,
+        "recent_tracks": recent_tracks,
+        "recent_tracks_available": recent_tracks_available,
+        "recent_likes_tracks": recent_likes_tracks,
+        "recent_likes_available": recent_likes_available,
+    }
+    _store_user_recent_snapshot(user_id, recent_range, payload)
+    _store_user_profile_snapshot(
+        user_id,
+        {
+            "recent_likes_tracks": recent_likes_tracks,
+            "recent_likes_available": recent_likes_available,
+        },
+    )
+    return payload
+
+
+@app.get("/debug/me/recent/compare")
+async def debug_me_recent_compare(
+    request: Request,
+    recent_range: str = "short_term",
+    limit: int = SECTION_PREVIEW_LIMIT,
+) -> dict[str, Any]:
+    if recent_range not in {"short_term", "medium_term"}:
+        raise HTTPException(status_code=400, detail="Unsupported recent range.")
+    inspect_limit = max(1, min(int(limit), 20))
+    legacy_payload = await _build_legacy_recent_payload_for_debug(
+        request=request,
+        recent_range=recent_range,
+        item_limit=inspect_limit,
+    )
+    recent_window_days = 28 if recent_range == "short_term" else 180
+    db_recent_tracks_payload = build_recent_tracks_section_from_db(
+        limit=inspect_limit,
+        recent_range=recent_range,
+        recent_window_days=recent_window_days,
+    )
+    db_recent_top_tracks_payload = build_recent_top_tracks_section_from_db(
+        limit=inspect_limit,
+        recent_range=recent_range,
+        recent_window_days=recent_window_days,
+    )
+    db_recent_track_rows = query_recent_track_rows(limit=inspect_limit)
+    diff_summary = build_recent_comparison_summary(
+        legacy_payload=legacy_payload,
+        db_recent_tracks_payload=db_recent_tracks_payload,
+        db_recent_top_tracks_payload=db_recent_top_tracks_payload,
+        db_recent_track_rows=db_recent_track_rows,
+        inspect_limit=inspect_limit,
+    )
+    return {
+        "recent_range": recent_range,
+        "recent_window_days": recent_window_days,
+        "inspect_limit": inspect_limit,
+        "legacy_recent_payload": legacy_payload,
+        "db_recent_tracks": db_recent_tracks_payload,
+        "db_recent_top_tracks": db_recent_top_tracks_payload,
+        "diff_summary": diff_summary,
+    }
+
+
+@app.get("/debug/tracks/merged-aggregate")
+async def debug_tracks_merged_aggregate(
+    request: Request,
+    limit: int = 200,
+    recent_window_days: int = 28,
+    source_filter: str = "all",
+) -> dict[str, Any]:
+    _require_token(request)
+    result = get_merged_track_aggregate(
+        limit=max(1, min(int(limit), 500)),
+        recent_window_days=max(0, int(recent_window_days)),
+        source_filter=source_filter if source_filter in {"all", "recent", "history", "both"} else "all",
+    )
+    return {
+        "limit": max(1, min(int(limit), 500)),
+        "recent_window_days": max(0, int(recent_window_days)),
+        "source_filter": source_filter if source_filter in {"all", "recent", "history", "both"} else "all",
+        "returned_items": len(result["items"]),
+        "excluded_unknown_identity_count": result["excluded_unknown_identity_count"],
+        "items": result["items"],
+    }
+
+
+@app.get("/debug/listening-log")
+async def debug_listening_log(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    source_filter: str = "all",
+) -> dict[str, Any]:
+    user_id = _session_user_id(request) or _restore_session_user_from_token_store(request)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated with Spotify.",
+        )
+    payload = query_listening_log(
+        limit=limit,
+        offset=offset,
+        source_filter=source_filter if source_filter in {"all", "api", "history", "both"} else "all",
+    )
+    return dict(payload)
+
+
 @app.get("/me/recent/archive")
 async def me_recent_archive(
     request: Request,
@@ -3932,98 +4152,14 @@ async def me_recent_archive(
     bounded_limit = max(1, min(int(limit), 200))
     bounded_offset = max(0, int(offset))
 
-    rows = list_raw_spotify_recent_rows(limit=bounded_limit + 1, offset=bounded_offset)
+    rows = query_recent_track_rows(limit=bounded_limit + 1, offset=bounded_offset)
     has_more = len(rows) > bounded_limit
     rows = rows[:bounded_limit]
 
-    tracks: list[dict[str, Any]] = []
-    for row in rows:
-        payload_obj: dict[str, Any] = {}
-        try:
-            payload_value = row.get("raw_payload_json")
-            if isinstance(payload_value, str) and payload_value:
-                parsed_payload = json.loads(payload_value)
-                if isinstance(parsed_payload, dict):
-                    payload_obj = parsed_payload
-        except ValueError:
-            payload_obj = {}
-
-        track_payload = payload_obj.get("track") if isinstance(payload_obj.get("track"), dict) else {}
-        album_payload = track_payload.get("album") if isinstance(track_payload.get("album"), dict) else {}
-        context_payload = payload_obj.get("context") if isinstance(payload_obj.get("context"), dict) else {}
-        artists_payload = track_payload.get("artists") if isinstance(track_payload.get("artists"), list) else []
-        artists: list[dict[str, Any]] = []
-        for artist in artists_payload:
-            if not isinstance(artist, dict):
-                continue
-            artist_name = artist.get("name")
-            if not artist_name:
-                continue
-            artists.append({"artist_id": artist.get("id"), "name": artist_name})
-
-        release_date = album_payload.get("release_date")
-        duration_ms_raw = row.get("track_duration_ms")
-        duration_ms = int(duration_ms_raw) if isinstance(duration_ms_raw, (int, float)) else None
-        estimated_played_ms_raw = row.get("ms_played_estimate")
-        estimated_played_ms = (
-            int(estimated_played_ms_raw)
-            if isinstance(estimated_played_ms_raw, (int, float))
-            else None
-        )
-
-        track_entry: dict[str, Any] = {
-            "track_id": row.get("spotify_track_id"),
-            "track_name": row.get("track_name_raw"),
-            "artist_name": row.get("artist_name_raw"),
-            "album_name": row.get("album_name_raw"),
-            "album_release_year": str(release_date)[:4] if release_date else None,
-            "duration_ms": duration_ms,
-            "duration_seconds": round(duration_ms / 1000.0, 3) if isinstance(duration_ms, int) and duration_ms >= 0 else None,
-            "uri": row.get("spotify_track_uri"),
-            "preview_url": track_payload.get("preview_url"),
-            "url": (track_payload.get("external_urls") or {}).get("spotify"),
-            "album_url": (album_payload.get("external_urls") or {}).get("spotify"),
-            "image_url": ((album_payload.get("images") or [{}])[0]).get("url"),
-            "album_id": row.get("spotify_album_id"),
-            "artists": artists,
-            "spotify_played_at": row.get("played_at"),
-            "spotify_played_at_unix_ms": row.get("played_at_unix_ms"),
-            "spotify_context_type": row.get("context_type"),
-            "spotify_context_uri": row.get("context_uri"),
-            "spotify_context_url": (context_payload.get("external_urls") or {}).get("spotify"),
-            "spotify_context_href": context_payload.get("href"),
-            "spotify_is_local": payload_obj.get("is_local"),
-            "spotify_track_type": track_payload.get("type"),
-            "spotify_track_number": track_payload.get("track_number"),
-            "spotify_disc_number": track_payload.get("disc_number"),
-            "spotify_explicit": track_payload.get("explicit"),
-            "spotify_popularity": track_payload.get("popularity"),
-            "spotify_album_type": album_payload.get("album_type"),
-            "spotify_album_total_tracks": album_payload.get("total_tracks"),
-            "spotify_available_markets_count": len(track_payload.get("available_markets") or []),
-            "estimated_played_ms": estimated_played_ms,
-            "estimated_played_seconds": round(estimated_played_ms / 1000.0, 3) if isinstance(estimated_played_ms, int) and estimated_played_ms >= 0 else None,
-            "estimated_completion_ratio": (
-                round(min(1.0, estimated_played_ms / duration_ms), 4)
-                if isinstance(estimated_played_ms, int) and isinstance(duration_ms, int) and duration_ms > 0
-                else None
-            ),
-        }
-        tracks.append(track_entry)
-
-    for index, track in enumerate(tracks):
-        played_at = track.get("spotify_played_at")
-        gap_ms: int | None = None
-        if isinstance(played_at, str) and index + 1 < len(tracks):
-            older_played_at = tracks[index + 1].get("spotify_played_at")
-            if isinstance(older_played_at, str):
-                try:
-                    gap_ms_candidate = int((_parse_iso_utc(played_at) - _parse_iso_utc(older_played_at)).total_seconds() * 1000)
-                    if gap_ms_candidate > 0:
-                        gap_ms = gap_ms_candidate
-                except ValueError:
-                    gap_ms = None
-        track["played_at_gap_ms"] = gap_ms
+    tracks = [
+        _normalize_recent_track_item_for_route(dict(map_recent_track_row_to_canonical_item(row)))
+        for row in rows
+    ]
 
     return {
         "items": tracks,

@@ -228,8 +228,12 @@ async def get_current_playback_for_user(user_id: str) -> dict[str, Any]:
                 has_playback=False,
                 raw_payload_json=None,
             )
-    except Exception:
-        logger.warning("Failed to persist live playback observation for user_id=%s", str(user_id))
+    except Exception as exc:
+        logger.warning(
+            "Failed to persist live playback observation for user_id=%s: %s",
+            str(user_id),
+            str(exc),
+        )
 
     return {
         **base,

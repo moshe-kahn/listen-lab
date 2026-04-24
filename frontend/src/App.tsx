@@ -18,6 +18,7 @@ type ProfileProgressResponse = {
 };
 
 type RecentTrack = {
+  event_id?: number | null;
   track_id: string | null;
   track_name: string | null;
   artist_name: string | null;
@@ -68,6 +69,19 @@ type RecentTrack = {
   span_months_count?: number | null;
   consistency_ratio?: number | null;
   longevity_score?: number | null;
+  has_recent_source?: boolean | null;
+  has_history_source?: boolean | null;
+  source_label?: "recent" | "history" | "both" | "api" | null;
+  recent_source_event_count?: number | null;
+  history_source_event_count?: number | null;
+  matched_source_event_count?: number | null;
+  timing_source?: string | null;
+  matched_state?: string | null;
+  raw_spotify_recent_id?: number | null;
+  raw_spotify_history_id?: number | null;
+  spotify_skipped?: boolean | null;
+  spotify_shuffle?: boolean | null;
+  spotify_offline?: boolean | null;
 };
 
 type MatchCounts = {
@@ -204,6 +218,26 @@ type RecentArchiveResponse = {
   offset: number;
 };
 
+type ListeningLogResponse = {
+  items: RecentTrack[];
+  has_more: boolean;
+  limit: number;
+  offset: number;
+  source_filter: "all" | "api" | "history" | "both";
+};
+
+type MergedTrackSourceFilter = "all" | "recent" | "history" | "both";
+type RecentDebugSourceFilter = "all" | "api" | "history" | "both";
+
+type MergedTrackAggregateResponse = {
+  limit: number;
+  recent_window_days: number;
+  source_filter: MergedTrackSourceFilter;
+  returned_items: number;
+  excluded_unknown_identity_count: number;
+  items: RecentTrack[];
+};
+
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const githubRepoUrl = "https://github.com/moshe-kahn/listen-labs";
 const EXPERIENCE_MODE_STORAGE_KEY = "listenlab-experience-mode";
@@ -223,6 +257,18 @@ const DEBUG_GAP_MARKER_MAX_MS = 10 * 60 * 1000;
 const RECENT_RANGE_OPTIONS = [
   { value: "short_term", label: "4 weeks" },
   { value: "medium_term", label: "6 months" },
+] as const;
+const MERGED_TRACK_SOURCE_FILTER_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "recent", label: "Recent" },
+  { value: "history", label: "History" },
+  { value: "both", label: "Both" },
+] as const;
+const RECENT_DEBUG_SOURCE_FILTER_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "api", label: "API" },
+  { value: "history", label: "History" },
+  { value: "both", label: "Both" },
 ] as const;
 type RecentRange = (typeof RECENT_RANGE_OPTIONS)[number]["value"];
 type AnalysisMode = "quick" | "full";
@@ -309,6 +355,7 @@ type DashboardListCardProps = {
   tertiaryText?: string | null;
   metricText?: string | null;
   primaryBadgeText?: string | null;
+  secondaryBadgeText?: string | null;
   trackUri?: string | null;
   previewTrack?: RecentTrack | null;
   primaryClamp?: "single-line-ellipsis" | "two-line-clamp";
@@ -527,11 +574,20 @@ export function App() {
   const [showDebugLinkFields, setShowDebugLinkFields] = useState(false);
   const [openDebugSessions, setOpenDebugSessions] = useState<Record<string, boolean>>({});
   const [openDebugTracks, setOpenDebugTracks] = useState<Record<string, boolean>>({});
-  const [recentDebugTracks, setRecentDebugTracks] = useState<RecentTrack[]>([]);
-  const [dbArchiveTracks, setDbArchiveTracks] = useState<RecentTrack[]>([]);
-  const [dbArchiveHasMore, setDbArchiveHasMore] = useState(false);
-  const [dbArchiveOffset, setDbArchiveOffset] = useState(0);
-  const [dbArchiveLoading, setDbArchiveLoading] = useState(false);
+  const [listeningLogTracks, setListeningLogTracks] = useState<RecentTrack[]>([]);
+  const [listeningLogHasMore, setListeningLogHasMore] = useState(false);
+  const [listeningLogOffset, setListeningLogOffset] = useState(0);
+  const [listeningLogLoading, setListeningLogLoading] = useState(false);
+  const [listeningLogLoaded, setListeningLogLoaded] = useState(false);
+  const [listeningLogError, setListeningLogError] = useState("");
+  const [listeningLogLastLoadedAt, setListeningLogLastLoadedAt] = useState<number | null>(null);
+  const [recentDebugSourceFilter, setRecentDebugSourceFilter] = useState<RecentDebugSourceFilter>("all");
+  const [mergedTracks, setMergedTracks] = useState<RecentTrack[]>([]);
+  const [mergedTracksLoading, setMergedTracksLoading] = useState(false);
+  const [mergedTracksLoaded, setMergedTracksLoaded] = useState(false);
+  const [mergedTracksError, setMergedTracksError] = useState("");
+  const [mergedTracksExcludedUnknownCount, setMergedTracksExcludedUnknownCount] = useState(0);
+  const [mergedTrackSourceFilter, setMergedTrackSourceFilter] = useState<MergedTrackSourceFilter>("all");
   const [recentRangeRefreshPending, setRecentRangeRefreshPending] = useState(false);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>("quick");
   const [experienceMode, setExperienceMode] = useState<ExperienceMode>(() => {
@@ -727,12 +783,46 @@ export function App() {
       : Math.max(0, Math.min(1, 1 - (reloadCooldownUntil - reloadCountdownNow) / Math.max(reloadCooldownDurationMs, 1)));
 
   useEffect(() => {
-    if (!profile) {
+    if (appPage !== "recentDebug" || !profile || listeningLogLoaded || listeningLogLoading) {
       return;
     }
-    const latest = Array.isArray(profile.recent_tracks) ? [...profile.recent_tracks] : [];
-    setRecentDebugTracks(latest);
-  }, [profile]);
+    void loadListeningLogBatch(true);
+  }, [appPage, listeningLogLoaded, listeningLogLoading, profile, recentDebugSourceFilter]);
+
+  useEffect(() => {
+    if (appPage !== "tracksOnly" || !profile || mergedTracksLoading || mergedTracksLoaded) {
+      return;
+    }
+
+    let cancelled = false;
+    setMergedTracksLoading(true);
+    setMergedTracksError("");
+    void fetchMergedTrackAggregate()
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        setMergedTracks(data.items);
+        setMergedTracksExcludedUnknownCount(Math.max(0, data.excluded_unknown_identity_count ?? 0));
+        setMergedTracksLoaded(true);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+        setMergedTracksError(formatUiErrorMessage(error, "Failed to load merged tracks."));
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+        setMergedTracksLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [appPage, mergedTracksLoaded, mergedTracksLoading, profile]);
 
   useEffect(() => {
     if (
@@ -2661,6 +2751,78 @@ export function App() {
     );
   }
 
+  function formatTrackSourceBadge(track: RecentTrack): string | null {
+    if (track.source_label === "both") {
+      return "Both";
+    }
+    if (track.source_label === "api") {
+      return "API";
+    }
+    if (track.source_label === "recent") {
+      return "Recent";
+    }
+    if (track.source_label === "history") {
+      return "History";
+    }
+    if (track.has_recent_source && track.has_history_source) {
+      return "Both";
+    }
+    if (track.has_recent_source) {
+      return "Recent";
+    }
+    if (track.has_history_source) {
+      return "History";
+    }
+    return null;
+  }
+
+  function renderMergedTrackSourceFilterToggle() {
+    return (
+      <div className="track-ranking-toggle" role="group" aria-label="Merged track source filter">
+        {MERGED_TRACK_SOURCE_FILTER_OPTIONS.map((option) => (
+          <button
+            className={`track-ranking-chip${mergedTrackSourceFilter === option.value ? " track-ranking-chip-active" : ""}`}
+            key={option.value}
+            onClick={() => setMergedTrackSourceFilter(option.value)}
+            type="button"
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  function renderRecentDebugSourceFilterToggle() {
+    return (
+      <div className="track-ranking-toggle" role="group" aria-label="Recent debug source filter">
+        {RECENT_DEBUG_SOURCE_FILTER_OPTIONS.map((option) => (
+          <button
+            className={`track-ranking-chip${recentDebugSourceFilter === option.value ? " track-ranking-chip-active" : ""}`}
+            key={option.value}
+            onClick={() => {
+              if (recentDebugSourceFilter === option.value) {
+                return;
+              }
+              setRecentDebugSourceFilter(option.value);
+              setListeningLogTracks([]);
+              setListeningLogHasMore(false);
+              setListeningLogOffset(0);
+              setListeningLogLoaded(false);
+              setListeningLogLastLoadedAt(null);
+              setListeningLogError("");
+              setOpenDebugSessions({});
+              setOpenDebugTracks({});
+            }}
+            type="button"
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   function openAndScrollToSection(section: SectionKey, anchorId: string) {
     setAppPage("dashboard");
     setOpenSections((current) => ({
@@ -2869,6 +3031,34 @@ export function App() {
 
   function getTrackLongevityScore(track: RecentTrack) {
     return Number(track.longevity_score ?? 0);
+  }
+
+  function formatTrackLongevitySortMetric(track: RecentTrack) {
+    const score = getTrackLongevityScore(track);
+    if (score <= 0) {
+      return null;
+    }
+    const longevity = formatTrackLongevity(track) ?? "0d";
+    return `${score.toFixed(2)} | ${longevity}`;
+  }
+
+  function formatTrackRankingMetric(track: RecentTrack) {
+    if (trackRankingMode === "plays") {
+      const plays = getTrackPlayCount(track);
+      return plays > 0 ? `${plays} plays` : null;
+    }
+    if (trackRankingMode === "longevity") {
+      return formatTrackLongevitySortMetric(track);
+    }
+    const plays = getTrackPlayCount(track);
+    const longevityMetric = formatTrackLongevitySortMetric(track);
+    if (plays > 0 && longevityMetric) {
+      return `${plays} plays | ${longevityMetric}`;
+    }
+    if (plays > 0) {
+      return `${plays} plays`;
+    }
+    return longevityMetric;
   }
 
   function formatTrackLongevityWithConsistency(track: RecentTrack) {
@@ -3596,6 +3786,20 @@ export function App() {
     setPlayerMenuOpen(false);
     setCurrentTrack(null);
     setPlayerReady(false);
+    setListeningLogTracks([]);
+    setListeningLogHasMore(false);
+    setListeningLogOffset(0);
+    setListeningLogLoading(false);
+    setListeningLogLoaded(false);
+    setListeningLogError("");
+    setListeningLogLastLoadedAt(null);
+    setRecentDebugSourceFilter("all");
+    setMergedTracks([]);
+    setMergedTracksLoaded(false);
+    setMergedTracksLoading(false);
+    setMergedTracksError("");
+    setMergedTracksExcludedUnknownCount(0);
+    setMergedTrackSourceFilter("all");
   }
 
   function renderPaging(section: SectionKey, itemCount: number) {
@@ -3644,6 +3848,7 @@ export function App() {
     tertiaryText,
     metricText,
     primaryBadgeText,
+    secondaryBadgeText,
     trackUri,
     previewTrack,
     primaryClamp = "single-line-ellipsis",
@@ -3697,6 +3902,7 @@ export function App() {
               <div className="card-primary-line">
                 <strong className={`card-primary ${primaryClamp}`}>{primaryText}</strong>
                 {primaryBadgeText ? <span className="card-inline-badge">{primaryBadgeText}</span> : null}
+                {secondaryBadgeText ? <span className="card-inline-badge">{secondaryBadgeText}</span> : null}
               </div>
               <p
                 aria-hidden={secondaryPlaceholder}
@@ -3814,24 +4020,15 @@ export function App() {
                 imageAlt: `${row.track.album_name ?? row.track.track_name ?? "Album"} cover`,
                 fallbackLabel: "T",
                 primaryText: row.track.track_name ?? "Unknown track",
-                primaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
+                primaryBadgeText: formatTrackSourceBadge(row.track),
+                secondaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
                 secondaryText: row.track.artist_name ?? "Unknown artist",
                 tertiaryText: row.track.album_name ?? "Unknown album",
                 metricText: isAllTimeTrackSection
                   ? (
                       section === "tracksAllTimeNew"
                         ? `${row.track.play_count ?? 0} | ${formatTrackLongevity(row.track) ?? "0d"}`
-                        : (
-                            trackRankingMode === "longevity"
-                              ? formatTrackLongevityMetric(row.track)
-                              : (trackRankingMode === "mix"
-                                ? (
-                                    (row.track.play_count != null && row.track.play_count > 0) || (row.track.listening_span_days != null && row.track.listening_span_days > 0)
-                                      ? `${row.track.play_count ?? 0} | ${formatTrackLongevity(row.track) ?? "0d"}`
-                                      : null
-                                  )
-                                : (row.track.play_count != null && row.track.play_count > 0 ? `${row.track.play_count}` : null))
-                          )
+                        : formatTrackRankingMetric(row.track)
                     )
                   : null,
                 trackUri: row.track.uri ?? null,
@@ -3854,12 +4051,41 @@ export function App() {
       return null;
     }
 
+    const filteredMergedTracks = mergedTracks.filter((track) => {
+      if (mergedTrackSourceFilter === "recent") {
+        return track.source_label === "recent" || (track.has_recent_source && !track.has_history_source);
+      }
+      if (mergedTrackSourceFilter === "history") {
+        return track.source_label === "history" || (track.has_history_source && !track.has_recent_source);
+      }
+      if (mergedTrackSourceFilter === "both") {
+        return track.source_label === "both" || (track.has_recent_source && track.has_history_source);
+      }
+      return true;
+    });
+    const filteredTrackCount = filteredMergedTracks.length;
+    const sourceFilterLabel = MERGED_TRACK_SOURCE_FILTER_OPTIONS.find((option) => option.value === mergedTrackSourceFilter)?.label ?? "All";
+    const mergedTrackEmptyCopy = mergedTracksLoaded
+      ? `No ${sourceFilterLabel.toLowerCase()} tracks were returned from the merged aggregate.`
+      : "Loading merged tracks...";
+    const mergedTrackUnavailableCopy = mergedTracksLoading
+      ? "Loading merged tracks..."
+      : (mergedTracksError || "Merged tracks are not available yet.");
+
     return (
       <section className="info-card info-card-wide tracks-only-card" id="tracks-page">
         <div className="tracks-only-header">
-          <div className="section-column-header">
-            <h2>Tracks</h2>
-            {renderTrackRankingToggle()}
+          <div className="section-column-header tracks-only-header-copy">
+            <div>
+              <h2>Tracks</h2>
+              <p className="tracks-only-subtitle">
+                Merged play-event aggregate with source provenance.
+              </p>
+            </div>
+            <div className="section-column-header-actions tracks-only-controls">
+              {renderMergedTrackSourceFilterToggle()}
+              {renderTrackRankingToggle()}
+            </div>
           </div>
           <button
             className="secondary-button tracks-only-back-button"
@@ -3869,15 +4095,28 @@ export function App() {
             Back to dashboard
           </button>
         </div>
+        <div className="tracks-only-diagnostics">
+          <span>{filteredTrackCount} visible tracks</span>
+          {mergedTracksExcludedUnknownCount > 0 ? (
+            <span>{mergedTracksExcludedUnknownCount} unknown-identity events excluded</span>
+          ) : null}
+        </div>
+        {mergedTracksError ? (
+          <p className="empty-copy">
+            {mergedTracksError}
+            {" "}
+            Refresh this page after confirming the frontend is pointed at the same backend where `/auth/session` is authenticated.
+          </p>
+        ) : null}
         <div className="artists-grid">
           <div className="artists-column">
             <h3>Current formula</h3>
             {renderTrackColumn(
               "tracksAllTimeCurrent",
-              profile.top_tracks,
-              profile.top_tracks_available,
-              "Spotify returned no top tracks for this account.",
-              quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
+              filteredMergedTracks,
+              mergedTracksLoaded && !mergedTracksLoading && !mergedTracksError,
+              mergedTrackEmptyCopy,
+              mergedTrackUnavailableCopy,
               undefined,
               false,
             )}
@@ -3886,10 +4125,10 @@ export function App() {
             <h3>New formula</h3>
             {renderTrackColumn(
               "tracksAllTimeNew",
-              profile.top_tracks,
-              profile.top_tracks_available,
-              "Spotify returned no top tracks for this account.",
-              quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
+              filteredMergedTracks,
+              mergedTracksLoaded && !mergedTracksLoading && !mergedTracksError,
+              mergedTrackEmptyCopy,
+              mergedTrackUnavailableCopy,
               undefined,
               false,
             )}
@@ -4137,6 +4376,7 @@ export function App() {
     }
 
     const trackKey = (track: RecentTrack): string => [
+      track.event_id ?? "no-event-id",
       track.spotify_played_at ?? "na",
       track.track_id ?? "no-id",
       track.uri ?? "no-uri",
@@ -4144,29 +4384,14 @@ export function App() {
       track.artist_name ?? "no-artist",
     ].join("||");
 
-    const latestSortedTracks = [...recentDebugTracks].sort((a, b) => {
-      const aMs = trackPlayedAtMs(a) ?? -1;
-      const bMs = trackPlayedAtMs(b) ?? -1;
-      return bMs - aMs;
-    });
-    const mergedAllTracks: RecentTrack[] = [];
-    const mergedSeen = new Set<string>();
-    for (const track of [...latestSortedTracks, ...dbArchiveTracks]) {
-      const key = trackKey(track);
-      if (mergedSeen.has(key)) {
-        continue;
-      }
-      mergedSeen.add(key);
-      mergedAllTracks.push(track);
-    }
-    const allSortedTracks = [...mergedAllTracks].sort((a, b) => {
+    const allSortedTracks = [...listeningLogTracks].sort((a, b) => {
       const aMs = trackPlayedAtMs(a) ?? -1;
       const bMs = trackPlayedAtMs(b) ?? -1;
       return bMs - aMs;
     });
     const visibleTracks = allSortedTracks;
     const sessions = buildDebugSessions(visibleTracks);
-    const canTryLoadMore = experienceMode === "full" && (dbArchiveOffset === 0 || dbArchiveHasMore);
+    const canTryLoadMore = listeningLogOffset === 0 || listeningLogHasMore;
     const buildSpotifyUrl = (kind: "track" | "artist" | "album", id: string | null): string =>
       id ? `https://open.spotify.com/${kind}/${id}` : "";
     const firstArtist = (track: RecentTrack) => track.artists?.find((artist) => Boolean(artist?.name || artist?.id || artist?.artist_id)) ?? null;
@@ -4236,6 +4461,12 @@ export function App() {
     };
 
     const debugFieldOrder = [
+      "event_id",
+      "source_label",
+      "raw_spotify_recent_id",
+      "raw_spotify_history_id",
+      "timing_source",
+      "matched_state",
       "track_id",
       "track_name",
       "artist_name",
@@ -4257,8 +4488,22 @@ export function App() {
       <section className="info-card info-card-wide tracks-only-card" id="recent-debug-page">
         <div className="tracks-only-header">
           <div className="section-column-header">
-            <h2>Recent Songs Debug</h2>
+            <div>
+              <h2>Listening Log</h2>
+              <p className="tracks-only-subtitle">
+                Canonical play events from the merged fact layer.
+              </p>
+            </div>
             <div className="recent-debug-controls">
+              {renderRecentDebugSourceFilterToggle()}
+              <button
+                className="secondary-button"
+                disabled={listeningLogLoading}
+                onClick={() => void loadListeningLogBatch(true)}
+                type="button"
+              >
+                {listeningLogLoading ? "Loading..." : "Reload log"}
+              </button>
               <label className="recent-debug-filter">
                 <input
                   checked={showDebugLinkFields}
@@ -4277,8 +4522,24 @@ export function App() {
             Back to activity
           </button>
         </div>
-        {visibleTracks.length === 0 ? (
-          <p className="empty-copy">No recent songs are currently available.</p>
+        <div className="tracks-only-diagnostics">
+          <span>{visibleTracks.length} visible play events</span>
+          {listeningLogLastLoadedAt ? (
+            <span>Loaded {new Date(listeningLogLastLoadedAt).toLocaleTimeString()}</span>
+          ) : null}
+        </div>
+        {listeningLogError ? (
+          <p className="empty-copy">
+            {listeningLogError}
+            {" "}
+            Refresh this page after confirming the frontend is using the same backend where `/auth/session` is authenticated.
+          </p>
+        ) : null}
+        {visibleTracks.length === 0 && listeningLogLoading ? (
+          <p className="empty-copy">Loading listening log...</p>
+        ) : null}
+        {visibleTracks.length === 0 && !listeningLogLoading && !listeningLogError ? (
+          <p className="empty-copy">No play events are currently available.</p>
         ) : (
           <div className="recent-debug-list">
             {sessions.map((session, sessionIndex) => {
@@ -4380,6 +4641,13 @@ export function App() {
                                   >
                                     {track.track_name ?? "Unknown track"}
                                   </button>
+                                  <span className="card-inline-badge">
+                                    {track.source_label === "both"
+                                      ? "Both"
+                                      : track.source_label === "history"
+                                        ? "History"
+                                        : "API"}
+                                  </span>
                                 </div>
                                 <button
                                   className="empty-copy recent-debug-link recent-debug-item-meta"
@@ -4466,20 +4734,18 @@ export function App() {
             <div className="recent-debug-footer">
               <button
                 className="secondary-button"
-                disabled={!canTryLoadMore || dbArchiveLoading}
-                onClick={() => void loadRecentArchiveBatch(false)}
+                disabled={!canTryLoadMore || listeningLogLoading}
+                onClick={() => void loadListeningLogBatch(false)}
                 title={
-                  dbArchiveLoading
-                    ? "Loading older tracks..."
-                    : experienceMode !== "full"
-                      ? "Older database history requires full Spotify mode"
-                      : canTryLoadMore
-                        ? "Load 50 more tracks from database history"
-                        : "No additional tracks in database history"
+                  listeningLogLoading
+                    ? "Loading older play events..."
+                    : canTryLoadMore
+                      ? "Load 50 more play events from the listening log"
+                      : "No additional play events in the listening log"
                 }
                 type="button"
               >
-                {dbArchiveLoading ? "Loading..." : canTryLoadMore ? "Show 50 more" : "No more yet"}
+                {listeningLogLoading ? "Loading..." : canTryLoadMore ? "Show 50 more" : "No more yet"}
               </button>
             </div>
           </div>
@@ -4894,14 +5160,18 @@ export function App() {
     return (await response.json()) as RecentSectionResponse;
   }
 
-  async function fetchRecentArchive(limit: number, offset: number): Promise<RecentArchiveResponse> {
-    const endpoint = "/me/recent/archive";
+  async function fetchListeningLog(
+    limit: number,
+    offset: number,
+    sourceFilter: RecentDebugSourceFilter,
+  ): Promise<ListeningLogResponse> {
+    const endpoint = "/debug/listening-log";
     const response = await fetch(
-      `${apiBaseUrl}${endpoint}?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      `${apiBaseUrl}${endpoint}?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}&source_filter=${encodeURIComponent(sourceFilter)}`,
       { credentials: "include" },
     );
     if (!response.ok) {
-      let detail = "Failed to load recent archive.";
+      let detail = "Failed to load listening log.";
       try {
         const payload = (await response.json()) as { detail?: string };
         if (payload.detail) {
@@ -4910,27 +5180,62 @@ export function App() {
       } catch {
         // ignore invalid error payloads
       }
-      throw new Error(detail);
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Listening Log (${response.status}): ${detail}`);
     }
-    return (await response.json()) as RecentArchiveResponse;
+    return (await response.json()) as ListeningLogResponse;
   }
 
-  async function loadRecentArchiveBatch(reset: boolean = false) {
-    if (dbArchiveLoading || experienceMode !== "full") {
+  async function fetchMergedTrackAggregate(): Promise<MergedTrackAggregateResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/merged-aggregate?limit=200&recent_window_days=28&source_filter=all`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load merged track aggregate.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Merged Tracks (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as MergedTrackAggregateResponse;
+  }
+
+  async function loadListeningLogBatch(reset: boolean = false) {
+    if (listeningLogLoading) {
       return;
     }
-    setDbArchiveLoading(true);
+    setListeningLogLoading(true);
+    setListeningLogError("");
     try {
-      const targetOffset = reset ? 0 : dbArchiveOffset;
-      const archive = await fetchRecentArchive(50, targetOffset);
-      setDbArchiveTracks((current) => (reset ? archive.items : [...current, ...archive.items]));
-      setDbArchiveOffset(targetOffset + archive.items.length);
-      setDbArchiveHasMore(Boolean(archive.has_more));
+      const targetOffset = reset ? 0 : listeningLogOffset;
+      const payload = await fetchListeningLog(50, targetOffset, recentDebugSourceFilter);
+      setListeningLogTracks((current) => (reset ? payload.items : [...current, ...payload.items]));
+      setListeningLogOffset(targetOffset + payload.items.length);
+      setListeningLogHasMore(Boolean(payload.has_more));
+      setListeningLogLoaded(true);
+      setListeningLogLastLoadedAt(Date.now());
     } catch (error) {
-      const message = formatUiErrorMessage(error, "Failed to load recent archive.");
-      setStatusHistory((current) => [...current, `Recent archive error: ${message}`]);
+      const message = formatUiErrorMessage(error, "Failed to load listening log.");
+      setStatusHistory((current) => [...current, `Listening log error: ${message}`]);
+      setListeningLogError(message);
+      if (reset) {
+        setListeningLogTracks([]);
+        setListeningLogOffset(0);
+        setListeningLogHasMore(false);
+      }
     } finally {
-      setDbArchiveLoading(false);
+      setListeningLogLoading(false);
     }
   }
 
@@ -5448,10 +5753,21 @@ export function App() {
                     <div className="section-column-header-actions">
                       <button
                         className="secondary-button tracks-page-link-button"
-                        onClick={() => setAppPage("recentDebug")}
+                        onClick={() => {
+                          setListeningLogTracks([]);
+                          setListeningLogHasMore(false);
+                          setListeningLogOffset(0);
+                          setListeningLogLoaded(false);
+                          setListeningLogLoading(false);
+                          setListeningLogError("");
+                          setListeningLogLastLoadedAt(null);
+                          setOpenDebugSessions({});
+                          setOpenDebugTracks({});
+                          setAppPage("recentDebug");
+                        }}
                         type="button"
                       >
-                        Open recent debug
+                        Open listening log
                       </button>
                     </div>
                   </div>

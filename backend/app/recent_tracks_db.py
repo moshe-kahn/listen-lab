@@ -9,6 +9,7 @@ from backend.app.track_sections import CanonicalTrackSectionItem, CanonicalTrack
 
 
 class RecentTrackQueryRow(TypedDict):
+    raw_row_id: int
     source_row_key: str
     played_at: str
     played_at_unix_ms: int | None
@@ -40,6 +41,70 @@ class RecentTrackQueryRow(TypedDict):
     spotify_album_total_tracks: int | None
     spotify_available_markets_count: int | None
     played_at_gap_ms: int | None
+    has_recent_source: bool
+    has_history_source: bool
+    source_label: str
+    recent_source_event_count: int
+    history_source_event_count: int
+    matched_source_event_count: int
+
+
+def _fetch_recent_track_provenance(raw_row_ids: list[int]) -> dict[int, dict[str, int]]:
+    normalized_ids = [int(raw_row_id) for raw_row_id in dict.fromkeys(raw_row_ids) if int(raw_row_id) > 0]
+    if not normalized_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+              raw_spotify_recent_id,
+              CASE WHEN raw_spotify_recent_id IS NOT NULL THEN 1 ELSE 0 END AS recent_source_event_count,
+              CASE WHEN raw_spotify_history_id IS NOT NULL THEN 1 ELSE 0 END AS history_source_event_count,
+              CASE WHEN raw_spotify_recent_id IS NOT NULL AND raw_spotify_history_id IS NOT NULL THEN 1 ELSE 0 END AS matched_source_event_count
+            FROM v_fact_play_event_with_sources
+            WHERE raw_spotify_recent_id IN ({placeholders})
+            """,
+            normalized_ids,
+        ).fetchall()
+
+    provenance_by_row_id: dict[int, dict[str, int]] = {}
+    for row in rows:
+        raw_spotify_recent_id = int(row["raw_spotify_recent_id"] or 0)
+        if raw_spotify_recent_id <= 0:
+            continue
+        provenance_by_row_id[raw_spotify_recent_id] = {
+            "recent_source_event_count": int(row["recent_source_event_count"] or 0),
+            "history_source_event_count": int(row["history_source_event_count"] or 0),
+            "matched_source_event_count": int(row["matched_source_event_count"] or 0),
+        }
+    return provenance_by_row_id
+
+
+def _attach_recent_track_provenance(rows: list[RecentTrackQueryRow]) -> list[RecentTrackQueryRow]:
+    provenance_by_row_id = _fetch_recent_track_provenance([int(row.get("raw_row_id") or 0) for row in rows])
+
+    for row in rows:
+        provenance = provenance_by_row_id.get(int(row.get("raw_row_id") or 0), {})
+        recent_source_event_count = max(1, int(provenance.get("recent_source_event_count") or 0))
+        history_source_event_count = int(provenance.get("history_source_event_count") or 0)
+        matched_source_event_count = int(provenance.get("matched_source_event_count") or 0)
+        has_recent_source = recent_source_event_count > 0
+        has_history_source = history_source_event_count > 0
+        row["has_recent_source"] = has_recent_source
+        row["has_history_source"] = has_history_source
+        row["recent_source_event_count"] = recent_source_event_count
+        row["history_source_event_count"] = history_source_event_count
+        row["matched_source_event_count"] = matched_source_event_count
+        if has_recent_source and has_history_source:
+            row["source_label"] = "both"
+        elif has_history_source:
+            row["source_label"] = "history"
+        else:
+            row["source_label"] = "api"
+
+    return rows
 
 
 def _parse_recent_track_payload(raw_payload_json: str | None) -> dict[str, Any]:
@@ -77,6 +142,7 @@ def _extract_recent_track_query_row(row: sqlite3.Row) -> RecentTrackQueryRow:
     release_date = album_payload.get("release_date")
 
     return {
+        "raw_row_id": int(row["id"]),
         "source_row_key": str(row["source_row_key"]),
         "played_at": str(row["played_at"]),
         "played_at_unix_ms": int(row["played_at_unix_ms"]) if isinstance(row["played_at_unix_ms"], int) else None,
@@ -111,8 +177,9 @@ def _extract_recent_track_query_row(row: sqlite3.Row) -> RecentTrackQueryRow:
     }
 
 
-def query_recent_track_rows(*, limit: int) -> list[RecentTrackQueryRow]:
+def query_recent_track_rows(*, limit: int, offset: int = 0) -> list[RecentTrackQueryRow]:
     bounded_limit = max(1, int(limit))
+    bounded_offset = max(0, int(offset))
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         raw_rows = connection.execute(
             """
@@ -135,8 +202,9 @@ def query_recent_track_rows(*, limit: int) -> list[RecentTrackQueryRow]:
             FROM raw_spotify_recent
             ORDER BY played_at DESC, id DESC
             LIMIT ?
+            OFFSET ?
             """,
-            (bounded_limit,),
+            (bounded_limit, bounded_offset),
         ).fetchall()
 
     rows = [_extract_recent_track_query_row(row) for row in raw_rows]
@@ -149,7 +217,7 @@ def query_recent_track_rows(*, limit: int) -> list[RecentTrackQueryRow]:
             continue
         gap_ms = current_ms - next_ms
         row["played_at_gap_ms"] = gap_ms if gap_ms > 0 else None
-    return rows
+    return _attach_recent_track_provenance(rows)
 
 
 def map_recent_track_row_to_canonical_item(row: RecentTrackQueryRow) -> CanonicalTrackSectionItem:
@@ -204,6 +272,12 @@ def map_recent_track_row_to_canonical_item(row: RecentTrackQueryRow) -> Canonica
         "span_months_count": None,
         "consistency_ratio": None,
         "longevity_score": None,
+        "has_recent_source": row.get("has_recent_source"),
+        "has_history_source": row.get("has_history_source"),
+        "source_label": row.get("source_label"),
+        "recent_source_event_count": row.get("recent_source_event_count"),
+        "history_source_event_count": row.get("history_source_event_count"),
+        "matched_source_event_count": row.get("matched_source_event_count"),
         "debug": {
             "source": "db",
             "primary_source": "db",

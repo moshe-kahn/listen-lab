@@ -938,8 +938,32 @@ h1 {
   flex-wrap: wrap;
 }
 
+.tracks-only-header-copy {
+  flex: 1 1 560px;
+}
+
+.tracks-only-subtitle {
+  margin: 4px 0 0;
+  color: #b8d7c2;
+  font-size: 0.9rem;
+}
+
+.tracks-only-controls {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .tracks-only-back-button {
   white-space: nowrap;
+}
+
+.tracks-only-diagnostics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  color: #9bc5a6;
+  font-size: 0.82rem;
 }
 
 .recent-debug-list {

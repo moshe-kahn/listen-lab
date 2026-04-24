@@ -61,7 +61,7 @@ Current note:
 - the dashboard also supports a restricted local mode so saved history- and cache-backed sections remain usable when Spotify is unavailable or rate-limited
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
-- the dashboard now also includes a track-detail overlay iteration with same-album in-place switching, preview playback, richer player controls, and a recent-debug inspection page for missing-play investigation
+- the dashboard now also includes a track-detail overlay iteration with same-album in-place switching, preview playback, richer player controls, and a merged-event `Listening Log` page for chronology/source inspection
 - track identity work now also includes a conservative three-layer model:
   - `source_track`
   - `release_track`
@@ -179,3 +179,5 @@ The MVP succeeds when:
 - Use the new track-formula comparison page, live-playback observations, and raw-data validation scripts to tighten ranking confidence before broader product expansion.
 - Decide how canonical Spotify-backed winner selection should work when multiple `source_track` rows are merged into one `release_track`.
 - Review the ambiguous track-variant queue and tighten policy family-by-family instead of adding more hardcoded title rules.
+- Decide whether the half-finished `tracksOnly` merged-track page should be stabilized or replaced by the newer `Listening Log` direction as the primary inspection surface.
+- Continue improving the merged-event `Listening Log` page now that it reads from `v_fact_play_event_with_sources` and supports `All`, `API`, `History`, and `Both`.
