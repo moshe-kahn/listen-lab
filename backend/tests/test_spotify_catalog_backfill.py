@@ -40,6 +40,7 @@ def _track_payload(track_id: str, album_id: str) -> dict[str, Any]:
         "track_number": 1,
         "album": {"id": album_id},
         "artists": [{"id": "artist-1", "name": "Artist 1"}],
+        "external_ids": {"isrc": f"ISRC{track_id}"},
     }
 
 
@@ -53,6 +54,7 @@ def _album_payload(album_id: str) -> dict[str, Any]:
         "total_tracks": 2,
         "artists": [{"id": "artist-1", "name": "Artist 1"}],
         "images": [{"url": "https://image.test/1.jpg"}],
+        "external_ids": {"upc": f"UPC{album_id}"},
     }
 
 
@@ -182,6 +184,49 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual((123000, "at1", "US", "ok", None), track_row)
         self.assertEqual(("Album at1", "album", "US", "ok"), album_row)
         self.assertEqual(4, album_track_count)
+
+    def test_omitted_request_delay_defaults_to_two_seconds(self) -> None:
+        self._seed_source_tracks(["t1"])
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                return 200, {}, {"tracks": [_track_payload("t1", "a1")]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            include_albums=False,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(2.0, result["initial_request_delay_seconds"])
+        self.assertEqual(2.0, result["final_request_delay_seconds"])
+
+    def test_explicit_request_delay_is_respected(self) -> None:
+        self._seed_source_tracks(["t1"])
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                return 200, {}, {"tracks": [_track_payload("t1", "a1")]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            include_albums=False,
+            request_delay_seconds=0.20,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(0.20, result["initial_request_delay_seconds"])
+        self.assertEqual(0.20, result["final_request_delay_seconds"])
 
     def test_album_tracklist_policy_none_fetches_no_album_tracks(self) -> None:
         self._seed_source_tracks(["t1"])
@@ -1558,6 +1603,755 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(0, int(row[1] or 0))
         self.assertIsNone(row[2])
 
+    def test_queue_orders_and_filters_by_reason_bucket(self) -> None:
+        enqueue_spotify_catalog_backfill_items(
+            items=[
+                {"entity_type": "track", "spotify_id": "t-full", "reason": "full_backfill", "priority": 100},
+                {"entity_type": "track", "spotify_id": "t-identity", "reason": "identity_metadata", "priority": 10},
+                {"entity_type": "track", "spotify_id": "t-manual", "reason": "manual_priority", "priority": 80},
+            ]
+        )
+
+        payload = list_spotify_catalog_backfill_queue(status_filter="pending", limit=10, offset=0)
+        self.assertEqual(["t-identity", "t-manual", "t-full"], [item["spotify_id"] for item in payload["items"]])
+        self.assertEqual(1, payload["reason_counts"]["identity_metadata"])
+        self.assertEqual(1, payload["reason_counts"]["manual_priority"])
+        self.assertEqual(1, payload["reason_counts"]["full_backfill"])
+
+        filtered = list_spotify_catalog_backfill_queue(
+            status_filter="pending",
+            reason_filter="identity_metadata",
+            limit=10,
+            offset=0,
+        )
+        self.assertEqual(["t-identity"], [item["spotify_id"] for item in filtered["items"]])
+
+    def test_metadata_only_fetches_source_album_metadata_without_tracklists(self) -> None:
+        self._seed_source_tracks(["t1"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Source Album", "source album"),
+                ).lastrowid
+            )
+            source_album_id = int(
+                connection.execute(
+                    "INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?)",
+                    ("spotify", "a-source", "spotify:album:a-source", "Source Album", "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO source_album_map (source_album_id, release_album_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')",
+                (source_album_id, release_album_id),
+            )
+            connection.commit()
+
+        called_urls: list[str] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            called_urls.append(url)
+            if url.endswith("/v1/tracks"):
+                return 200, {}, {"tracks": [_track_payload("t1", "a-track")]}, None
+            if url.endswith("/v1/albums"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                return 200, {}, {"albums": [_album_payload(album_id) for album_id in ids]}, None
+            if "/tracks" in url:
+                raise AssertionError(f"metadata_only should not fetch album tracklists: {url}")
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            include_albums=False,
+            album_tracklist_policy="all",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("metadata_only", result["run_mode"])
+        self.assertEqual("identity_metadata", result["run_reason"])
+        self.assertEqual("none", result["album_tracklist_policy"])
+        self.assertTrue(result["include_albums"])
+        self.assertEqual(0, result["album_tracklists_fetched"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            album_ids = {
+                str(row[0])
+                for row in connection.execute("SELECT spotify_album_id FROM spotify_album_catalog").fetchall()
+            }
+        self.assertIn("a-track", album_ids)
+        self.assertIn("a-source", album_ids)
+        self.assertFalse(any(url.endswith("/tracks") and "/albums/" in url for url in called_urls))
+
+    def test_metadata_only_target_tracks_does_not_fetch_albums_even_when_include_albums_true(self) -> None:
+        self._seed_source_tracks(["t1"])
+        called_urls: list[str] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            called_urls.append(url)
+            if url.endswith("/v1/tracks"):
+                return 200, {}, {"tracks": [_track_payload("t1", "a1")]}, None
+            if "/v1/albums" in url:
+                raise AssertionError(f"target=tracks should not fetch albums: {url}")
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="tracks",
+            include_albums=True,
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("tracks", result["target"])
+        self.assertFalse(result["include_albums"])
+        self.assertEqual(1, result["tracks_fetched"])
+        self.assertEqual(0, result["albums_seen"])
+        self.assertEqual(0, result["albums_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+        self.assertFalse(any("/v1/albums" in url for url in called_urls))
+
+    def test_metadata_only_target_all_preserves_current_mixed_behavior(self) -> None:
+        self._seed_source_tracks(["t1"])
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                return 200, {}, {"tracks": [_track_payload("t1", "a1")]}, None
+            if url.endswith("/v1/albums"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                return 200, {}, {"albums": [_album_payload(album_id) for album_id in ids]}, None
+            if "/v1/albums/" in url and url.endswith("/tracks"):
+                raise AssertionError(f"metadata_only target=all should not fetch tracklists: {url}")
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="all",
+            include_albums=False,
+            album_tracklist_policy="all",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("all", result["target"])
+        self.assertTrue(result["include_albums"])
+        self.assertEqual("none", result["album_tracklist_policy"])
+        self.assertEqual(1, result["tracks_fetched"])
+        self.assertEqual(1, result["albums_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+
+    def test_metadata_only_target_albums_fetches_album_metadata_only(self) -> None:
+        self._seed_source_tracks(["t1"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Album Only", "album only"),
+                ).lastrowid
+            )
+            source_album_id = int(
+                connection.execute(
+                    "INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?)",
+                    ("spotify", "a-source", "spotify:album:a-source", "Album Only", "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO source_album_map (source_album_id, release_album_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')",
+                (source_album_id, release_album_id),
+            )
+            connection.commit()
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if "/v1/tracks" in url:
+                raise AssertionError(f"target=albums should not fetch tracks: {url}")
+            if url.endswith("/v1/albums"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                return 200, {}, {"albums": [_album_payload(album_id) for album_id in ids]}, None
+            if "/v1/albums/" in url and url.endswith("/tracks"):
+                raise AssertionError(f"target=albums should not fetch tracklists: {url}")
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="albums",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("albums", result["target"])
+        self.assertEqual(0, result["tracks_seen"])
+        self.assertEqual(0, result["tracks_fetched"])
+        self.assertEqual(1, result["albums_seen"])
+        self.assertEqual(1, result["albums_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+
+    def test_metadata_only_target_albums_filters_missing_before_limit(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            for index in range(5):
+                album_id = f"a-complete-{index}"
+                connection.execute(
+                    "INSERT INTO raw_play_event (source_type, source_row_key, played_at, ms_played, ms_played_method, spotify_album_id, album_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("history", f"row-complete-{index}", "2026-04-28T00:00:00Z", 1000, "history_source", album_id, album_id, "{}"),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO spotify_album_catalog (
+                      spotify_album_id, release_date, total_tracks, raw_json, market, fetched_at, last_status, last_error
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (album_id, "2024-01-01", 2, json.dumps({"external_ids": {"upc": f"UPC{album_id}"}}), "US", "2026-04-28T00:00:00Z", "ok", None),
+                )
+            connection.execute(
+                "INSERT INTO raw_play_event (source_type, source_row_key, played_at, ms_played, ms_played_method, spotify_album_id, album_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("history", "row-upc-only", "2026-04-28T00:00:00Z", 1000, "history_source", "b-upc-only", "UPC Only", "{}"),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, release_date, total_tracks, raw_json, market, fetched_at, last_status, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("b-upc-only", "2024-01-01", 2, json.dumps({"external_ids": {}}), "US", "2026-04-28T00:00:00Z", "ok", None),
+            )
+            connection.execute(
+                "INSERT INTO raw_play_event (source_type, source_row_key, played_at, ms_played, ms_played_method, spotify_album_id, album_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("history", "row-missing-late", "2026-04-28T00:00:00Z", 1000, "history_source", "z-missing-late", "Missing Late", "{}"),
+            )
+            connection.commit()
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/albums"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                self.assertEqual(["z-missing-late"], ids)
+                return 200, {}, {"albums": [_album_payload("z-missing-late")]}, None
+            if "/v1/tracks" in url or "/v1/albums/" in url:
+                raise AssertionError(url)
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="albums",
+            limit=1,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["albums_seen"])
+        self.assertEqual(1, result["albums_fetched"])
+        self.assertEqual(0, result["tracks_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+
+    def test_metadata_only_target_albums_prioritizes_missing_release_before_external_ids(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            for album_id, release_date, raw_json in (
+                ("a-upc-only", "2024-01-01", json.dumps({"external_ids": {}})),
+                ("z-missing-release", None, json.dumps({"external_ids": {"upc": "UPCz"}})),
+            ):
+                connection.execute(
+                    "INSERT INTO raw_play_event (source_type, source_row_key, played_at, ms_played, ms_played_method, spotify_album_id, album_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("history", f"row-{album_id}", "2026-04-28T00:00:00Z", 1000, "history_source", album_id, album_id, "{}"),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO spotify_album_catalog (
+                      spotify_album_id, release_date, total_tracks, raw_json, market, fetched_at, last_status, last_error
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (album_id, release_date, 2, raw_json, "US", "2026-04-28T00:00:00Z", "ok", None),
+                )
+            connection.commit()
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/albums"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                self.assertEqual(["z-missing-release"], ids)
+                return 200, {}, {"albums": [_album_payload("z-missing-release")]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="albums",
+            limit=1,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["albums_fetched"])
+
+    def test_target_album_tracklists_fetches_only_tracklists_when_explicit_policy_allows(self) -> None:
+        enqueue_spotify_catalog_backfill_items(
+            items=[{"entity_type": "album", "spotify_id": "a1", "reason": "tracklist_completion", "priority": 80}]
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, release_date, total_tracks, raw_json, market, fetched_at, last_status, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("a1", "2024-01-01", 2, json.dumps({"external_ids": {"upc": "UPCa1"}}), "US", "2026-04-28T00:00:00Z", "ok", None),
+            )
+            connection.commit()
+
+        called_urls: list[str] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            called_urls.append(url)
+            if url.endswith("/v1/albums/a1/tracks"):
+                return 200, {}, {"items": [_track_payload("a1-x", "a1"), _track_payload("a1-y", "a1")], "next": None}, None
+            if url.endswith("/v1/tracks") or url.endswith("/v1/albums") or url.endswith("/v1/albums/a1"):
+                raise AssertionError(f"target=album_tracklists should only fetch tracklists: {url}")
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="tracklists_relevant",
+            target="album_tracklists",
+            album_tracklist_policy="priority_only",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual("album_tracklists", result["target"])
+        self.assertEqual(0, result["tracks_fetched"])
+        self.assertEqual(0, result["albums_fetched"])
+        self.assertEqual(2, result["album_tracks_upserted"])
+        self.assertEqual([True], [url.endswith("/v1/albums/a1/tracks") for url in called_urls])
+
+    def test_metadata_only_target_album_tracklists_is_rejected_without_spotify_calls(self) -> None:
+        self._seed_source_tracks(["t1"])
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            raise AssertionError(f"Invalid target should not make Spotify requests: {url}")
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="album_tracklists",
+            album_tracklist_policy="priority_only",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("album_tracklists", result["target"])
+        self.assertEqual(0, result["requests_total"])
+        self.assertGreater(result["errors"], 0)
+        self.assertIn("metadata_only target=album_tracklists is invalid", str(result["last_error"]))
+
+    def test_metadata_only_ignores_non_identity_queue_rows(self) -> None:
+        self._seed_source_tracks(["t-missing"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, release_date, total_tracks, raw_json, market, fetched_at, last_status, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "alb-tracklist",
+                    "2024-01-01",
+                    2,
+                    json.dumps({"external_ids": {"upc": "UPCalb-tracklist"}}),
+                    "US",
+                    "2026-04-28T00:00:00Z",
+                    "ok",
+                    None,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album", "alb-tracklist", "album_lookup_visible_incomplete", 80, "pending", "2026-04-28T00:00:00Z", 0),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("track", "t-manual", "manual_priority", 80, "pending", "2026-04-28T00:00:01Z", 0),
+            )
+            connection.commit()
+
+        called_urls: list[str] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            called_urls.append(url)
+            if url.endswith("/v1/tracks"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                self.assertEqual(["t-missing"], ids)
+                return 200, {}, {"tracks": [_track_payload("t-missing", "a-missing")]}, None
+            if url.endswith("/v1/albums"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                self.assertEqual(["a-missing"], ids)
+                return 200, {}, {"albums": [_album_payload("a-missing")]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["tracks_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+        self.assertFalse(any(url.endswith("/v1/albums/alb-tracklist") for url in called_urls))
+        self.assertFalse(any(url.endswith("/v1/tracks/t-manual") for url in called_urls))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = connection.execute(
+                "SELECT spotify_id, status FROM spotify_catalog_backfill_queue ORDER BY spotify_id"
+            ).fetchall()
+        self.assertEqual([("alb-tracklist", "pending"), ("t-manual", "pending")], rows)
+
+    def test_metadata_only_does_not_refetch_metadata_complete_album_for_missing_tracklist(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Complete Metadata Album", "complete metadata album"),
+                ).lastrowid
+            )
+            source_album_id = int(
+                connection.execute(
+                    "INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?)",
+                    ("spotify", "a-complete-metadata", "spotify:album:a-complete-metadata", "Complete Metadata Album", "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO source_album_map (source_album_id, release_album_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')",
+                (source_album_id, release_album_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, release_date, total_tracks, raw_json, market, fetched_at, last_status, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "a-complete-metadata",
+                    "2024-01-01",
+                    2,
+                    json.dumps({"external_ids": {"upc": "UPCa-complete-metadata"}}),
+                    "US",
+                    "2026-04-28T00:00:00Z",
+                    "ok",
+                    None,
+                ),
+            )
+            connection.commit()
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            raise AssertionError(f"metadata_only should not refetch metadata-complete album: {url}")
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(0, result["albums_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+
+    def test_metadata_only_selects_missing_track_metadata_before_complete_lexicographic_tracks(self) -> None:
+        self._seed_source_tracks(["000-complete", "999-missing"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, duration_ms, disc_number, track_number, album_id, raw_json,
+                  market, fetched_at, last_status, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "000-complete",
+                    180000,
+                    1,
+                    1,
+                    "a-complete",
+                    json.dumps({"external_ids": {"isrc": "ISRC000COMPLETE"}}),
+                    "US",
+                    "2026-04-28T00:00:00Z",
+                    "ok",
+                    None,
+                ),
+            )
+            connection.commit()
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                self.assertEqual(["999-missing"], ids)
+                return 200, {}, {"tracks": [_track_payload("999-missing", "a-missing")]}, None
+            if url.endswith("/v1/albums"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                return 200, {}, {"albums": [_album_payload(album_id) for album_id in ids]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            limit=1,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["tracks_seen"])
+        self.assertEqual(1, result["tracks_fetched"])
+        self.assertEqual(1, result["tracks_upserted"])
+
+    def test_metadata_only_prioritizes_identity_relevant_missing_tracks(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            duplicate_source_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "trk-identity", "spotify:track:trk-identity", "Identity Track", "{}"),
+                ).lastrowid
+            )
+            for name in ("Identity One", "Identity Two"):
+                release_track_id = int(
+                    connection.execute(
+                        "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                        (name, name.lower()),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (duplicate_source_id, release_track_id),
+                )
+
+            mapped_source_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "trk-mapped", "spotify:track:trk-mapped", "Mapped Track", "{}"),
+                ).lastrowid
+            )
+            mapped_release_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Mapped Track", "mapped track"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_map (
+                  source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                """,
+                (mapped_source_id, mapped_release_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("spotify", "trk-high", "spotify:track:trk-high", "High Listen Track", "{}"),
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("spotify", "trk-artist", "spotify:track:trk-artist", "Artist Boost Track", "{}"),
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("spotify", "trk-raw-tail", "spotify:track:trk-raw-tail", "Raw Tail Track", "{}"),
+            )
+            connection.execute(
+                """
+                INSERT INTO raw_spotify_history (
+                  source_row_key, played_at, spotify_track_id, spotify_track_uri, track_name_raw, artist_name_raw, album_name_raw,
+                  ms_played, raw_payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "raw-tail",
+                    "2026-04-27T00:00:00Z",
+                    "trk-raw-tail",
+                    "spotify:track:trk-raw-tail",
+                    "Raw Tail Track",
+                    "Raw Tail Artist",
+                    "Raw Tail Album",
+                    1000,
+                    "{}",
+                ),
+            )
+            for index in range(5):
+                connection.execute(
+                    """
+                    INSERT INTO fact_play_event (
+                      canonical_ended_at, spotify_track_id, track_name_canonical, artist_name_canonical, timing_source, matched_state
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"2026-04-27T00:0{index}:00Z",
+                        "trk-high",
+                        "High Listen Track",
+                        "High Listen Artist",
+                        "seed",
+                        "matched",
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at, spotify_track_id, track_name_canonical, artist_name_canonical, timing_source, matched_state
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("2026-04-27T01:00:00Z", "trk-artist", "Artist Boost Track", "Artist Boost", "seed", "matched"),
+            )
+            for index in range(9):
+                connection.execute(
+                    """
+                    INSERT INTO fact_play_event (
+                      canonical_ended_at, spotify_track_id, track_name_canonical, artist_name_canonical, timing_source, matched_state
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"2026-04-27T02:0{index}:00Z",
+                        f"artist-other-{index}",
+                        f"Artist Other {index}",
+                        "Artist Boost",
+                        "seed",
+                        "matched",
+                    ),
+                )
+            connection.commit()
+
+        seen_batches: list[list[str]] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                seen_batches.append(ids)
+                return 200, {}, {"tracks": [_track_payload(track_id, f"album-{track_id}") for track_id in ids]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="tracks",
+            include_albums=False,
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(5, result["tracks_fetched"])
+        self.assertEqual(
+            [["trk-identity", "trk-high", "trk-artist", "trk-mapped", "trk-raw-tail"]],
+            seen_batches,
+        )
+
+    def test_progress_callback_emits_start_and_ten_track_progress(self) -> None:
+        track_ids = [f"t{i:02d}" for i in range(10)]
+        self._seed_source_tracks(track_ids)
+        events: list[dict[str, Any]] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                return 200, {}, {"tracks": [_track_payload(track_id, f"album-{track_id}") for track_id in ids]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="tracks",
+            include_albums=False,
+            limit=10,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+            progress_callback=events.append,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual("start", events[0]["event"])
+        self.assertEqual(result["run_id"], events[0]["run_id"])
+        self.assertEqual(10, events[0]["candidate_counts"]["tracks_seen"])
+        self.assertEqual("tracks", events[0]["worker_config"]["target"])
+        self.assertEqual(f"Run {result['run_id']} started: 10 track candidates, has_more=False", events[0]["message"])
+        progress_events = [event for event in events if event["event"] == "progress"]
+        self.assertEqual(1, len(progress_events))
+        progress = progress_events[0]
+        self.assertEqual(10, progress["tracks_fetched"])
+        self.assertEqual(1, progress["requests_total"])
+        self.assertEqual(0, progress["requests_429"])
+        self.assertIn("elapsed_seconds", progress)
+        self.assertIn("10/10 tracks fetched", progress["message"])
+        self.assertNotIn("access_token", json.dumps(events, sort_keys=True))
+        self.assertNotIn("https://api.spotify.com", json.dumps(events, sort_keys=True))
+
     def test_queue_item_marked_error_on_failure(self) -> None:
         enqueue_spotify_catalog_backfill_items(
             items=[{"entity_type": "track", "spotify_id": "t1", "reason": "visible", "priority": 80}]
@@ -1768,7 +2562,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertIn("bad request body", str(run_row[1]))
         self.assertNotIn("token", str(run_row[1]).lower())
 
-    def test_429_retry_behavior_with_fake_sleeper(self) -> None:
+    def test_first_429_stops_partial_with_fake_sleeper(self) -> None:
         self._seed_source_tracks(["t1"])
         state = {"calls": 0}
         sleep_calls: list[float] = []
@@ -1783,7 +2577,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
                 state["calls"] += 1
                 if state["calls"] == 1:
                     return 429, {"Retry-After": "1"}, {}, None
-                return 200, {}, {"tracks": [_track_payload("t1", "a1")]}, None
+                raise AssertionError("No further requests should be attempted after the first 429")
             raise AssertionError(url)
 
         result = run_spotify_catalog_backfill(
@@ -1793,11 +2587,50 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             sleeper=sleeper,
             fetcher=fetcher,
         )
-        self.assertEqual("ok", result["status"])
+        self.assertEqual("partial", result["status"])
+        self.assertTrue(result["partial"])
+        self.assertEqual("rate_limited", result["stop_reason"])
         self.assertEqual(1, result["requests_429"])
+        self.assertEqual(1, state["calls"])
+        self.assertEqual(0, result["tracks_upserted"])
         self.assertGreaterEqual(result["last_retry_after_seconds"], 1.0)
         self.assertGreaterEqual(result["max_retry_after_seconds"], 1.0)
+        self.assertIn("Stopped after first Spotify 429; cooldown recommended", result["warnings"])
         self.assertTrue(any(call >= 1.25 for call in sleep_calls))
+
+    def test_track_batch_429_stops_without_retry_or_single_fallback(self) -> None:
+        self._seed_source_tracks(["t1", "t2"])
+        state = {"track_batch_calls": 0, "single_calls": 0}
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks") and "/v1/tracks/" not in url:
+                state["track_batch_calls"] += 1
+                if state["track_batch_calls"] == 1:
+                    return 429, {"Retry-After": "1"}, {}, None
+                raise AssertionError("429 should stop without retrying the batch endpoint")
+            if "/v1/tracks/" in url:
+                state["single_calls"] += 1
+                raise AssertionError("429 should stop without single-item fallback")
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            include_albums=False,
+            request_delay_seconds=0.20,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual("rate_limited", result["stop_reason"])
+        self.assertEqual(1, result["requests_429"])
+        self.assertEqual(1, state["track_batch_calls"])
+        self.assertEqual(0, state["single_calls"])
+        self.assertEqual(0, result["tracks_upserted"])
+        self.assertNotIn("Spotify batch track endpoint unavailable/forbidden; using single-track fallback", result["warnings"])
+        self.assertIn("Stopped after first Spotify 429; cooldown recommended", result["warnings"])
 
     def test_429_without_retry_after_uses_fallback_cooldown_warning(self) -> None:
         self._seed_source_tracks(["t1"])
@@ -1814,7 +2647,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
                 state["calls"] += 1
                 if state["calls"] == 1:
                     return 429, {}, {}, None
-                return 200, {}, {"tracks": [_track_payload("t1", "a1")]}, None
+                raise AssertionError("No further requests should be attempted after the first 429")
             raise AssertionError(url)
 
         result = run_spotify_catalog_backfill(
@@ -1824,14 +2657,18 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             sleeper=sleeper,
             fetcher=fetcher,
         )
-        self.assertEqual("ok", result["status"])
+        self.assertEqual("partial", result["status"])
+        self.assertEqual("rate_limited", result["stop_reason"])
         self.assertEqual(1, result["requests_429"])
+        self.assertEqual(1, state["calls"])
         self.assertEqual(0.0, result["last_retry_after_seconds"])
         self.assertIn("429 without valid Retry-After; used fallback cooldown", result["warnings"])
+        self.assertIn("Stopped after first Spotify 429; cooldown recommended", result["warnings"])
         self.assertTrue(any(call >= 5.0 for call in sleep_calls))
 
-    def test_repeated_429_stops_partial_with_rate_limited_reason(self) -> None:
+    def test_caller_max_429_above_one_still_stops_after_first_429(self) -> None:
         self._seed_source_tracks(["t1"])
+        state = {"calls": 0}
         sleep_calls: list[float] = []
 
         def sleeper(seconds: float) -> None:
@@ -1841,6 +2678,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             url: str, params: dict[str, Any], access_token: str
         ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
             if url.endswith("/v1/tracks"):
+                state["calls"] += 1
                 return 429, {"Retry-After": "2"}, {}, None
             raise AssertionError(url)
 
@@ -1857,9 +2695,73 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual("rate_limited", result["stop_reason"])
         self.assertTrue(result["has_more"])
         self.assertEqual("Stopped early due to rate_limited", result["last_error"])
-        self.assertEqual(2, result["requests_429"])
+        self.assertEqual(1, result["requests_429"])
+        self.assertEqual(1, state["calls"])
+        self.assertEqual(1, result["max_429"])
         self.assertGreaterEqual(result["max_retry_after_seconds"], 2.0)
+        self.assertIn("Stopped after first Spotify 429; cooldown recommended", result["warnings"])
         self.assertTrue(any(call >= 2.25 for call in sleep_calls))
+
+    def test_target_all_429_stops_before_album_and_tracklist_phases(self) -> None:
+        self._seed_source_tracks(["t1"])
+        calls: list[str] = []
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Album a1", "album a1"),
+                ).lastrowid
+            )
+            source_album_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "a1", "spotify:album:a1", "Album a1", "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO source_album_map (
+                  source_album_id,
+                  release_album_id,
+                  match_method,
+                  confidence,
+                  status,
+                  is_user_confirmed,
+                  explanation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_album_id, release_album_id, "seed", 1.0, "accepted", 1, "seed"),
+            )
+            connection.commit()
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            calls.append(url)
+            if url.endswith("/v1/tracks") and "/v1/tracks/" not in url:
+                return 429, {"Retry-After": "1"}, {}, None
+            raise AssertionError(f"No later target phases should run after a 429: {url}")
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            target="all",
+            include_albums=True,
+            album_tracklist_policy="all",
+            request_delay_seconds=0.20,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual("rate_limited", result["stop_reason"])
+        self.assertEqual(1, result["requests_429"])
+        self.assertEqual(0, result["albums_fetched"])
+        self.assertEqual(0, result["album_tracklists_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+        self.assertEqual(["https://api.spotify.com/v1/tracks"], calls)
 
     def test_analysis_track_map_unchanged(self) -> None:
         self._seed_source_tracks(["t1"])
@@ -1994,7 +2896,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(0, result["requests_429"])
         self.assertEqual(2, result["tracks_upserted"])
         self.assertEqual(3, result["requests_total"])
-        self.assertIn("track batch endpoint forbidden; used single-track fallback", result["warnings"])
+        self.assertIn("Spotify batch track endpoint unavailable/forbidden; using single-track fallback", result["warnings"])
 
         with closing(sqlite3.connect(self.db_path)) as connection:
             row_t1 = connection.execute(
@@ -2007,9 +2909,42 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual((123000, "a1", "ok"), row_t1)
         self.assertIsNone(run_row[0])
         self.assertIn(
-            "track batch endpoint forbidden; used single-track fallback",
+            "Spotify batch track endpoint unavailable/forbidden; using single-track fallback",
             json.loads(str(run_row[1] or "[]")),
         )
+
+    def test_track_batch_403_disables_track_batch_for_rest_of_run(self) -> None:
+        track_ids = [f"t{i:02d}" for i in range(55)]
+        self._seed_source_tracks(track_ids)
+        calls = {"track_batch": 0, "track_single": 0}
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks") and "/v1/tracks/" not in url:
+                calls["track_batch"] += 1
+                return 403, {}, {"error": {"status": 403, "message": "forbidden batch"}}, None
+            if "/v1/tracks/" in url:
+                calls["track_single"] += 1
+                track_id = url.rsplit("/", 1)[1]
+                return 200, {}, _track_payload(track_id, f"a{track_id}"), None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            include_albums=False,
+            limit=55,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        warning = "Spotify batch track endpoint unavailable/forbidden; using single-track fallback"
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(55, result["tracks_upserted"])
+        self.assertEqual(1, calls["track_batch"])
+        self.assertEqual(55, calls["track_single"])
+        self.assertEqual(56, result["requests_total"])
+        self.assertEqual(1, result["warnings"].count(warning))
 
     def test_batch_403_fallback_single_failures_store_per_item_error(self) -> None:
         self._seed_source_tracks(["t1"])
@@ -2119,7 +3054,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual("ok", result["status"])
         self.assertEqual(1, result["albums_fetched"])
         self.assertEqual(2, result["album_tracks_upserted"])
-        self.assertIn("album batch endpoint forbidden; used single-album fallback", result["warnings"])
+        self.assertIn("Spotify batch album endpoint unavailable/forbidden; using single-album fallback", result["warnings"])
         self.assertEqual(4, result["requests_total"])  # tracks batch + album batch + album single + album tracks
 
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -2133,9 +3068,82 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(("Album a1", "album", "ok"), album_row)
         self.assertIsNone(run_row[0])
         self.assertIn(
-            "album batch endpoint forbidden; used single-album fallback",
+            "Spotify batch album endpoint unavailable/forbidden; using single-album fallback",
             json.loads(str(run_row[1] or "[]")),
         )
+
+    def test_album_batch_403_disables_album_batch_for_rest_of_run(self) -> None:
+        track_ids = [f"t{i:02d}" for i in range(25)]
+        self._seed_source_tracks(track_ids)
+        calls = {"track_batch": 0, "album_batch": 0, "album_single": 0}
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks") and "/v1/tracks/" not in url:
+                calls["track_batch"] += 1
+                ids = [item for item in str(params.get("ids") or "").split(",") if item]
+                return 200, {}, {"tracks": [_track_payload(track_id, f"a{track_id}") for track_id in ids]}, None
+            if url.endswith("/v1/albums") and "/v1/albums/" not in url:
+                calls["album_batch"] += 1
+                return 403, {}, {"error": {"status": 403, "message": "forbidden album batch"}}, None
+            if "/v1/albums/" in url:
+                calls["album_single"] += 1
+                album_id = url.rsplit("/", 1)[1]
+                return 200, {}, _album_payload(album_id), None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            include_albums=True,
+            album_tracklist_policy="none",
+            limit=25,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        warning = "Spotify batch album endpoint unavailable/forbidden; using single-album fallback"
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(25, result["albums_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
+        self.assertEqual(1, calls["track_batch"])
+        self.assertEqual(1, calls["album_batch"])
+        self.assertEqual(25, calls["album_single"])
+        self.assertEqual(27, result["requests_total"])
+        self.assertEqual(1, result["warnings"].count(warning))
+
+    def test_album_single_fallback_upserts_payloads_before_max_request_stop(self) -> None:
+        track_ids = [f"t{i:02d}" for i in range(25)]
+        self._seed_source_tracks(track_ids)
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks") and "/v1/tracks/" not in url:
+                ids = [item for item in str(params.get("ids") or "").split(",") if item]
+                return 200, {}, {"tracks": [_track_payload(track_id, f"a{track_id}") for track_id in ids]}, None
+            if url.endswith("/v1/albums") and "/v1/albums/" not in url:
+                return 403, {}, {"error": {"status": 403, "message": "forbidden album batch"}}, None
+            if "/v1/albums/" in url:
+                album_id = url.rsplit("/", 1)[1]
+                return 200, {}, _album_payload(album_id), None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            include_albums=True,
+            album_tracklist_policy="none",
+            limit=25,
+            max_requests=25,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual("max_requests", result["stop_reason"])
+        self.assertEqual(25, result["requests_total"])
+        self.assertEqual(23, result["albums_fetched"])
+        self.assertEqual(0, result["album_tracks_upserted"])
 
     def test_album_batch_403_single_album_failure_stores_per_album_error(self) -> None:
         self._seed_source_tracks(["t1"])
@@ -2266,6 +3274,43 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(401, response.status_code)
         refresh_mock.assert_not_called()
         run_mock.assert_not_called()
+
+    def test_catalog_backfill_endpoint_passes_target_parameter(self) -> None:
+        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.main.refresh_access_token_if_needed",
+            return_value={"access_token": "token"},
+        ), patch(
+            "backend.app.main.run_spotify_catalog_backfill",
+            return_value={"status": "ok", "target": "tracks"},
+        ) as run_mock:
+            client = TestClient(app)
+            response = client.post(
+                "/debug/spotify/catalog-backfill",
+                json={"run_mode": "metadata_only", "target": "tracks", "include_albums": True},
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.json()["ok"])
+        run_mock.assert_called_once()
+        self.assertEqual("tracks", run_mock.call_args.kwargs["target"])
+        self.assertEqual(2.0, run_mock.call_args.kwargs["request_delay_seconds"])
+
+    def test_catalog_backfill_endpoint_respects_explicit_request_delay(self) -> None:
+        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.main.refresh_access_token_if_needed",
+            return_value={"access_token": "token"},
+        ), patch(
+            "backend.app.main.run_spotify_catalog_backfill",
+            return_value={"status": "ok"},
+        ) as run_mock:
+            client = TestClient(app)
+            response = client.post(
+                "/debug/spotify/catalog-backfill",
+                json={"request_delay_seconds": 0.75},
+            )
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.json()["ok"])
+        run_mock.assert_called_once()
+        self.assertEqual(0.75, run_mock.call_args.kwargs["request_delay_seconds"])
 
     def test_catalog_backfill_runs_endpoint_empty(self) -> None:
         with patch("backend.app.main._require_local_data_session", return_value="user-1"):
@@ -4534,7 +5579,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
                     0.0,
                     0,
                     None,
-                    json.dumps(["track batch endpoint forbidden; used single-track fallback"]),
+                    json.dumps(["Spotify batch track endpoint unavailable/forbidden; using single-track fallback"]),
                 ),
             )
             connection.execute(
@@ -4590,7 +5635,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual("2026-04-21T12:00:00Z", body["items"][1]["started_at"])
         self.assertEqual("ok", body["items"][1]["status"])
         self.assertEqual(1, body["items"][1]["warnings_count"])
-        self.assertIn("track batch endpoint forbidden; used single-track fallback", body["items"][1]["warnings"])
+        self.assertIn("Spotify batch track endpoint unavailable/forbidden; using single-track fallback", body["items"][1]["warnings"])
 
     def test_catalog_backfill_coverage_counts(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -4766,7 +5811,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             fetcher=fetcher,
         )
         self.assertEqual("ok", result["status"])
-        self.assertIn("track batch endpoint forbidden; used single-track fallback", result["warnings"])
+        self.assertIn("Spotify batch track endpoint unavailable/forbidden; using single-track fallback", result["warnings"])
         self.assertIsNone(result["last_error"])
 
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -4775,7 +5820,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual("ok", str(row[0]))
         self.assertIsNone(row[1])
-        self.assertIn("track batch endpoint forbidden; used single-track fallback", json.loads(str(row[2] or "[]")))
+        self.assertIn("Spotify batch track endpoint unavailable/forbidden; using single-track fallback", json.loads(str(row[2] or "[]")))
 
     def test_recent_errors_count_excludes_ok_warning_only_run(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -4813,7 +5858,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
                     0.0,
                     0,
                     None,
-                    json.dumps(["album batch endpoint forbidden; used single-album fallback"]),
+                    json.dumps(["Spotify batch album endpoint unavailable/forbidden; using single-album fallback"]),
                 ),
             )
             connection.execute(

@@ -6,6 +6,7 @@
 - When the user asks to change assistant behavior, ask whether to save that behavior rule to this file.
 - At the start of a new session or after context compaction, read `docs/current-handoff.md` first if available, then follow only the doc pointers relevant to the task.
 - If the user says `end session`, update `docs/current-handoff.md` with current state, tests, and next task, then give a short resume prompt for the next chat.
+- If the user says `end session and commit`, first do the `end session` handoff update, then update relevant overview/reference docs for the full uncommitted scope, summarize the staged-ready changes, and propose a commit message. Do not actually create the commit unless the user explicitly confirms committing.
 - Tell the user when starting a new chat would save tokens or reduce confusion. Suggest it only at natural breakpoints: after tests pass, after a feature is done, before a separate new task, or when context is high and old details are no longer needed. Before suggesting a new chat, offer a short handoff summary.
 - After completing a task, suggest concise next steps when there is a natural follow-up. Keep it short, and do not invent busywork. If no useful next step exists, say nothing.
 - Do not mention model switching unless it is clearly worth changing for the task.

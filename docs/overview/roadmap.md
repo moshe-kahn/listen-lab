@@ -10,6 +10,7 @@ This roadmap translates the product brief into buildable engineering milestones.
 - MVP now uses a local SQLite database for raw ingest and sync-state persistence.
 - Local development comes first, with a simple cloud deployment path later.
 - The current dashboard also supports local cached operation when Spotify is rate-limited or intentionally disabled.
+- Current identity/catalog work has added a source-catalog enrichment layer and local Spotify metadata worker to improve duplicate/split review evidence before any merge/apply behavior is introduced.
 
 ## MVP Boundary
 The MVP includes:
@@ -104,6 +105,12 @@ Collect the core library signals and normalize them into artist-level records.
   - recent-play API ingest exists
   - history-dump ingest exists
   - same-source and cross-source raw upgrades exist
+- Source-layer Spotify catalog enrichment is also implemented for known track and album IDs:
+  - track metadata
+  - album metadata
+  - explicit album tracklist expansion modes
+  - queue-first priority processing
+  - run/coverage telemetry
 - The true artist aggregation pipeline for overlooked-artist analysis is still not implemented yet.
 
 ### Dependencies
@@ -120,12 +127,15 @@ Collect the core library signals and normalize them into artist-level records.
 - live playback observation capture as a separate evidence layer
 - aggregation pipeline that produces `ArtistProfile` records
 - unit-tested normalization logic for multi-artist tracks and album relationships
+- source-catalog metadata enrichment for known provider IDs, kept separate from identity decisions
+- bounded local worker support for identity-critical Spotify track metadata enrichment
 
 ### Completion criteria
 - recent-play sync can ingest new rows and safely replay overlap windows
 - history-dump import can upgrade weaker recent-play estimates into source-truth rows
 - the backend can build a complete artist-level aggregate from the required MVP data
 - followed state, liked tracks, and saved album counts are reflected correctly per artist
+- source catalog enrichment can improve duplicate/split review evidence without mutating identity mappings
 
 ## Milestone 4 - Listening Signals and Fallback Model
 ### Purpose
@@ -225,6 +235,9 @@ Improve quality until the MVP feels obviously trustworthy on real accounts.
 ## Immediate Follow-Ups
 These are active issues discovered during current dashboard work and should be treated as near-term tasks before more product expansion.
 
+- After the current Spotify 429 cooldown, revert the local track metadata worker bounds from `limit=250`, `max_requests=275`, `max_runtime_seconds=900` back to safer `limit=100`, `max_requests=110`, `max_runtime_seconds=300`, while keeping loop mode, JSONL output, and rolling request-budget protection.
+- Continue identity-critical Spotify track metadata enrichment through the worker after cooldown, respecting the 60-minute fallback cooldown when Spotify returns 429 without `Retry-After`.
+- Use improved source catalog metadata as evidence for Identity Audit duplicate/split review; do not add merge/apply behavior until preview/dry-run evidence is reviewed.
 - Fix album ranking so recent 4-week and 6-month album lists do not collapse to a single entry when broader listening exists.
 - Fix album breadth counting so duplicate track variants do not inflate album track totals.
 - Specifically fix the incorrect history count still shown for "Chronicles of a Diamond."
@@ -233,7 +246,18 @@ These are active issues discovered during current dashboard work and should be t
 - Continue tightening documentation and instrumentation around raw ingest performance and batch import timing.
 - Decide how to choose the canonical Spotify-backed winner when multiple `source_track` rows collapse onto one `release_track`, instead of relying only on a stable internal-ID tie-break.
 - Review the generated ambiguous track-variant queue and convert repeated judgments into policy/config updates instead of expanding hardcoded suffix rules.
+- Keep `track_family` as the preferred domain term for the grouping layer above `release_track`; defer API, internal code, and DB renames from `analysis_track` to a later dedicated migration.
 - Investigate missing-phone-play windows when listening through downloaded/offline playlists (for example, 2026-04-20 11:00 AM-1:00 PM PT) and decide whether to add a deeper recovery poll path when recent API visibility appears truncated.
+
+## Current Catalog and Identity-Audit Support Status
+- Catalog Backfill UI now separates Overview, Priority Metadata, Full Backfill, Queue, and Recent Runs.
+- Priority Metadata is the default workflow and should fetch source-layer metadata needed for identity decisions.
+- Full Backfill remains secondary and owns slower catalog-expansion work such as album tracklists.
+- Queue rows retain `entity_type=track|album`; `reason` now distinguishes identity metadata, manual priority, tracklist completion, and full backfill.
+- Coverage distinguishes identity-critical gaps from catalog-expansion backlog.
+- Identity Audit duplicate diagnostics remain read-only.
+- Release-album merge preview and dry-run tooling exist; no apply/merge endpoint exists.
+- Catalog backfill must not mutate identity tables, `analysis_track_map`, or merge state.
 
 ## Current Raw Ingest Status
 - `raw_play_event`, `ingest_run`, and `spotify_sync_state` are implemented in SQLite.

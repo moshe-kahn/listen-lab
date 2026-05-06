@@ -65,8 +65,13 @@ Current note:
 - track identity work now also includes a conservative three-layer model:
   - `source_track`
   - `release_track`
-  - `analysis_track`
+  - `track_family` (implemented in schema/code as `analysis_track`)
 - track variant grouping is now policy-driven, with an explicit ambiguous-review queue generated after refresh passes so borderline title families can be inspected with artist context
+- source Spotify catalog enrichment now exists as an evidence-gathering layer for identity review:
+  - priority metadata runs fetch Spotify track and album metadata into source catalog tables
+  - track metadata backfill prioritizes duplicate/split/suggested identity candidates before broad backlog
+  - a local track metadata worker can run bounded one-shot or looped batches with cooldown, JSONL logging, and rolling request-budget protection
+  - catalog enrichment remains evidence-only and must not create, merge, promote, or apply identity decisions
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -86,6 +91,12 @@ The rule that the same logical listen can be improved by a better source later. 
 
 ### Canonical play event
 The single logical listen stored in `fact_play_event`, with provenance links back to `raw_spotify_recent` and/or `raw_spotify_history`.
+
+### Source catalog metadata
+Provider metadata fetched for known source identifiers, such as Spotify track duration, ISRC, album id, album release date, and external IDs. This metadata is evidence for review and diagnostics, not an identity decision by itself.
+
+### Identity-critical metadata
+The subset of source catalog metadata that directly improves duplicate and split review, especially Spotify track metadata, ISRCs, durations, album metadata, release dates, and album external IDs.
 
 ### Live playback observation
 An observational current-playback snapshot captured for debugging and transition analysis. It is useful evidence, but it is not canonical durable play history by itself.
@@ -146,6 +157,7 @@ Additional implementation rule:
 - stable favorites and history-enriched sections may be cached, but recent activity should stay fresh enough to reflect current listening
 - once static artist or album metadata such as names, covers, and Spotify URLs is observed, it should be reusable from shared cache rather than treated as per-user state
 - local validation databases, debug logs, and SQLite copies are disposable runtime artifacts, not product data that should be committed
+- Spotify source catalog backfill should stay bounded and rate-limit-aware in local development; JSONL worker logs are runtime artifacts under `backend/data/logs/`
 
 ## UX Priorities
 - Make the main call to action obvious.
@@ -181,3 +193,4 @@ The MVP succeeds when:
 - Review the ambiguous track-variant queue and tighten policy family-by-family instead of adding more hardcoded title rules.
 - Keep Listening Log event-oriented: timestamps, source provenance, sessions, merge details, and recent play inspection.
 - Continue improving the merged-event `Listening Log` page now that it reads from `v_fact_play_event_with_sources` and supports `All`, `API`, `History`, and `Both`.
+- Continue source Spotify catalog metadata enrichment for identity-critical track gaps, but respect worker cooldowns and keep backfill evidence-only.

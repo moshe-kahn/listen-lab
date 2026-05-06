@@ -41,6 +41,7 @@ from backend.app.spotify_current_playback import get_current_playback_for_user
 from backend.app.spotify_recent_polling import poll_recent_for_user
 from backend.app.spotify_recent_sync import sync_spotify_recent_plays
 from backend.app.spotify_catalog_backfill import (
+    DEFAULT_REQUEST_DELAY_SECONDS,
     discover_known_spotify_track_id,
     discover_known_spotify_track_ids,
     dry_run_release_album_merge,
@@ -4340,15 +4341,18 @@ async def debug_spotify_catalog_backfill(
     limit = int(body.get("limit", 200))
     offset = int(body.get("offset", 0))
     market = str(body.get("market", "US") or "US")
+    run_mode = str(body.get("run_mode", "full_catalog") or "full_catalog")
+    reason = str(body.get("reason", "") or "") or None
     include_albums = bool(body.get("include_albums", True))
     force_refresh = bool(body.get("force_refresh", False))
-    request_delay_seconds = float(body.get("request_delay_seconds", 0.35))
+    request_delay_seconds = float(body.get("request_delay_seconds", DEFAULT_REQUEST_DELAY_SECONDS))
     max_runtime_seconds = float(body.get("max_runtime_seconds", 60))
     max_requests = int(body.get("max_requests", 150))
     max_errors = int(body.get("max_errors", 10))
     max_album_tracks_pages_per_album = int(body.get("max_album_tracks_pages_per_album", 10))
     max_429 = int(body.get("max_429", 3))
     album_tracklist_policy = str(body.get("album_tracklist_policy", "all") or "all")
+    target = str(body.get("target", "") or "") or None
 
     try:
         token_row = refresh_access_token_if_needed(user_id)
@@ -4380,6 +4384,8 @@ async def debug_spotify_catalog_backfill(
 
     result = run_spotify_catalog_backfill(
         access_token=access_token,
+        run_mode=run_mode,
+        reason=reason,
         limit=limit,
         offset=offset,
         market=market,
@@ -4392,6 +4398,7 @@ async def debug_spotify_catalog_backfill(
         max_album_tracks_pages_per_album=max_album_tracks_pages_per_album,
         max_429=max_429,
         album_tracklist_policy=album_tracklist_policy,
+        target=target,
     )
     if result.get("status") == "failed" and "status 401" in str(result.get("last_error") or ""):
         try:
@@ -4403,6 +4410,8 @@ async def debug_spotify_catalog_backfill(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Spotify access token is unavailable.")
         result = run_spotify_catalog_backfill(
             access_token=access_token,
+            run_mode=run_mode,
+            reason=reason,
             limit=limit,
             offset=offset,
             market=market,
@@ -4415,6 +4424,7 @@ async def debug_spotify_catalog_backfill(
             max_album_tracks_pages_per_album=max_album_tracks_pages_per_album,
             max_429=max_429,
             album_tracklist_policy=album_tracklist_policy,
+            target=target,
         )
     return {"ok": result.get("status") == "ok", **result}
 
@@ -4452,11 +4462,12 @@ async def debug_spotify_catalog_backfill_enqueue(
 async def debug_spotify_catalog_backfill_queue(
     request: Request,
     status: str | None = None,
+    reason: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
     _require_local_data_session(request)
-    return list_spotify_catalog_backfill_queue(status_filter=status, limit=limit, offset=offset)
+    return list_spotify_catalog_backfill_queue(status_filter=status, reason_filter=reason, limit=limit, offset=offset)
 
 
 @app.post("/debug/spotify/catalog-backfill/queue/repair")

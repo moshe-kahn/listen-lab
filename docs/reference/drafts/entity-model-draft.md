@@ -170,19 +170,20 @@ Artists are simpler than tracks and albums, but still need source mapping.
 - `release_track`
   - the display-level track
   - distinguishes version and release context when we care
-- `analysis_track`
+- `track_family`
   - the grouping-level track used for conservative same-composition candidates, scoring, and rollups
+  - current schema/code term: `analysis_track`
 - `source_track`
   - one provider-specific track object
 
 Mapping direction:
 - many `source_track` -> one `release_track`
-- many `release_track` -> one `analysis_track`
+- many `release_track` -> one `track_family`
 
 Current implementation note:
 - `source_track -> release_track` dedupe is intentionally conservative and rerunnable
-- `release_track -> analysis_track` is now driven by a policy/config layer plus variant-title interpretation, not by one hardcoded title-heuristic block
-- `analysis_track` should still be treated as a conservative grouping layer, not as the final universal canonical track identity for every downstream analysis
+- `release_track -> track_family` is now driven by a policy/config layer plus variant-title interpretation, not by one hardcoded title-heuristic block
+- `track_family` should still be treated as a conservative grouping layer, not as the final universal canonical track identity for every downstream analysis
 
 ### Albums
 - `release_album`

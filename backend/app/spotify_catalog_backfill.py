@@ -17,14 +17,23 @@ ALBUM_BATCH_SIZE = 20
 ALBUM_TRACK_PAGE_SIZE = 50
 MIN_REQUEST_DELAY_SECONDS = 0.20
 MAX_REQUEST_DELAY_SECONDS = 5.0
+DEFAULT_REQUEST_DELAY_SECONDS = 2.0
 MAX_LIMIT = 1000
 DEFAULT_LIMIT = 200
 DEFAULT_MAX_RUNTIME_SECONDS = 60
+MAX_RUNTIME_SECONDS = 900
 DEFAULT_MAX_REQUESTS = 150
 DEFAULT_MAX_ERRORS = 10
 DEFAULT_MAX_ALBUM_TRACKS_PAGES_PER_ALBUM = 10
-DEFAULT_MAX_429 = 3
+DEFAULT_MAX_429 = 1
+FIRST_429_STOP_WARNING = "Stopped after first Spotify 429; cooldown recommended"
 ALBUM_TRACKLIST_POLICIES = {"all", "priority_only", "relevant_albums", "none"}
+CATALOG_BACKFILL_RUN_MODES = {"metadata_only", "tracklists_relevant", "full_catalog"}
+CATALOG_BACKFILL_REASONS = {"identity_metadata", "manual_priority", "tracklist_completion", "full_backfill"}
+CATALOG_BACKFILL_TARGETS = {"tracks", "albums", "album_tracklists", "all"}
+METADATA_ONLY_QUEUE_REASONS = {"identity_metadata"}
+TRACK_BATCH_FORBIDDEN_WARNING = "Spotify batch track endpoint unavailable/forbidden; using single-track fallback"
+ALBUM_BATCH_FORBIDDEN_WARNING = "Spotify batch album endpoint unavailable/forbidden; using single-album fallback"
 
 
 class _PartialStop(Exception):
@@ -209,6 +218,371 @@ def _known_track_ids(*, limit: int, offset: int) -> tuple[list[str], bool]:
     return ids[:bounded_limit], has_more
 
 
+def _known_track_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[str], bool]:
+    bounded_limit = max(1, min(int(limit), MAX_LIMIT))
+    bounded_offset = max(0, int(offset))
+
+    with sqlite_connection() as connection:
+        rows = connection.execute(
+            """
+            WITH fact_track_listens AS (
+              SELECT
+                spotify_track_id,
+                count(*) AS listen_count
+              FROM fact_play_event
+              WHERE spotify_track_id IS NOT NULL
+                AND spotify_track_id != ''
+              GROUP BY spotify_track_id
+            ),
+            fact_track_artist_listens AS (
+              SELECT
+                track_stats.spotify_track_id,
+                max(artist_stats.artist_listen_count) AS artist_listen_count
+              FROM (
+                SELECT
+                  spotify_track_id,
+                  lower(trim(COALESCE(artist_name_canonical, ''))) AS artist_key
+                FROM fact_play_event
+                WHERE spotify_track_id IS NOT NULL
+                  AND spotify_track_id != ''
+                  AND trim(COALESCE(artist_name_canonical, '')) != ''
+                GROUP BY spotify_track_id, artist_key
+              ) track_stats
+              JOIN (
+                SELECT
+                  lower(trim(COALESCE(artist_name_canonical, ''))) AS artist_key,
+                  count(*) AS artist_listen_count
+                FROM fact_play_event
+                WHERE trim(COALESCE(artist_name_canonical, '')) != ''
+                GROUP BY artist_key
+              ) artist_stats
+                ON artist_stats.artist_key = track_stats.artist_key
+              GROUP BY track_stats.spotify_track_id
+            ),
+            raw_track_listens AS (
+              SELECT
+                spotify_track_id,
+                count(*) AS listen_count
+              FROM raw_play_event
+              WHERE spotify_track_id IS NOT NULL
+                AND spotify_track_id != ''
+              GROUP BY spotify_track_id
+            ),
+            mapped_release_track_candidates AS (
+              SELECT
+                st.external_id AS spotify_track_id,
+                stm.release_track_id,
+                max(COALESCE(ftl.listen_count, 0), COALESCE(rtl.listen_count, 0)) AS listen_count,
+                COALESCE(ftal.artist_listen_count, 0) AS artist_listen_count,
+                st.id AS source_track_row_id,
+                stm.id AS source_track_map_row_id
+              FROM source_track st
+              JOIN source_track_map stm
+                ON stm.source_track_id = st.id
+              LEFT JOIN fact_track_listens ftl
+                ON ftl.spotify_track_id = st.external_id
+              LEFT JOIN fact_track_artist_listens ftal
+                ON ftal.spotify_track_id = st.external_id
+              LEFT JOIN raw_track_listens rtl
+                ON rtl.spotify_track_id = st.external_id
+              WHERE st.source_name = 'spotify'
+                AND st.external_id IS NOT NULL
+                AND st.external_id != ''
+                AND stm.status = 'accepted'
+            ),
+            mapped_release_track_ids AS (
+              SELECT
+                spotify_track_id,
+                release_track_id,
+                listen_count,
+                artist_listen_count
+              FROM (
+                SELECT
+                  spotify_track_id,
+                  release_track_id,
+                  listen_count,
+                  artist_listen_count,
+                  row_number() OVER (
+                    PARTITION BY release_track_id
+                    ORDER BY
+                      listen_count DESC,
+                      spotify_track_id ASC,
+                      source_track_map_row_id ASC,
+                      source_track_row_id ASC
+                  ) AS rn
+                FROM mapped_release_track_candidates
+              )
+              WHERE rn = 1
+            ),
+            duplicate_release_track_ids AS (
+              SELECT release_track_id
+              FROM (
+                SELECT
+                  release_track_id,
+                  count(*) OVER (PARTITION BY spotify_track_id) AS duplicate_count
+                FROM mapped_release_track_ids
+              )
+              WHERE duplicate_count > 1
+            ),
+            split_release_track_ids AS (
+              SELECT stm.release_track_id
+              FROM source_track_map stm
+              JOIN source_track st
+                ON st.id = stm.source_track_id
+              WHERE stm.status = 'accepted'
+                AND st.source_name = 'spotify'
+                AND st.external_id IS NOT NULL
+                AND st.external_id != ''
+              GROUP BY stm.release_track_id
+              HAVING count(DISTINCT st.external_id) > 1
+            ),
+            suggested_analysis_release_track_ids AS (
+              SELECT atm.release_track_id
+              FROM analysis_track_map atm
+              JOIN (
+                SELECT analysis_track_id
+                FROM analysis_track_map
+                WHERE status = 'suggested'
+                GROUP BY analysis_track_id
+                HAVING count(DISTINCT release_track_id) > 1
+              ) suggested_groups
+                ON suggested_groups.analysis_track_id = atm.analysis_track_id
+              WHERE atm.status = 'suggested'
+            ),
+            unmapped_source_track_ids AS (
+              SELECT
+                st.external_id AS spotify_track_id,
+                max(COALESCE(ftl.listen_count, 0), COALESCE(rtl.listen_count, 0)) AS track_listen_count,
+                COALESCE(ftal.artist_listen_count, 0) AS artist_listen_count,
+                0 AS needs_identity_review,
+                0 AS mapped_accepted
+              FROM source_track st
+              LEFT JOIN source_track_map stm
+                ON stm.source_track_id = st.id
+              LEFT JOIN fact_track_listens ftl
+                ON ftl.spotify_track_id = st.external_id
+              LEFT JOIN fact_track_artist_listens ftal
+                ON ftal.spotify_track_id = st.external_id
+              LEFT JOIN raw_track_listens rtl
+                ON rtl.spotify_track_id = st.external_id
+              WHERE st.source_name = 'spotify'
+                AND st.external_id IS NOT NULL
+                AND st.external_id != ''
+                AND stm.id IS NULL
+            ),
+            raw_track_ids AS (
+              SELECT spotify_track_id AS spotify_track_id
+              FROM raw_spotify_recent
+              WHERE spotify_track_id IS NOT NULL AND spotify_track_id != ''
+              UNION
+              SELECT spotify_track_id AS spotify_track_id
+              FROM raw_spotify_history
+              WHERE spotify_track_id IS NOT NULL AND spotify_track_id != ''
+            ),
+            unmapped_raw_track_ids AS (
+              SELECT
+                raw.spotify_track_id,
+                max(COALESCE(ftl.listen_count, 0), COALESCE(rtl.listen_count, 0)) AS track_listen_count,
+                COALESCE(ftal.artist_listen_count, 0) AS artist_listen_count,
+                0 AS needs_identity_review,
+                0 AS mapped_accepted
+              FROM raw_track_ids raw
+              LEFT JOIN source_track st
+                ON st.source_name = 'spotify'
+               AND st.external_id = raw.spotify_track_id
+              LEFT JOIN source_track_map stm
+                ON stm.source_track_id = st.id
+              LEFT JOIN fact_track_listens ftl
+                ON ftl.spotify_track_id = raw.spotify_track_id
+              LEFT JOIN fact_track_artist_listens ftal
+                ON ftal.spotify_track_id = raw.spotify_track_id
+              LEFT JOIN raw_track_listens rtl
+                ON rtl.spotify_track_id = raw.spotify_track_id
+              WHERE stm.id IS NULL
+            ),
+            candidate_ids AS (
+              SELECT
+                mrt.spotify_track_id,
+                mrt.listen_count AS track_listen_count,
+                mrt.artist_listen_count,
+                CASE
+                  WHEN dup.release_track_id IS NOT NULL THEN 1
+                  WHEN split.release_track_id IS NOT NULL THEN 1
+                  WHEN suggested.release_track_id IS NOT NULL THEN 1
+                  ELSE 0
+                END AS needs_identity_review,
+                1 AS mapped_accepted
+              FROM mapped_release_track_ids mrt
+              LEFT JOIN duplicate_release_track_ids dup
+                ON dup.release_track_id = mrt.release_track_id
+              LEFT JOIN split_release_track_ids split
+                ON split.release_track_id = mrt.release_track_id
+              LEFT JOIN suggested_analysis_release_track_ids suggested
+                ON suggested.release_track_id = mrt.release_track_id
+              UNION
+              SELECT
+                spotify_track_id,
+                track_listen_count,
+                artist_listen_count,
+                needs_identity_review,
+                mapped_accepted
+              FROM unmapped_source_track_ids
+              UNION
+              SELECT
+                spotify_track_id,
+                track_listen_count,
+                artist_listen_count,
+                needs_identity_review,
+                mapped_accepted
+              FROM unmapped_raw_track_ids
+            ),
+            known_ids AS (
+              SELECT
+                spotify_track_id,
+                max(track_listen_count) AS track_listen_count,
+                max(artist_listen_count) AS artist_listen_count,
+                max(needs_identity_review) AS needs_identity_review,
+                max(mapped_accepted) AS mapped_accepted
+              FROM candidate_ids
+              GROUP BY spotify_track_id
+            )
+            SELECT known_ids.spotify_track_id
+            FROM known_ids
+            LEFT JOIN spotify_track_catalog stc
+              ON stc.spotify_track_id = known_ids.spotify_track_id
+            WHERE stc.spotify_track_id IS NULL
+               OR stc.duration_ms IS NULL
+               OR stc.disc_number IS NULL
+               OR stc.track_number IS NULL
+               OR stc.album_id IS NULL
+               OR json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') IS NULL
+               OR json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') = ''
+               OR lower(COALESCE(stc.last_status, '')) = 'error'
+            ORDER BY
+              known_ids.needs_identity_review DESC,
+              known_ids.track_listen_count DESC,
+              known_ids.artist_listen_count DESC,
+              known_ids.mapped_accepted DESC,
+              known_ids.spotify_track_id ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (bounded_limit + 1, bounded_offset),
+        ).fetchall()
+
+    ids = [str(row[0]) for row in rows if row and row[0]]
+    has_more = len(ids) > bounded_limit
+    return ids[:bounded_limit], has_more
+
+
+def _known_source_album_ids(*, limit: int, offset: int) -> tuple[list[str], bool]:
+    bounded_limit = max(1, min(int(limit), MAX_LIMIT))
+    bounded_offset = max(0, int(offset))
+
+    with sqlite_connection() as connection:
+        rows = connection.execute(
+            """
+            WITH accepted_source_albums AS (
+              SELECT sa.external_id AS spotify_album_id
+              FROM source_album sa
+              JOIN source_album_map sam
+                ON sam.source_album_id = sa.id
+              WHERE sa.source_name = 'spotify'
+                AND sa.external_id IS NOT NULL
+                AND sa.external_id != ''
+                AND sam.status = 'accepted'
+            ),
+            raw_album_ids AS (
+              SELECT spotify_album_id
+              FROM raw_play_event
+              WHERE spotify_album_id IS NOT NULL
+                AND spotify_album_id != ''
+            ),
+            known_ids AS (
+              SELECT spotify_album_id FROM accepted_source_albums
+              UNION
+              SELECT spotify_album_id FROM raw_album_ids
+            )
+            SELECT spotify_album_id
+            FROM known_ids
+            ORDER BY spotify_album_id ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (bounded_limit + 1, bounded_offset),
+        ).fetchall()
+
+    ids = [str(row[0]) for row in rows if row and row[0]]
+    has_more = len(ids) > bounded_limit
+    return ids[:bounded_limit], has_more
+
+
+def _known_album_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[str], bool]:
+    bounded_limit = max(1, min(int(limit), MAX_LIMIT))
+    bounded_offset = max(0, int(offset))
+
+    with sqlite_connection() as connection:
+        rows = connection.execute(
+            """
+            WITH accepted_source_albums AS (
+              SELECT sa.external_id AS spotify_album_id
+              FROM source_album sa
+              JOIN source_album_map sam
+                ON sam.source_album_id = sa.id
+              WHERE sa.source_name = 'spotify'
+                AND sa.external_id IS NOT NULL
+                AND sa.external_id != ''
+                AND sam.status = 'accepted'
+            ),
+            raw_album_ids AS (
+              SELECT spotify_album_id
+              FROM raw_play_event
+              WHERE spotify_album_id IS NOT NULL
+                AND spotify_album_id != ''
+            ),
+            known_ids AS (
+              SELECT spotify_album_id FROM accepted_source_albums
+              UNION
+              SELECT spotify_album_id FROM raw_album_ids
+            ),
+            classified AS (
+              SELECT
+                known_ids.spotify_album_id,
+                CASE
+                  WHEN sac.spotify_album_id IS NULL
+                    OR lower(COALESCE(sac.last_status, '')) = 'error'
+                    THEN 1
+                  WHEN sac.release_date IS NULL
+                    OR sac.release_date = ''
+                    THEN 2
+                  ELSE 3
+                END AS metadata_priority
+              FROM known_ids
+              LEFT JOIN spotify_album_catalog sac
+                ON sac.spotify_album_id = known_ids.spotify_album_id
+              WHERE sac.spotify_album_id IS NULL
+                 OR lower(COALESCE(sac.last_status, '')) = 'error'
+                 OR sac.release_date IS NULL
+                 OR sac.release_date = ''
+                 OR (
+                    json_extract(COALESCE(sac.raw_json, '{}'), '$.external_ids.upc') IS NULL
+                    AND json_extract(COALESCE(sac.raw_json, '{}'), '$.external_ids.ean') IS NULL
+                  )
+            )
+            SELECT spotify_album_id
+            FROM classified
+            ORDER BY metadata_priority ASC, spotify_album_id ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (bounded_limit + 1, bounded_offset),
+        ).fetchall()
+
+    ids = [str(row[0]) for row in rows if row and row[0]]
+    has_more = len(ids) > bounded_limit
+    return ids[:bounded_limit], has_more
+
+
 def _representative_album_ids(album_ids: set[str]) -> list[str]:
     normalized_ids = sorted({str(album_id).strip() for album_id in album_ids if str(album_id).strip()})
     if not normalized_ids:
@@ -270,7 +644,7 @@ def _representative_album_ids(album_ids: set[str]) -> list[str]:
     return sorted(chosen_ids + unmapped_ids)
 
 
-def _split_track_ids_for_fetch(*, track_ids: list[str]) -> tuple[list[str], set[str]]:
+def _split_track_ids_for_fetch(*, track_ids: list[str], require_identity_metadata: bool = False) -> tuple[list[str], set[str]]:
     normalized_ids = [str(track_id).strip() for track_id in track_ids if str(track_id).strip()]
     if not normalized_ids:
         return [], set()
@@ -288,7 +662,10 @@ def _split_track_ids_for_fetch(*, track_ids: list[str]) -> tuple[list[str], set[
         to_fetch: list[str] = []
         known_album_ids: set[str] = set()
         for track_id in normalized_ids:
-            is_complete = _is_track_catalog_complete(connection=connection, spotify_track_id=track_id)
+            if require_identity_metadata:
+                is_complete = _is_track_metadata_complete(connection=connection, spotify_track_id=track_id)
+            else:
+                is_complete = _is_track_catalog_complete(connection=connection, spotify_track_id=track_id)
             if is_complete:
                 known_album_id = album_by_id.get(track_id)
                 if known_album_id:
@@ -327,6 +704,18 @@ def _split_album_ids_for_fetch(*, album_ids: list[str]) -> list[str]:
         if total_tracks is not None and not status_is_error:
             continue
         to_fetch.append(album_id)
+    return to_fetch
+
+
+def _split_album_metadata_ids_for_fetch(*, album_ids: list[str]) -> list[str]:
+    normalized_ids = [str(album_id).strip() for album_id in album_ids if str(album_id).strip()]
+    if not normalized_ids:
+        return []
+    to_fetch: list[str] = []
+    with sqlite_connection() as connection:
+        for album_id in normalized_ids:
+            if not _is_album_metadata_complete(connection=connection, spotify_album_id=album_id):
+                to_fetch.append(album_id)
     return to_fetch
 
 
@@ -414,6 +803,73 @@ def _is_track_catalog_complete(*, connection: sqlite3.Connection, spotify_track_
         return False
     status_is_error = str(last_status or "").strip().lower() == "error"
     return not status_is_error
+
+
+def _is_track_metadata_complete(*, connection: sqlite3.Connection, spotify_track_id: str) -> bool:
+    normalized_track_id = str(spotify_track_id or "").strip()
+    if not normalized_track_id:
+        return False
+    row = connection.execute(
+        """
+        SELECT duration_ms, album_id, disc_number, track_number, raw_json, last_status
+        FROM spotify_track_catalog
+        WHERE spotify_track_id = ?
+        """,
+        (normalized_track_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    duration_ms, album_id, disc_number, track_number, raw_json, last_status = row
+    if duration_ms is None:
+        return False
+    if not str(album_id or "").strip():
+        return False
+    if disc_number is None or track_number is None:
+        return False
+    status_is_error = str(last_status or "").strip().lower() == "error"
+    if status_is_error:
+        return False
+    try:
+        raw_payload = json.loads(raw_json or "{}")
+    except json.JSONDecodeError:
+        raw_payload = {}
+    external_ids = raw_payload.get("external_ids") if isinstance(raw_payload, dict) else {}
+    if not isinstance(external_ids, dict):
+        external_ids = {}
+    return bool(str(external_ids.get("isrc") or "").strip())
+
+
+def _is_album_metadata_complete(*, connection: sqlite3.Connection, spotify_album_id: str) -> bool:
+    normalized_album_id = str(spotify_album_id or "").strip()
+    if not normalized_album_id:
+        return False
+    row = connection.execute(
+        """
+        SELECT release_date, total_tracks, raw_json, last_status
+        FROM spotify_album_catalog
+        WHERE spotify_album_id = ?
+        """,
+        (normalized_album_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    release_date, total_tracks, raw_json, last_status = row
+    if not str(release_date or "").strip():
+        return False
+    if total_tracks is None:
+        return False
+    status_is_error = str(last_status or "").strip().lower() == "error"
+    if status_is_error:
+        return False
+    try:
+        raw_payload = json.loads(raw_json or "{}")
+    except json.JSONDecodeError:
+        raw_payload = {}
+    external_ids = raw_payload.get("external_ids") if isinstance(raw_payload, dict) else {}
+    if not isinstance(external_ids, dict):
+        external_ids = {}
+    has_upc_or_ean = bool(str(external_ids.get("upc") or "").strip() or str(external_ids.get("ean") or "").strip())
+    return has_upc_or_ean
 
 
 def _is_album_catalog_complete(*, connection: sqlite3.Connection, spotify_album_id: str) -> bool:
@@ -624,7 +1080,17 @@ def _pending_queue_items(*, limit: int) -> list[dict[str, Any]]:
               last_error
             FROM spotify_catalog_backfill_queue
             WHERE status = 'pending'
-            ORDER BY priority DESC, requested_at ASC, id ASC
+            ORDER BY
+              CASE
+                WHEN reason LIKE '%identity_metadata%' THEN 0
+                WHEN reason LIKE '%manual_priority%' THEN 1
+                WHEN reason LIKE '%tracklist_completion%' THEN 2
+                WHEN reason LIKE '%full_backfill%' THEN 3
+                ELSE 4
+              END ASC,
+              priority DESC,
+              requested_at ASC,
+              id ASC
             LIMIT ?
             """,
             (bounded_limit,),
@@ -766,6 +1232,7 @@ def enqueue_spotify_catalog_backfill_items(*, items: list[dict[str, Any]] | None
 def list_spotify_catalog_backfill_queue(
     *,
     status_filter: str | None = None,
+    reason_filter: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -774,6 +1241,9 @@ def list_spotify_catalog_backfill_queue(
     normalized_status = str(status_filter or "").strip().lower()
     if normalized_status not in {"pending", "done", "error"}:
         normalized_status = ""
+    normalized_reason = str(reason_filter or "").strip().lower()
+    if normalized_reason not in CATALOG_BACKFILL_REASONS:
+        normalized_reason = ""
 
     counts_sql = """
         SELECT
@@ -789,15 +1259,62 @@ def list_spotify_catalog_backfill_queue(
             "done": int((counts_row[1] if counts_row else 0) or 0),
             "error": int((counts_row[2] if counts_row else 0) or 0),
         }
+        reason_counts_rows = connection.execute(
+            """
+            SELECT
+              CASE
+                WHEN reason LIKE '%identity_metadata%' THEN 'identity_metadata'
+                WHEN reason LIKE '%manual_priority%' THEN 'manual_priority'
+                WHEN reason LIKE '%tracklist_completion%' THEN 'tracklist_completion'
+                WHEN reason LIKE '%full_backfill%' THEN 'full_backfill'
+                ELSE 'other'
+              END AS reason_key,
+              count(*)
+            FROM spotify_catalog_backfill_queue
+            GROUP BY reason_key
+            """
+        ).fetchall()
+        reason_counts = {
+            "identity_metadata": 0,
+            "manual_priority": 0,
+            "tracklist_completion": 0,
+            "full_backfill": 0,
+            "other": 0,
+        }
+        for row in reason_counts_rows:
+            reason_counts[str(row[0] or "other")] = int(row[1] or 0)
+
+        where_clauses = []
+        params: list[Any] = []
         if normalized_status:
+            where_clauses.append("status = ?")
+            params.append(normalized_status)
+        if normalized_reason:
+            where_clauses.append("reason LIKE ?")
+            params.append(f"%{normalized_reason}%")
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        order_sql = """
+            ORDER BY
+              CASE
+                WHEN reason LIKE '%identity_metadata%' THEN 0
+                WHEN reason LIKE '%manual_priority%' THEN 1
+                WHEN reason LIKE '%tracklist_completion%' THEN 2
+                WHEN reason LIKE '%full_backfill%' THEN 3
+                ELSE 4
+              END ASC,
+              priority DESC,
+              requested_at ASC,
+              id ASC
+        """
+        if where_clauses:
             total = int(
                 connection.execute(
-                    "SELECT count(*) FROM spotify_catalog_backfill_queue WHERE status = ?",
-                    (normalized_status,),
+                    f"SELECT count(*) FROM spotify_catalog_backfill_queue {where_sql}",
+                    params,
                 ).fetchone()[0]
             )
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                   id,
                   entity_type,
@@ -810,17 +1327,17 @@ def list_spotify_catalog_backfill_queue(
                   attempts,
                   last_error
                 FROM spotify_catalog_backfill_queue
-                WHERE status = ?
-                ORDER BY priority DESC, requested_at ASC, id ASC
+                {where_sql}
+                {order_sql}
                 LIMIT ?
                 OFFSET ?
                 """,
-                (normalized_status, bounded_limit, bounded_offset),
+                [*params, bounded_limit, bounded_offset],
             ).fetchall()
         else:
             total = int(connection.execute("SELECT count(*) FROM spotify_catalog_backfill_queue").fetchone()[0])
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                   id,
                   entity_type,
@@ -833,7 +1350,7 @@ def list_spotify_catalog_backfill_queue(
                   attempts,
                   last_error
                 FROM spotify_catalog_backfill_queue
-                ORDER BY priority DESC, requested_at ASC, id ASC
+                {order_sql}
                 LIMIT ?
                 OFFSET ?
                 """,
@@ -855,7 +1372,7 @@ def list_spotify_catalog_backfill_queue(
         }
         for row in rows
     ]
-    return {"ok": True, "items": items, "total": total, "counts": counts}
+    return {"ok": True, "items": items, "total": total, "counts": counts, "reason_counts": reason_counts}
 
 
 def repair_spotify_catalog_backfill_queue_statuses() -> dict[str, Any]:
@@ -2637,7 +3154,10 @@ def list_spotify_catalog_backfill_runs(*, limit: int = 20, offset: int = 0) -> d
               max_retry_after_seconds,
               has_more,
               last_error,
-              warnings_json
+              warnings_json,
+              run_mode,
+              run_reason,
+              album_tracklist_policy
             FROM spotify_catalog_backfill_run
             ORDER BY started_at DESC, id DESC
             LIMIT ?
@@ -2677,6 +3197,9 @@ def list_spotify_catalog_backfill_runs(*, limit: int = 20, offset: int = 0) -> d
                 "last_error": row[23],
                 "warnings": warnings,
                 "warnings_count": len(warnings),
+                "run_mode": row[25] or "full_catalog",
+                "run_reason": row[26],
+                "album_tracklist_policy": row[27] or "all",
             }
         )
     return {"ok": True, "items": items, "total": total}
@@ -2726,6 +3249,211 @@ def get_spotify_catalog_backfill_coverage() -> dict[str, Any]:
         )
         album_catalog_rows = int(connection.execute("SELECT count(*) FROM spotify_album_catalog").fetchone()[0])
         album_track_rows = int(connection.execute("SELECT count(*) FROM spotify_album_track").fetchone()[0])
+        missing_source_track_metadata = int(
+            connection.execute(
+                """
+                WITH source_tracks AS (
+                  SELECT DISTINCT st.external_id AS spotify_track_id
+                  FROM source_track st
+                  JOIN source_track_map stm
+                    ON stm.source_track_id = st.id
+                  WHERE st.source_name = 'spotify'
+                    AND st.external_id IS NOT NULL
+                    AND st.external_id != ''
+                    AND stm.status = 'accepted'
+                )
+                SELECT count(*)
+                FROM source_tracks st
+                LEFT JOIN spotify_track_catalog stc
+                  ON stc.spotify_track_id = st.spotify_track_id
+                WHERE stc.spotify_track_id IS NULL
+                   OR lower(COALESCE(stc.last_status, '')) = 'error'
+                """
+            ).fetchone()[0]
+        )
+        missing_track_duration_ms = int(
+            connection.execute(
+                """
+                WITH source_tracks AS (
+                  SELECT DISTINCT st.external_id AS spotify_track_id
+                  FROM source_track st
+                  JOIN source_track_map stm
+                    ON stm.source_track_id = st.id
+                  WHERE st.source_name = 'spotify'
+                    AND st.external_id IS NOT NULL
+                    AND st.external_id != ''
+                    AND stm.status = 'accepted'
+                )
+                SELECT count(*)
+                FROM source_tracks st
+                LEFT JOIN spotify_track_catalog stc
+                  ON stc.spotify_track_id = st.spotify_track_id
+                WHERE stc.duration_ms IS NULL
+                   OR lower(COALESCE(stc.last_status, '')) = 'error'
+                """
+            ).fetchone()[0]
+        )
+        missing_track_isrc = int(
+            connection.execute(
+                """
+                WITH source_tracks AS (
+                  SELECT DISTINCT st.external_id AS spotify_track_id
+                  FROM source_track st
+                  JOIN source_track_map stm
+                    ON stm.source_track_id = st.id
+                  WHERE st.source_name = 'spotify'
+                    AND st.external_id IS NOT NULL
+                    AND st.external_id != ''
+                    AND stm.status = 'accepted'
+                )
+                SELECT count(*)
+                FROM source_tracks st
+                LEFT JOIN spotify_track_catalog stc
+                  ON stc.spotify_track_id = st.spotify_track_id
+                WHERE json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') IS NULL
+                   OR json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') = ''
+                   OR lower(COALESCE(stc.last_status, '')) = 'error'
+                """
+            ).fetchone()[0]
+        )
+        missing_source_album_metadata = int(
+            connection.execute(
+                """
+                WITH source_albums AS (
+                  SELECT DISTINCT sa.external_id AS spotify_album_id
+                  FROM source_album sa
+                  JOIN source_album_map sam
+                    ON sam.source_album_id = sa.id
+                  WHERE sa.source_name = 'spotify'
+                    AND sa.external_id IS NOT NULL
+                    AND sa.external_id != ''
+                    AND sam.status = 'accepted'
+                  UNION
+                  SELECT DISTINCT spotify_album_id
+                  FROM raw_play_event
+                  WHERE spotify_album_id IS NOT NULL
+                    AND spotify_album_id != ''
+                )
+                SELECT count(*)
+                FROM source_albums sa
+                LEFT JOIN spotify_album_catalog sac
+                  ON sac.spotify_album_id = sa.spotify_album_id
+                WHERE sac.spotify_album_id IS NULL
+                   OR lower(COALESCE(sac.last_status, '')) = 'error'
+                """
+            ).fetchone()[0]
+        )
+        missing_album_release_date = int(
+            connection.execute(
+                """
+                WITH source_albums AS (
+                  SELECT DISTINCT sa.external_id AS spotify_album_id
+                  FROM source_album sa
+                  JOIN source_album_map sam
+                    ON sam.source_album_id = sa.id
+                  WHERE sa.source_name = 'spotify'
+                    AND sa.external_id IS NOT NULL
+                    AND sa.external_id != ''
+                    AND sam.status = 'accepted'
+                  UNION
+                  SELECT DISTINCT spotify_album_id
+                  FROM raw_play_event
+                  WHERE spotify_album_id IS NOT NULL
+                    AND spotify_album_id != ''
+                )
+                SELECT count(*)
+                FROM source_albums sa
+                LEFT JOIN spotify_album_catalog sac
+                  ON sac.spotify_album_id = sa.spotify_album_id
+                WHERE sac.release_date IS NULL
+                   OR sac.release_date = ''
+                   OR lower(COALESCE(sac.last_status, '')) = 'error'
+                """
+            ).fetchone()[0]
+        )
+        missing_album_external_ids = int(
+            connection.execute(
+                """
+                WITH source_albums AS (
+                  SELECT DISTINCT sa.external_id AS spotify_album_id
+                  FROM source_album sa
+                  JOIN source_album_map sam
+                    ON sam.source_album_id = sa.id
+                  WHERE sa.source_name = 'spotify'
+                    AND sa.external_id IS NOT NULL
+                    AND sa.external_id != ''
+                    AND sam.status = 'accepted'
+                  UNION
+                  SELECT DISTINCT spotify_album_id
+                  FROM raw_play_event
+                  WHERE spotify_album_id IS NOT NULL
+                    AND spotify_album_id != ''
+                )
+                SELECT count(*)
+                FROM source_albums sa
+                LEFT JOIN spotify_album_catalog sac
+                  ON sac.spotify_album_id = sa.spotify_album_id
+                WHERE (
+                    json_extract(COALESCE(sac.raw_json, '{}'), '$.external_ids.upc') IS NULL
+                    AND json_extract(COALESCE(sac.raw_json, '{}'), '$.external_ids.ean') IS NULL
+                  )
+                   OR lower(COALESCE(sac.last_status, '')) = 'error'
+                """
+            ).fetchone()[0]
+        )
+        missing_album_tracklists = int(
+            connection.execute(
+                """
+                SELECT count(*)
+                FROM spotify_album_catalog sac
+                LEFT JOIN (
+                  SELECT spotify_album_id, count(*) AS track_rows
+                  FROM spotify_album_track
+                  GROUP BY spotify_album_id
+                ) sat
+                  ON sat.spotify_album_id = sac.spotify_album_id
+                WHERE sac.total_tracks IS NOT NULL
+                  AND COALESCE(sat.track_rows, 0) < sac.total_tracks
+                  AND lower(COALESCE(sac.last_status, '')) != 'error'
+                """
+            ).fetchone()[0]
+        )
+        relevant_album_tracklist_backlog = int(
+            connection.execute(
+                """
+                WITH album_stats AS (
+                  SELECT
+                    sac.spotify_album_id,
+                    sac.total_tracks,
+                    COALESCE(count(DISTINCT sat.spotify_track_id), 0) AS track_rows,
+                    count(DISTINCT rpe.id) AS raw_play_events
+                  FROM spotify_album_catalog sac
+                  LEFT JOIN spotify_album_track sat
+                    ON sat.spotify_album_id = sac.spotify_album_id
+                  LEFT JOIN raw_play_event rpe
+                    ON rpe.spotify_album_id = sac.spotify_album_id
+                  WHERE sac.total_tracks IS NOT NULL
+                    AND lower(COALESCE(sac.last_status, '')) != 'error'
+                  GROUP BY sac.spotify_album_id, sac.total_tracks
+                )
+                SELECT count(*)
+                FROM album_stats
+                WHERE track_rows < total_tracks
+                  AND raw_play_events >= 3
+                """
+            ).fetchone()[0]
+        )
+        unlistened_tracklist_rows = int(
+            connection.execute(
+                """
+                SELECT count(*)
+                FROM spotify_album_track sat
+                LEFT JOIN raw_play_event rpe
+                  ON rpe.spotify_track_id = sat.spotify_track_id
+                WHERE rpe.id IS NULL
+                """
+            ).fetchone()[0]
+        )
         latest_run_row = connection.execute(
             """
             SELECT
@@ -2749,7 +3477,10 @@ def get_spotify_catalog_backfill_coverage() -> dict[str, Any]:
               final_request_delay_seconds,
               has_more,
               last_error,
-              warnings_json
+              warnings_json,
+              run_mode,
+              run_reason,
+              album_tracklist_policy
             FROM spotify_catalog_backfill_run
             ORDER BY started_at DESC, id DESC
             LIMIT 1
@@ -2800,6 +3531,9 @@ def get_spotify_catalog_backfill_coverage() -> dict[str, Any]:
             "last_error": latest_run_row[19],
             "warnings": latest_warnings,
             "warnings_count": len(latest_warnings),
+            "run_mode": latest_run_row[21] or "full_catalog",
+            "run_reason": latest_run_row[22],
+            "album_tracklist_policy": latest_run_row[23] or "all",
         }
 
     return {
@@ -2813,10 +3547,23 @@ def get_spotify_catalog_backfill_coverage() -> dict[str, Any]:
         "album_track_rows": album_track_rows,
         "latest_run": latest_run,
         "recent_errors_count": recent_errors_count,
+        "identity_critical": {
+            "missing_source_track_metadata": missing_source_track_metadata,
+            "missing_source_album_metadata": missing_source_album_metadata,
+            "missing_track_isrc": missing_track_isrc,
+            "missing_track_duration_ms": missing_track_duration_ms,
+            "missing_album_release_date": missing_album_release_date,
+            "missing_album_external_ids": missing_album_external_ids,
+        },
+        "catalog_expansion": {
+            "missing_album_tracklists": missing_album_tracklists,
+            "relevant_album_tracklist_backlog": relevant_album_tracklist_backlog,
+            "unlistened_tracklist_rows": unlistened_tracklist_rows,
+        },
     }
 
 
-def _run_insert(*, market: str, delay: float) -> int:
+def _run_insert(*, market: str, delay: float, run_mode: str, run_reason: str | None, album_tracklist_policy: str) -> int:
     with sqlite_connection(write=True) as connection:
         cursor = connection.execute(
             """
@@ -2843,10 +3590,13 @@ def _run_insert(*, market: str, delay: float) -> int:
               max_retry_after_seconds,
               has_more,
               last_error,
-              warnings_json
-            ) VALUES (?, ?, 'running', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ?, ?, 0, 0, 0, 0, NULL, NULL)
+              warnings_json,
+              run_mode,
+              run_reason,
+              album_tracklist_policy
+            ) VALUES (?, ?, 'running', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ?, ?, 0, 0, 0, 0, NULL, NULL, ?, ?, ?)
             """,
-            (_utc_now(), market, delay, delay),
+            (_utc_now(), market, delay, delay, run_mode, run_reason, album_tracklist_policy),
         )
     return int(cursor.lastrowid)
 
@@ -2902,7 +3652,7 @@ def _run_finish(*, run_id: int, payload: dict[str, Any], status_text: str, last_
                 int(payload.get("requests_success", 0)),
                 int(payload.get("requests_429", 0)),
                 int(payload.get("requests_failed", 0)),
-                float(payload.get("_request_delay_seconds", MIN_REQUEST_DELAY_SECONDS)),
+                float(payload.get("_request_delay_seconds", DEFAULT_REQUEST_DELAY_SECONDS)),
                 effective_requests_per_minute,
                 peak_requests_last_30_seconds,
                 float(payload.get("max_retry_after_seconds", 0.0)),
@@ -3127,6 +3877,8 @@ def _request_json(
             telemetry["_request_delay_seconds"] = min(float(telemetry["_request_delay_seconds"]) * 1.75, MAX_REQUEST_DELAY_SECONDS)
             sleeper(cooldown_seconds)
             if int(telemetry.get("requests_429", 0)) >= int(max_429):
+                if FIRST_429_STOP_WARNING not in telemetry["warnings"]:
+                    telemetry["warnings"].append(FIRST_429_STOP_WARNING)
                 raise _PartialStop("rate_limited")
             if attempt < 3:
                 continue
@@ -3186,11 +3938,13 @@ def _check_stop_reason(
 def run_spotify_catalog_backfill(
     *,
     access_token: str,
+    run_mode: str = "full_catalog",
+    reason: str | None = None,
     limit: int = DEFAULT_LIMIT,
     offset: int = 0,
     market: str = "US",
     include_albums: bool = True,
-    request_delay_seconds: float = 0.35,
+    request_delay_seconds: float = DEFAULT_REQUEST_DELAY_SECONDS,
     max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS,
     max_requests: int = DEFAULT_MAX_REQUESTS,
     max_errors: int = DEFAULT_MAX_ERRORS,
@@ -3198,25 +3952,70 @@ def run_spotify_catalog_backfill(
     max_429: int = DEFAULT_MAX_429,
     force_refresh: bool = False,
     album_tracklist_policy: str = "all",
+    target: str | None = None,
     sleeper: Callable[[float], None] | None = None,
     fetcher: Callable[[str, dict[str, Any], str], tuple[int, dict[str, str], dict[str, Any], str | None]] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     bounded_limit = max(1, min(int(limit), MAX_LIMIT))
     bounded_offset = max(0, int(offset))
     normalized_market = str(market or "US").strip() or "US"
     effective_delay = _normalize_delay_seconds(float(request_delay_seconds))
-    bounded_max_runtime_seconds = max(5.0, min(float(max_runtime_seconds), 300.0))
+    bounded_max_runtime_seconds = max(5.0, min(float(max_runtime_seconds), float(MAX_RUNTIME_SECONDS)))
     bounded_max_requests = max(1, min(int(max_requests), 1000))
     bounded_max_errors = max(1, min(int(max_errors), 100))
     bounded_max_album_tracks_pages_per_album = max(1, min(int(max_album_tracks_pages_per_album), 50))
-    bounded_max_429 = max(1, min(int(max_429), 20))
+    bounded_max_429 = 1
+    normalized_run_mode = str(run_mode or "full_catalog").strip().lower()
+    if normalized_run_mode not in CATALOG_BACKFILL_RUN_MODES:
+        normalized_run_mode = "full_catalog"
+    normalized_reason = str(reason or "").strip().lower() or None
+    if normalized_reason is not None and normalized_reason not in CATALOG_BACKFILL_REASONS:
+        normalized_reason = None
     normalized_album_tracklist_policy = str(album_tracklist_policy or "all").strip().lower()
     if normalized_album_tracklist_policy not in ALBUM_TRACKLIST_POLICIES:
         normalized_album_tracklist_policy = "all"
+    requested_album_tracklist_policy = normalized_album_tracklist_policy
+    target_was_provided = target is not None and str(target).strip() != ""
+    normalized_target = str(target or "all").strip().lower()
+    if normalized_target not in CATALOG_BACKFILL_TARGETS:
+        normalized_target = "all"
+    if normalized_run_mode == "metadata_only":
+        if not target_was_provided:
+            include_albums = True
+        normalized_album_tracklist_policy = "none"
+        normalized_reason = normalized_reason or "identity_metadata"
+    elif normalized_run_mode == "tracklists_relevant":
+        include_albums = True
+        if normalized_album_tracklist_policy in {"all", "none"}:
+            normalized_album_tracklist_policy = "relevant_albums"
+        normalized_reason = normalized_reason or "tracklist_completion"
+    elif normalized_run_mode == "full_catalog":
+        normalized_reason = normalized_reason or "full_backfill"
+    if target_was_provided:
+        if normalized_target == "tracks":
+            include_albums = False
+            normalized_album_tracklist_policy = "none"
+        elif normalized_target == "albums":
+            include_albums = True
+            normalized_album_tracklist_policy = "none"
+        elif normalized_target == "album_tracklists":
+            include_albums = True
+        else:
+            include_albums = True
+    run_tracks = normalized_target in {"tracks", "all"}
+    run_album_metadata = normalized_target in {"albums", "all"}
+    run_album_tracklists = normalized_target in {"album_tracklists", "all"} and include_albums and normalized_album_tracklist_policy != "none"
     sleep_fn = sleeper or time.sleep
     fetch_fn = fetcher or _default_fetcher
 
-    run_id = _run_insert(market=normalized_market, delay=effective_delay)
+    run_id = _run_insert(
+        market=normalized_market,
+        delay=effective_delay,
+        run_mode=normalized_run_mode,
+        run_reason=normalized_reason,
+        album_tracklist_policy=normalized_album_tracklist_policy,
+    )
     started_monotonic = time.monotonic()
     telemetry: dict[str, Any] = {
         "tracks_seen": 0,
@@ -3242,12 +4041,131 @@ def run_spotify_catalog_backfill(
         "_request_delay_seconds": effective_delay,
         "_request_timestamps": [],
         "_peak_requests_last_30_seconds": 0,
+        "_progress_track_candidates": 0,
     }
 
     last_error: str | None = None
     status_text = "ok"
     stop_reason: str | None = None
     partial = False
+    track_batch_unavailable = False
+    album_batch_unavailable = False
+    last_progress_tracks_fetched = 0
+    last_progress_monotonic = started_monotonic
+
+    def _result_payload() -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "status": status_text,
+            "tracks_seen": int(telemetry["tracks_seen"]),
+            "tracks_fetched": int(telemetry["tracks_fetched"]),
+            "tracks_upserted": int(telemetry["tracks_upserted"]),
+            "albums_seen": int(telemetry["albums_seen"]),
+            "albums_fetched": int(telemetry["albums_fetched"]),
+            "album_tracks_upserted": int(telemetry["album_tracks_upserted"]),
+            "album_tracklists_capped": int(telemetry["album_tracklists_capped"]),
+            "album_tracklists_seen": int(telemetry["album_tracklists_seen"]),
+            "album_tracklists_skipped_by_policy": int(telemetry["album_tracklists_skipped_by_policy"]),
+            "album_tracklists_fetched": int(telemetry["album_tracklists_fetched"]),
+            "skipped": int(telemetry["skipped"]),
+            "errors": int(telemetry["errors"]),
+            "requests_total": int(telemetry["requests_total"]),
+            "requests_success": int(telemetry["requests_success"]),
+            "requests_429": int(telemetry["requests_429"]),
+            "requests_failed": int(telemetry["requests_failed"]),
+            "initial_request_delay_seconds": effective_delay,
+            "final_request_delay_seconds": float(telemetry["_request_delay_seconds"]),
+            "effective_requests_per_minute": round(
+                (int(telemetry["requests_success"]) * 60.0) / max(0.001, float(telemetry.get("_elapsed_seconds", 0.0))),
+                3,
+            ),
+            "peak_requests_last_30_seconds": int(telemetry["_peak_requests_last_30_seconds"]),
+            "last_retry_after_seconds": float(telemetry["last_retry_after_seconds"]),
+            "max_retry_after_seconds": float(telemetry["max_retry_after_seconds"]),
+            "has_more": bool(telemetry["has_more"]),
+            "warnings": list(telemetry["warnings"]),
+            "stop_reason": stop_reason,
+            "partial": bool(partial),
+            "market": normalized_market,
+            "run_mode": normalized_run_mode,
+            "run_reason": normalized_reason,
+            "target": normalized_target,
+            "limit": bounded_limit,
+            "offset": bounded_offset,
+            "include_albums": bool(include_albums),
+            "force_refresh": bool(force_refresh),
+            "album_tracklist_policy": normalized_album_tracklist_policy,
+            "max_runtime_seconds": bounded_max_runtime_seconds,
+            "max_requests": bounded_max_requests,
+            "max_errors": bounded_max_errors,
+            "max_album_tracks_pages_per_album": bounded_max_album_tracks_pages_per_album,
+            "max_429": bounded_max_429,
+            "last_error": last_error,
+        }
+
+    def _emit_progress(event: str, extra: dict[str, Any] | None = None) -> None:
+        if progress_callback is None:
+            return
+        elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
+        candidate_count = int(telemetry.get("_progress_track_candidates", 0) or 0)
+        tracks_fetched = int(telemetry["tracks_fetched"])
+        requests_total = int(telemetry["requests_total"])
+        requests_429 = int(telemetry["requests_429"])
+        if event == "start":
+            message = f"Run {run_id} started: {candidate_count} track candidates, has_more={bool(telemetry['has_more'])}"
+        else:
+            total_text = str(candidate_count) if candidate_count > 0 else "?"
+            message = (
+                f"Run {run_id}: {tracks_fetched}/{total_text} tracks fetched, "
+                f"{requests_total} requests, {requests_429} rate limits, {round(elapsed_seconds)}s elapsed"
+            )
+        payload: dict[str, Any] = {
+            "event": event,
+            "run_id": run_id,
+            "status": status_text,
+            "stop_reason": stop_reason,
+            "tracks_fetched": tracks_fetched,
+            "requests_total": requests_total,
+            "requests_429": requests_429,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "message": message,
+        }
+        if extra:
+            payload.update(extra)
+        try:
+            progress_callback(payload)
+        except Exception:
+            return
+
+    def _emit_progress_if_due() -> None:
+        nonlocal last_progress_monotonic, last_progress_tracks_fetched
+        if progress_callback is None:
+            return
+        tracks_fetched = int(telemetry["tracks_fetched"])
+        now_monotonic = time.monotonic()
+        if tracks_fetched >= last_progress_tracks_fetched + 10 or (now_monotonic - last_progress_monotonic) >= 30.0:
+            _emit_progress("progress")
+            last_progress_tracks_fetched = tracks_fetched
+            last_progress_monotonic = now_monotonic
+
+    if normalized_run_mode == "metadata_only" and normalized_target == "album_tracklists":
+        error_text = "metadata_only target=album_tracklists is invalid; album tracklists require an explicit tracklist run mode."
+        telemetry["warnings"].append(error_text)
+        telemetry["errors"] = 1
+        telemetry["_elapsed_seconds"] = max(0.0, time.monotonic() - started_monotonic)
+        _run_finish(run_id=run_id, payload=telemetry, status_text="failed", last_error=error_text)
+        status_text = "failed"
+        last_error = error_text
+        return _result_payload()
+    if normalized_target == "album_tracklists" and requested_album_tracklist_policy == "none":
+        error_text = "target=album_tracklists requires album_tracklist_policy other than none."
+        telemetry["warnings"].append(error_text)
+        telemetry["errors"] = 1
+        telemetry["_elapsed_seconds"] = max(0.0, time.monotonic() - started_monotonic)
+        _run_finish(run_id=run_id, payload=telemetry, status_text="failed", last_error=error_text)
+        status_text = "failed"
+        last_error = error_text
+        return _result_payload()
 
     def _raise_if_should_stop() -> None:
         reason = _check_stop_reason(
@@ -3261,18 +4179,149 @@ def run_spotify_catalog_backfill(
         if reason is not None:
             raise _PartialStop(reason)
 
+    def _warn_once(text: str) -> None:
+        if text not in telemetry["warnings"]:
+            telemetry["warnings"].append(text)
+
+    def _fetch_single_tracks(track_ids: list[str]) -> None:
+        for track_id in track_ids:
+            try:
+                _raise_if_should_stop()
+                single_payload = _request_json(
+                    access_token=access_token,
+                    url=f"https://api.spotify.com/v1/tracks/{track_id}",
+                    params={"market": normalized_market},
+                    endpoint_category="tracks_single_fallback",
+                    telemetry=telemetry,
+                    max_429=bounded_max_429,
+                    sleeper=sleep_fn,
+                    fetcher=fetch_fn,
+                )
+                if not isinstance(single_payload, dict) or not single_payload.get("id"):
+                    telemetry["skipped"] += 1
+                    _upsert_track_catalog_error(
+                        spotify_track_id=track_id,
+                        market=normalized_market,
+                        fetched_at=fetched_at,
+                        last_error="tracks_single_fallback: Missing track payload.",
+                    )
+                    continue
+                _upsert_track_catalog(
+                    track=single_payload,
+                    market=normalized_market,
+                    fetched_at=fetched_at,
+                    last_status="ok",
+                    last_error=None,
+                )
+                telemetry["tracks_fetched"] += 1
+                telemetry["tracks_upserted"] += 1
+                _emit_progress_if_due()
+                album = single_payload.get("album") if isinstance(single_payload.get("album"), dict) else {}
+                if album.get("id"):
+                    album_ids.add(str(album["id"]))
+            except RuntimeError as single_exc:
+                telemetry["errors"] += 1
+                _upsert_track_catalog_error(
+                    spotify_track_id=track_id,
+                    market=normalized_market,
+                    fetched_at=fetched_at,
+                    last_error=str(single_exc),
+                )
+
+    def _fetch_single_albums(album_ids_for_fetch: list[str]) -> list[dict[str, Any]]:
+        album_payloads: list[dict[str, Any]] = []
+        for album_id in album_ids_for_fetch:
+            try:
+                try:
+                    _raise_if_should_stop()
+                except _PartialStop:
+                    return album_payloads
+                single_album = _request_json(
+                    access_token=access_token,
+                    url=f"https://api.spotify.com/v1/albums/{album_id}",
+                    params={"market": normalized_market},
+                    endpoint_category="album_single_fallback",
+                    telemetry=telemetry,
+                    max_429=bounded_max_429,
+                    sleeper=sleep_fn,
+                    fetcher=fetch_fn,
+                )
+                if not isinstance(single_album, dict) or not single_album.get("id"):
+                    telemetry["skipped"] += 1
+                    _upsert_album_catalog_error(
+                        spotify_album_id=album_id,
+                        market=normalized_market,
+                        fetched_at=fetched_at,
+                        last_error="album_single_fallback: Missing album payload.",
+                    )
+                    continue
+                album_payloads.append(single_album)
+            except RuntimeError as single_exc:
+                telemetry["errors"] += 1
+                _upsert_album_catalog_error(
+                    spotify_album_id=album_id,
+                    market=normalized_market,
+                    fetched_at=fetched_at,
+                    last_error=str(single_exc),
+                )
+        return album_payloads
+
     try:
         queue_items = _pending_queue_items(limit=bounded_limit)
+        if normalized_run_mode == "metadata_only":
+            queue_items = [
+                item
+                for item in queue_items
+                if str(item.get("reason") or "").strip().lower() in METADATA_ONLY_QUEUE_REASONS
+            ]
         queue_slots_used = 0
         queued_track_ids_processed: set[str] = set()
         queued_album_ids_processed: set[str] = set()
         album_ids: set[str] = set()
         album_track_fetch_ids: set[str] = set()
         queued_album_track_fetch_queue_ids: dict[str, list[int]] = {}
-        seeded_track_ids, has_more = _known_track_ids(limit=bounded_limit, offset=bounded_offset)
+        if normalized_run_mode == "metadata_only" and run_tracks:
+            seeded_track_ids, has_more = _known_track_ids_missing_metadata(limit=bounded_limit, offset=bounded_offset)
+        elif run_tracks:
+            seeded_track_ids, has_more = _known_track_ids(limit=bounded_limit, offset=bounded_offset)
+        else:
+            seeded_track_ids, has_more = [], False
+        if normalized_run_mode == "metadata_only" and normalized_target == "albums":
+            seeded_source_album_ids, album_has_more = _known_album_ids_missing_metadata(
+                limit=bounded_limit,
+                offset=bounded_offset,
+            )
+        elif run_album_metadata:
+            seeded_source_album_ids, album_has_more = _known_source_album_ids(limit=bounded_limit, offset=bounded_offset)
+        else:
+            seeded_source_album_ids, album_has_more = [], False
         deduped_track_ids = list(dict.fromkeys(str(track_id) for track_id in seeded_track_ids if str(track_id).strip()))
         telemetry["tracks_seen"] = len(deduped_track_ids)
-        telemetry["has_more"] = has_more
+        telemetry["has_more"] = has_more or (normalized_run_mode == "metadata_only" and album_has_more)
+        telemetry["_progress_track_candidates"] = len(deduped_track_ids)
+        _emit_progress(
+            "start",
+            {
+                "worker_config": {
+                    "target": normalized_target,
+                    "run_mode": normalized_run_mode,
+                    "reason": normalized_reason,
+                    "album_tracklist_policy": normalized_album_tracklist_policy,
+                    "include_albums": bool(include_albums),
+                    "limit": bounded_limit,
+                    "max_requests": bounded_max_requests,
+                    "max_runtime_seconds": bounded_max_runtime_seconds,
+                    "request_delay_seconds": effective_delay,
+                    "market": normalized_market,
+                },
+                "candidate_counts": {
+                    "tracks_seen": int(telemetry["tracks_seen"]),
+                    "source_albums_seen": len(seeded_source_album_ids),
+                    "queue_items": len(queue_items),
+                    "has_more": bool(telemetry["has_more"]),
+                },
+            },
+        )
 
         fetched_at = _utc_now()
 
@@ -3281,14 +4330,21 @@ def run_spotify_catalog_backfill(
             _raise_if_should_stop()
             if queue_slots_used >= bounded_limit:
                 break
-            queue_slots_used += 1
             queue_id = int(queue_item["id"])
             entity_type = str(queue_item["entity_type"])
             spotify_id = str(queue_item["spotify_id"])
+            if entity_type == "track" and not run_tracks:
+                continue
+            if entity_type == "album" and not (run_album_metadata or run_album_tracklists):
+                continue
+            queue_slots_used += 1
             if entity_type == "track":
                 queued_track_ids_processed.add(spotify_id)
                 telemetry["tracks_seen"] += 1
                 is_complete, known_album_id = _track_catalog_completion_info(spotify_track_id=spotify_id)
+                if normalized_run_mode == "metadata_only":
+                    with sqlite_connection() as connection:
+                        is_complete = _is_track_metadata_complete(connection=connection, spotify_track_id=spotify_id)
                 if is_complete and not force_refresh:
                     telemetry["skipped"] += 1
                     if known_album_id:
@@ -3326,11 +4382,15 @@ def run_spotify_catalog_backfill(
                     )
                     telemetry["tracks_fetched"] += 1
                     telemetry["tracks_upserted"] += 1
+                    _emit_progress_if_due()
                     album = payload.get("album") if isinstance(payload.get("album"), dict) else {}
                     if album.get("id"):
                         album_ids.add(str(album["id"]))
                     with sqlite_connection() as connection:
-                        now_complete = _is_track_catalog_complete(connection=connection, spotify_track_id=spotify_id)
+                        if normalized_run_mode == "metadata_only":
+                            now_complete = _is_track_metadata_complete(connection=connection, spotify_track_id=spotify_id)
+                        else:
+                            now_complete = _is_track_catalog_complete(connection=connection, spotify_track_id=spotify_id)
                     if now_complete:
                         _queue_mark_done(queue_id=queue_id)
                 except RuntimeError as exc:
@@ -3347,6 +4407,28 @@ def run_spotify_catalog_backfill(
             if entity_type == "album":
                 queued_album_ids_processed.add(spotify_id)
                 telemetry["albums_seen"] += 1
+                if run_album_tracklists and not run_album_metadata:
+                    with sqlite_connection() as connection:
+                        metadata_complete = _is_album_metadata_complete(connection=connection, spotify_album_id=spotify_id)
+                        needs_track_fetch = (
+                            _album_tracklist_needs_fetch(connection=connection, album_id=spotify_id)
+                            if metadata_complete or force_refresh
+                            else False
+                        )
+                        if needs_track_fetch:
+                            album_track_fetch_ids.add(spotify_id)
+                            queued_album_track_fetch_queue_ids.setdefault(spotify_id, []).append(queue_id)
+                        else:
+                            telemetry["skipped"] += 1
+                            _queue_mark_done(queue_id=queue_id)
+                    continue
+                if normalized_run_mode == "metadata_only":
+                    with sqlite_connection() as connection:
+                        metadata_complete = _is_album_metadata_complete(connection=connection, spotify_album_id=spotify_id)
+                    if metadata_complete and not force_refresh:
+                        telemetry["skipped"] += 1
+                        _queue_mark_done(queue_id=queue_id)
+                        continue
                 if _album_catalog_is_complete(spotify_album_id=spotify_id) and not force_refresh:
                     album_ids.add(spotify_id)
                     if include_albums:
@@ -3398,7 +4480,12 @@ def run_spotify_catalog_backfill(
                     telemetry["albums_fetched"] += 1
                     album_id = str(album_payload.get("id") or spotify_id)
                     album_ids.add(album_id)
-                    if include_albums:
+                    if normalized_run_mode == "metadata_only":
+                        with sqlite_connection() as connection:
+                            now_metadata_complete = _is_album_metadata_complete(connection=connection, spotify_album_id=album_id)
+                        if now_metadata_complete:
+                            _queue_mark_done(queue_id=queue_id)
+                    elif include_albums:
                         album_track_fetch_ids.add(album_id)
                         queued_album_track_fetch_queue_ids.setdefault(album_id, []).append(queue_id)
                     else:
@@ -3429,7 +4516,10 @@ def run_spotify_catalog_backfill(
             track_ids_to_fetch = track_ids_to_fetch[:remaining_bulk_capacity]
 
         if not force_refresh and deduped_track_ids:
-            track_ids_to_fetch, known_album_ids = _split_track_ids_for_fetch(track_ids=deduped_track_ids)
+            track_ids_to_fetch, known_album_ids = _split_track_ids_for_fetch(
+                track_ids=deduped_track_ids,
+                require_identity_metadata=normalized_run_mode == "metadata_only",
+            )
             track_ids_to_fetch = [track_id for track_id in track_ids_to_fetch if track_id not in queued_track_ids_processed]
             if remaining_bulk_capacity == 0:
                 track_ids_to_fetch = []
@@ -3439,6 +4529,9 @@ def run_spotify_catalog_backfill(
             album_ids.update(known_album_ids)
 
         for id_chunk in _chunked(track_ids_to_fetch, TRACK_BATCH_SIZE):
+            if track_batch_unavailable:
+                _fetch_single_tracks(id_chunk)
+                continue
             try:
                 _raise_if_should_stop()
                 payload = _request_json(
@@ -3468,6 +4561,7 @@ def run_spotify_catalog_backfill(
                     )
                     telemetry["tracks_fetched"] += 1
                     telemetry["tracks_upserted"] += 1
+                    _emit_progress_if_due()
                     album = track.get("album") if isinstance(track.get("album"), dict) else {}
                     if album.get("id"):
                         album_ids.add(str(album["id"]))
@@ -3476,122 +4570,56 @@ def run_spotify_catalog_backfill(
                 if "tracks_batch: Spotify request failed with status 403" not in error_text:
                     raise
 
-                warning_text = "track batch endpoint forbidden; used single-track fallback"
-                if warning_text not in telemetry["warnings"]:
-                    telemetry["warnings"].append(warning_text)
+                track_batch_unavailable = True
+                _warn_once(TRACK_BATCH_FORBIDDEN_WARNING)
+                _fetch_single_tracks(id_chunk)
 
-                for track_id in id_chunk:
-                    try:
-                        _raise_if_should_stop()
-                        single_payload = _request_json(
-                            access_token=access_token,
-                            url=f"https://api.spotify.com/v1/tracks/{track_id}",
-                            params={"market": normalized_market},
-                            endpoint_category="tracks_single_fallback",
-                            telemetry=telemetry,
-                            max_429=bounded_max_429,
-                            sleeper=sleep_fn,
-                            fetcher=fetch_fn,
-                        )
-                        if not isinstance(single_payload, dict) or not single_payload.get("id"):
-                            telemetry["skipped"] += 1
-                            _upsert_track_catalog_error(
-                                spotify_track_id=track_id,
-                                market=normalized_market,
-                                fetched_at=fetched_at,
-                                last_error="tracks_single_fallback: Missing track payload.",
-                            )
-                            continue
-                        _upsert_track_catalog(
-                            track=single_payload,
-                            market=normalized_market,
-                            fetched_at=fetched_at,
-                            last_status="ok",
-                            last_error=None,
-                        )
-                        telemetry["tracks_fetched"] += 1
-                        telemetry["tracks_upserted"] += 1
-                        album = single_payload.get("album") if isinstance(single_payload.get("album"), dict) else {}
-                        if album.get("id"):
-                            album_ids.add(str(album["id"]))
-                    except RuntimeError as single_exc:
-                        telemetry["errors"] += 1
-                        _upsert_track_catalog_error(
-                            spotify_track_id=track_id,
-                            market=normalized_market,
-                            fetched_at=fetched_at,
-                            last_error=str(single_exc),
-                        )
-
+        if normalized_run_mode == "metadata_only" and run_album_metadata:
+            album_ids.update(str(album_id) for album_id in seeded_source_album_ids if str(album_id).strip())
         representative_album_ids = list(dict.fromkeys(_representative_album_ids(album_ids)))
         representative_album_ids = [album_id for album_id in representative_album_ids if album_id not in queued_album_ids_processed]
-        telemetry["albums_seen"] += len(representative_album_ids)
-        if include_albums and representative_album_ids:
+        if run_album_metadata:
+            telemetry["albums_seen"] += len(representative_album_ids)
+        if run_album_metadata and include_albums and representative_album_ids:
             album_ids_to_fetch = representative_album_ids
             if not force_refresh:
-                album_ids_to_fetch = _split_album_ids_for_fetch(album_ids=representative_album_ids)
+                if normalized_run_mode == "metadata_only":
+                    album_ids_to_fetch = _split_album_metadata_ids_for_fetch(album_ids=representative_album_ids)
+                else:
+                    album_ids_to_fetch = _split_album_ids_for_fetch(album_ids=representative_album_ids)
                 telemetry["skipped"] += max(0, len(representative_album_ids) - len(album_ids_to_fetch))
                 metadata_skipped_album_ids = [album_id for album_id in representative_album_ids if album_id not in set(album_ids_to_fetch)]
-                if metadata_skipped_album_ids:
+                if normalized_run_mode != "metadata_only" and metadata_skipped_album_ids:
                     with sqlite_connection() as connection:
                         for album_id in metadata_skipped_album_ids:
                             if _album_tracklist_needs_fetch(connection=connection, album_id=album_id):
                                 album_track_fetch_ids.add(album_id)
             for album_chunk in _chunked(album_ids_to_fetch, ALBUM_BATCH_SIZE):
                 album_payloads: list[dict[str, Any]] = []
-                try:
-                    _raise_if_should_stop()
-                    payload = _request_json(
-                        access_token=access_token,
-                        url="https://api.spotify.com/v1/albums",
-                        params={"ids": ",".join(album_chunk), "market": normalized_market},
-                        endpoint_category="album_batch",
-                        telemetry=telemetry,
-                        max_429=bounded_max_429,
-                        sleeper=sleep_fn,
-                        fetcher=fetch_fn,
-                    )
-                    albums = payload.get("albums") if isinstance(payload.get("albums"), list) else []
-                    album_payloads = [album for album in albums if isinstance(album, dict)]
-                except RuntimeError as exc:
-                    error_text = str(exc)
-                    if "album_batch: Spotify request failed with status 403" not in error_text:
-                        raise
-                    warning_text = "album batch endpoint forbidden; used single-album fallback"
-                    if warning_text not in telemetry["warnings"]:
-                        telemetry["warnings"].append(warning_text)
-
-                    for album_id in album_chunk:
-                        try:
-                            _raise_if_should_stop()
-                            single_album = _request_json(
-                                access_token=access_token,
-                                url=f"https://api.spotify.com/v1/albums/{album_id}",
-                                params={"market": normalized_market},
-                                endpoint_category="album_single_fallback",
-                                telemetry=telemetry,
-                                max_429=bounded_max_429,
-                                sleeper=sleep_fn,
-                                fetcher=fetch_fn,
-                            )
-                            if not isinstance(single_album, dict) or not single_album.get("id"):
-                                telemetry["skipped"] += 1
-                                _upsert_album_catalog_error(
-                                    spotify_album_id=album_id,
-                                    market=normalized_market,
-                                    fetched_at=fetched_at,
-                                    last_error="album_single_fallback: Missing album payload.",
-                                )
-                                continue
-                            album_payloads.append(single_album)
-                        except RuntimeError as single_exc:
-                            telemetry["errors"] += 1
-                            _upsert_album_catalog_error(
-                                spotify_album_id=album_id,
-                                market=normalized_market,
-                                fetched_at=fetched_at,
-                                last_error=str(single_exc),
-                            )
+                if album_batch_unavailable:
+                    album_payloads = _fetch_single_albums(album_chunk)
+                else:
+                    try:
+                        _raise_if_should_stop()
+                        payload = _request_json(
+                            access_token=access_token,
+                            url="https://api.spotify.com/v1/albums",
+                            params={"ids": ",".join(album_chunk), "market": normalized_market},
+                            endpoint_category="album_batch",
+                            telemetry=telemetry,
+                            max_429=bounded_max_429,
+                            sleeper=sleep_fn,
+                            fetcher=fetch_fn,
+                        )
+                        albums = payload.get("albums") if isinstance(payload.get("albums"), list) else []
+                        album_payloads = [album for album in albums if isinstance(album, dict)]
+                    except RuntimeError as exc:
+                        error_text = str(exc)
+                        if "album_batch: Spotify request failed with status 403" not in error_text:
+                            raise
+                        album_batch_unavailable = True
+                        _warn_once(ALBUM_BATCH_FORBIDDEN_WARNING)
+                        album_payloads = _fetch_single_albums(album_chunk)
 
                 for album in album_payloads:
                     if not isinstance(album, dict) or not album.get("id"):
@@ -3606,9 +4634,11 @@ def run_spotify_catalog_backfill(
                         last_error=None,
                     )
                     telemetry["albums_fetched"] += 1
-                    album_track_fetch_ids.add(album_id)
+                    if run_album_tracklists or normalized_target == "all":
+                        album_track_fetch_ids.add(album_id)
+                _raise_if_should_stop()
 
-        if include_albums and album_track_fetch_ids:
+        if (run_album_tracklists or normalized_target == "all") and include_albums and album_track_fetch_ids:
             sorted_album_track_fetch_ids = sorted(album_track_fetch_ids)
             telemetry["album_tracklists_seen"] += len(sorted_album_track_fetch_ids)
             eligible_album_track_fetch_ids: list[str] = []
@@ -3754,48 +4784,4 @@ def run_spotify_catalog_backfill(
         telemetry["_elapsed_seconds"] = max(0.0, time.monotonic() - started_monotonic)
         _run_finish(run_id=run_id, payload=telemetry, status_text=status_text, last_error=last_error)
 
-    return {
-        "run_id": run_id,
-        "status": status_text,
-        "tracks_seen": int(telemetry["tracks_seen"]),
-        "tracks_fetched": int(telemetry["tracks_fetched"]),
-        "tracks_upserted": int(telemetry["tracks_upserted"]),
-        "albums_seen": int(telemetry["albums_seen"]),
-        "albums_fetched": int(telemetry["albums_fetched"]),
-        "album_tracks_upserted": int(telemetry["album_tracks_upserted"]),
-        "album_tracklists_capped": int(telemetry["album_tracklists_capped"]),
-        "album_tracklists_seen": int(telemetry["album_tracklists_seen"]),
-        "album_tracklists_skipped_by_policy": int(telemetry["album_tracklists_skipped_by_policy"]),
-        "album_tracklists_fetched": int(telemetry["album_tracklists_fetched"]),
-        "skipped": int(telemetry["skipped"]),
-        "errors": int(telemetry["errors"]),
-        "requests_total": int(telemetry["requests_total"]),
-        "requests_success": int(telemetry["requests_success"]),
-        "requests_429": int(telemetry["requests_429"]),
-        "requests_failed": int(telemetry["requests_failed"]),
-        "initial_request_delay_seconds": effective_delay,
-        "final_request_delay_seconds": float(telemetry["_request_delay_seconds"]),
-        "effective_requests_per_minute": round(
-            (int(telemetry["requests_success"]) * 60.0) / max(0.001, float(telemetry["_elapsed_seconds"])),
-            3,
-        ),
-        "peak_requests_last_30_seconds": int(telemetry["_peak_requests_last_30_seconds"]),
-        "last_retry_after_seconds": float(telemetry["last_retry_after_seconds"]),
-        "max_retry_after_seconds": float(telemetry["max_retry_after_seconds"]),
-        "has_more": bool(telemetry["has_more"]),
-        "warnings": list(telemetry["warnings"]),
-        "stop_reason": stop_reason,
-        "partial": bool(partial),
-        "market": normalized_market,
-        "limit": bounded_limit,
-        "offset": bounded_offset,
-        "include_albums": bool(include_albums),
-        "force_refresh": bool(force_refresh),
-        "album_tracklist_policy": normalized_album_tracklist_policy,
-        "max_runtime_seconds": bounded_max_runtime_seconds,
-        "max_requests": bounded_max_requests,
-        "max_errors": bounded_max_errors,
-        "max_album_tracks_pages_per_album": bounded_max_album_tracks_pages_per_album,
-        "max_429": bounded_max_429,
-        "last_error": last_error,
-    }
+    return _result_payload()

@@ -26,6 +26,10 @@ This document is the implementation-oriented technical source of truth for the L
 - Raw duplicate-member tracking, ingest-run cleanup helpers, current-playback observation, and unified top-track SQLite queries are now implemented on top of the ingest foundation.
 - History ingest now supports an end-to-end downstream projection pipeline after canonical projection, including conservative entity backfills and relationship refresh.
 - Ingest reliability now includes startup stale-run recovery plus persisted phase timings on `ingest_run`.
+- Spotify source catalog enrichment is implemented for known track and album IDs, including track metadata, album metadata, album tracklist expansion modes, queue-first processing, and run telemetry.
+- Catalog Backfill now separates identity-critical metadata from catalog-expansion work, with explicit target modes for tracks, albums, album tracklists, and all targets.
+- A local Spotify track metadata worker exists for bounded identity metadata enrichment. It supports one-shot CLI runs by default, optional loop mode, JSONL event logging, condensed terminal output, local cooldowns, and a rolling request-budget guard.
+- Read-only Identity Audit diagnostics and release-album merge preview/dry-run tooling exist, but no merge/apply endpoint exists.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
@@ -80,6 +84,14 @@ This document is the implementation-oriented technical source of truth for the L
 - ingest-run listing, fetch, and deletion helpers plus a unified top-track query on raw data
 - history JSON file loader and batch history ingest path
 - backend scripts for data-foundation validation, ingest-run hygiene smoke checks, current-playback polling, and recent-play probing
+- backend Spotify catalog backfill services for enrichment-only source metadata:
+  - `spotify_track_catalog`
+  - `spotify_album_catalog`
+  - `spotify_album_track`
+  - `spotify_catalog_backfill_run`
+  - `spotify_catalog_backfill_queue`
+  - track metadata worker state, lock, and invocation tables
+- backend debug APIs for Catalog Backfill coverage, queue state, recent runs, lookup, duplicate diagnostics, release-album merge preview, and release-album merge dry-run
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
@@ -139,6 +151,26 @@ Album-family candidate report review:
   - canonical-to-history provenance link table
 - `live_playback_event`
   - stores observational current-playback snapshots separately from durable canonical play history
+
+### Source catalog enrichment tables
+- `spotify_track_catalog`
+  - stores fetched Spotify track metadata such as duration, disc/track number, album ID, ISRC in raw JSON, fetch status, and error state
+- `spotify_album_catalog`
+  - stores fetched Spotify album metadata such as release date, album type, total tracks, images, external IDs in raw JSON, fetch status, and error state
+- `spotify_album_track`
+  - stores album tracklist rows when explicit catalog-expansion modes fetch tracklists
+- `spotify_catalog_backfill_run`
+  - stores one bounded enrichment run with request counts, 429 counts, warnings, status, run mode, reason, target, and policy context
+- `spotify_catalog_backfill_queue`
+  - stores manual/priority catalog requests with reason, priority, status, attempt count, and error state
+- `spotify_catalog_worker_state`, `spotify_catalog_worker_lock`, `spotify_catalog_worker_invocation`
+  - store local worker cooldown, overlap protection, and per-invocation summaries
+
+Catalog enrichment invariants:
+- catalog backfill must not mutate identity mappings or analysis mappings
+- duplicate diagnostics must not call Spotify
+- source catalog rows are metadata evidence, not merge decisions
+- album tracklists are catalog-expansion work and are not part of the default identity metadata worker
 
 ### `raw_play_event` design
 Important fields currently include:
@@ -308,6 +340,20 @@ The FastAPI backend is responsible for:
 - Keep batch chronology inference in orchestration code, not one-item mappers.
 - Keep source-specific idempotency and cross-source upgrade rules in DB helpers.
 
+### Catalog enrichment services
+- Discover known Spotify IDs from source mappings and raw play rows.
+- Fetch only missing or incomplete metadata unless forced.
+- Prioritize identity-relevant track metadata candidates before broad backlog:
+  - duplicate resolved Spotify track groups
+  - release-track source splits
+  - suggested analysis groups
+  - track listen count
+  - artist listen count
+  - accepted source mapping
+- Stop on the first Spotify 429 and persist cooldown guidance.
+- Treat forbidden Spotify batch endpoints as capability failures and fall back to single-object requests.
+- Keep worker request cadence and rolling request budgets conservative in local development.
+
 ### Aggregation pipeline
 - Converts liked tracks, saved albums, followed artists, and listening proxies into artist-level records.
 - Produces `ArtistProfile` objects with raw counts and derived signal fields.
@@ -412,6 +458,34 @@ Current internal guarantees:
 - known rows inside the overlap window are still processed so `default_guess -> api_chronology` upgrades can happen
 - older known rows beyond the overlap cutoff stop paging
 - history ingest uses the same raw upsert/upgrade rules as recent-play ingest
+
+### Catalog Backfill debug operations
+These are local/development endpoints for enrichment and review support, not product-facing APIs.
+
+Implemented flows:
+- run bounded catalog backfill with explicit `run_mode`, `target`, `reason`, and `album_tracklist_policy`
+- inspect identity-critical and catalog-expansion coverage
+- inspect recent backfill runs
+- inspect, filter, and repair catalog backfill queue rows
+- search track and album catalog lookup rows
+- search duplicate Spotify track/album diagnostics without calling Spotify
+- preview and dry-run release-album merges without writing identity changes
+
+Local worker CLI:
+```bash
+python3 -m backend.scripts.run_spotify_track_metadata_worker
+```
+
+Optional loop mode:
+```bash
+python3 -m backend.scripts.run_spotify_track_metadata_worker \
+  --loop \
+  --max-runtime-minutes 90 \
+  --between-runs-seconds 300 \
+  --jsonl-output backend/data/logs/track-metadata-worker-loop.jsonl
+```
+
+Loop mode emits short terminal lines and writes complete JSONL events when `--jsonl-output` is provided.
 
 ### `GET /me/progress`
 Purpose:
@@ -572,6 +646,7 @@ Fields:
 - local extended streaming history export for raw event ingestion and cross-source upgrades
 - best-effort album enrichment through lightweight Spotify album search when history-ranked albums need images and URLs
 - playback state and related controls when Spotify allows active player access
+- source catalog metadata for known Spotify tracks and albums when identity review needs stronger evidence
 
 ### Local history calibration path
 - When `SPOTIFY_HISTORY_DIR` points to a valid Spotify extended streaming history export, the backend loads the local JSON files and derives artist and album rankings from them.

@@ -1225,6 +1225,55 @@ CREATE TABLE IF NOT EXISTS spotify_catalog_backfill_queue (
 CREATE INDEX IF NOT EXISTS idx_spotify_catalog_backfill_queue_status_priority
   ON spotify_catalog_backfill_queue(status, priority DESC, requested_at ASC);
 """,
+    22: """
+ALTER TABLE spotify_catalog_backfill_run
+ADD COLUMN run_mode TEXT;
+
+ALTER TABLE spotify_catalog_backfill_run
+ADD COLUMN run_reason TEXT;
+
+ALTER TABLE spotify_catalog_backfill_run
+ADD COLUMN album_tracklist_policy TEXT;
+""",
+    23: """
+CREATE TABLE IF NOT EXISTS spotify_catalog_worker_state (
+  worker_name TEXT PRIMARY KEY,
+  cooldown_until TEXT,
+  last_started_at TEXT,
+  last_completed_at TEXT,
+  last_status TEXT,
+  last_run_id INTEGER,
+  last_result_json TEXT,
+  last_error TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS spotify_catalog_worker_lock (
+  worker_name TEXT PRIMARY KEY,
+  locked_at TEXT NOT NULL,
+  owner TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS spotify_catalog_worker_invocation (
+  id INTEGER PRIMARY KEY,
+  worker_name TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  status TEXT NOT NULL,
+  skip_reason TEXT,
+  backfill_run_id INTEGER,
+  requests_total INTEGER,
+  requests_429 INTEGER,
+  tracks_fetched INTEGER,
+  tracks_upserted INTEGER,
+  cooldown_until TEXT,
+  result_json TEXT,
+  error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_catalog_worker_invocation_worker_started
+  ON spotify_catalog_worker_invocation(worker_name, started_at DESC);
+""",
 }
 
 
@@ -4863,7 +4912,7 @@ def refresh_conservative_track_relationships() -> dict[str, int]:
                         else "suggested"
                     )
                     explanation = (
-                        "Suggested from shared analysis_track grouping; "
+                        "Suggested from shared track family grouping; "
                         "release tracks mapped to the same conservative analysis composition cluster"
                     )
 

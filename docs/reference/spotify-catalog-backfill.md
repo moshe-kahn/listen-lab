@@ -11,6 +11,9 @@ It is enrichment-only. It must not create, merge, promote, or repair ListenLab i
 - `spotify_album_track`
 - `spotify_catalog_backfill_run`
 - `spotify_catalog_backfill_queue`
+- `spotify_catalog_worker_state`
+- `spotify_catalog_worker_lock`
+- `spotify_catalog_worker_invocation`
 
 ## Behavior
 - Discovers known Spotify track and album IDs from source mappings and raw play rows.
@@ -21,6 +24,20 @@ It is enrichment-only. It must not create, merge, promote, or repair ListenLab i
 - Resumes incomplete album tracklists by using the existing stored track count as the next offset.
 - Applies album tracklist page caps per album, not as a global run stop.
 - Processes queue-first work before broader discovered work.
+- Supports explicit target modes:
+  - `tracks`
+  - `albums`
+  - `album_tracklists`
+  - `all`
+- In `metadata_only`, `target=tracks` selects missing/incomplete track metadata only and does not fetch albums or tracklists.
+- Track metadata candidate ordering prioritizes:
+  - duplicate resolved Spotify track groups
+  - release-track source splits
+  - suggested analysis groups
+  - track listen count
+  - artist listen count
+  - accepted source mapping
+  - Spotify ID tie-break
 
 ## Request Controls
 - `limit`
@@ -35,6 +52,9 @@ It is enrichment-only. It must not create, merge, promote, or repair ListenLab i
 - `max_429`
 - `max_album_tracks_pages_per_album`
 - `album_tracklist_policy`
+- `run_mode`
+- `reason`
+- `target`
 
 Album tracklist policies:
 - `all`
@@ -44,24 +64,77 @@ Album tracklist policies:
 
 ## Reliability
 - Handles Spotify 429 with `Retry-After` when available.
-- Stops as partial with `stop_reason = "rate_limited"` after repeated 429s.
+- Stops as partial with `stop_reason = "rate_limited"` after the first 429.
+- Uses fallback 60 minute cooldown when Spotify returns 429 without a valid `Retry-After`.
 - Falls back from forbidden batch track/album endpoints to single-item requests.
 - Stores compact error diagnostics without token/header leakage.
 - Keeps run telemetry for request counts, warning counts, skip counts, and retry-after timing.
 
+## One-Shot Track Metadata Worker
+`python3 -m backend.scripts.run_spotify_track_metadata_worker` runs one bounded local/dev enrichment job, then exits.
+
+Worker defaults:
+- `target=tracks`
+- `run_mode=metadata_only`
+- `reason=identity_metadata`
+- `album_tracklist_policy=none`
+- `include_albums=false`
+- current code is temporarily set to `limit=250`, `max_requests=275`, `max_runtime_seconds=900`
+- recommended next safe setting before more live runs is `limit=100`, `max_requests=110`, `max_runtime_seconds=300`
+- `request_delay_seconds=2.0`
+- `market=US`
+
+The worker:
+- skips when a stored cooldown is active
+- skips before Spotify calls when the local rolling request budget is exhausted:
+  - 60 minute window
+  - 15 minute local cooldown at `>=550` requests
+  - 30 minute local cooldown at `>=650` requests
+- prevents overlapping worker runs with `spotify_catalog_worker_lock`
+- replaces locks older than 2 hours
+- stores each invocation in `spotify_catalog_worker_invocation`
+- stores latest state/cooldown in `spotify_catalog_worker_state`
+- sets rate-limit cooldown from valid `Retry-After`, otherwise 60 minutes
+- never runs album metadata, album tracklists, Full Backfill, Identity Audit, or merge/apply behavior
+
+Default CLI behavior remains one-shot and JSON-line compatible:
+
+```bash
+python3 -m backend.scripts.run_spotify_track_metadata_worker
+```
+
+Optional loop mode:
+
+```bash
+python3 -m backend.scripts.run_spotify_track_metadata_worker \
+  --loop \
+  --max-runtime-minutes 90 \
+  --between-runs-seconds 300 \
+  --jsonl-output backend/data/logs/track-metadata-worker-loop.jsonl
+```
+
+Loop mode:
+- runs one worker iteration at a time
+- sleeps between clean runs
+- sleeps until worker-reported cooldown for `skipped_cooldown`, `skipped_request_budget`, or `partial/rate_limited`
+- exits cleanly on Ctrl-C
+- prints condensed terminal status lines
+- appends full JSONL events when `--jsonl-output` is provided
+
 ## Frontend
 The Catalog Backfill page includes:
-- run controls
-- recent runs tab
-- queue tab
-- queue status filter
+- Overview, Priority Metadata, Full Backfill, Queue, and Recent Runs tabs
+- Priority Metadata as the default workflow for identity-critical source metadata
+- Full Backfill as the secondary workflow for slower catalog expansion and tracklists
+- queue status and reason filters
 - queue repair button
-- latest result summary
+- run mode, reason, target, and album tracklist policy visibility in recent runs
 
 Search / Lookup includes:
 - Album Catalog Lookup
 - Track Catalog Lookup
 - duplicate album diagnostics
+- duplicate track diagnostics
 - queue-aware statuses
 - manual prioritize actions for visible incomplete albums/tracks
 
@@ -74,5 +147,6 @@ Search / Lookup includes:
 ## Verification
 Common checks:
 - `python3 -m unittest backend.tests.test_spotify_catalog_backfill`
-- `python3 -m py_compile backend/app/main.py backend/app/spotify_catalog_backfill.py`
+- `python3 -m unittest backend.tests.test_spotify_catalog_worker`
+- `python3 -m py_compile backend/app/main.py backend/app/spotify_catalog_backfill.py backend/app/spotify_catalog_worker.py backend/scripts/run_spotify_track_metadata_worker.py backend/app/db.py`
 - `npm run build`

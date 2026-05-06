@@ -248,7 +248,9 @@ type TrackIdentityAuditResponse = {
   analysis_track_groups: TrackIdentityAuditExample[];
 };
 
-type IdentityAuditTab = "overview" | "canonical" | "composition" | "family" | "release";
+type TrackIdentityAuditTab = "overview" | "canonical" | "composition" | "family" | "release";
+type AlbumIdentityAuditTab = "overview" | "spotify_duplicates" | "name_duplicates" | "merge_review";
+type IdentityAuditEntityTab = "tracks" | "albums" | "artists";
 
 type AmbiguousReviewComponent = {
   label: string;
@@ -502,6 +504,8 @@ type CatalogBackfillRunItem = {
   warnings_count?: number;
   partial?: boolean | null;
   stop_reason?: string | null;
+  run_mode?: "metadata_only" | "tracklists_relevant" | "full_catalog" | string;
+  run_reason?: string | null;
   album_tracklist_policy?: "all" | "priority_only" | "relevant_albums" | "none" | string;
 };
 
@@ -532,6 +536,13 @@ type CatalogBackfillQueueResponse = {
     pending: number;
     done: number;
     error: number;
+  };
+  reason_counts?: {
+    identity_metadata: number;
+    manual_priority: number;
+    tracklist_completion: number;
+    full_backfill: number;
+    other: number;
   };
 };
 
@@ -612,6 +623,18 @@ type AlbumNameDuplicateLookupResponse = {
   ok: boolean;
   items: AlbumNameDuplicateGroupItem[];
   total: number;
+};
+
+type AlbumMergeReviewTarget = {
+  key: string;
+  title: string;
+  subtitle: string;
+  releaseAlbumIds: number[];
+  duplicateCount: number;
+  sourceLabel: string;
+  spotifyAlbumId?: string | null;
+  spotifyAlbumName?: string | null;
+  warningSummary?: string | null;
 };
 
 type ReleaseAlbumMergePreviewResponse = {
@@ -714,6 +737,19 @@ type CatalogBackfillCoverageResponse = {
   album_track_rows: number;
   latest_run: CatalogBackfillRunItem | null;
   recent_errors_count: number;
+  identity_critical?: {
+    missing_source_track_metadata: number;
+    missing_source_album_metadata: number;
+    missing_track_isrc: number;
+    missing_track_duration_ms: number;
+    missing_album_release_date: number;
+    missing_album_external_ids: number;
+  };
+  catalog_expansion?: {
+    missing_album_tracklists: number;
+    relevant_album_tracklist_backlog: number;
+    unlistened_tracklist_rows: number;
+  };
 };
 
 type CatalogBackfillRunResponse = {
@@ -747,6 +783,8 @@ type CatalogBackfillRunResponse = {
   partial: boolean;
   stop_reason: string | null;
   market: string;
+  run_mode?: "metadata_only" | "tracklists_relevant" | "full_catalog" | string;
+  run_reason?: string | null;
   limit: number;
   offset: number;
   include_albums: boolean;
@@ -826,7 +864,9 @@ type ExperienceVisualMode = ExperienceMode | "test";
 type TrackRankingMode = "plays" | "mix" | "longevity";
 type RankMovementFilter = (typeof RANK_MOVEMENT_FILTER_OPTIONS)[number]["value"];
 type AppPage = "dashboard" | "formulaLab" | "identityAudit" | "recentDebug" | "catalogBackfill" | "searchLookup";
-type CatalogBackfillTab = "recentRuns" | "queue";
+type CatalogBackfillTab = "overview" | "priorityMetadata" | "fullBackfill" | "queue" | "recentRuns";
+type CatalogBackfillRunMode = "metadata_only" | "tracklists_relevant" | "full_catalog";
+type CatalogBackfillQueueReasonFilter = "all" | "identity_metadata" | "manual_priority" | "tracklist_completion" | "full_backfill";
 const spotifyLogoDataUrl =
   "data:image/svg+xml;utf8," +
   encodeURIComponent(
@@ -1150,7 +1190,8 @@ export function App() {
   const [catalogBackfillQueueError, setCatalogBackfillQueueError] = useState("");
   const [catalogBackfillQueueLastLoadedAt, setCatalogBackfillQueueLastLoadedAt] = useState<number | null>(null);
   const [catalogBackfillQueueStatusFilter, setCatalogBackfillQueueStatusFilter] = useState<"all" | "pending" | "done" | "error">("all");
-  const [catalogBackfillTab, setCatalogBackfillTab] = useState<CatalogBackfillTab>("recentRuns");
+  const [catalogBackfillQueueReasonFilter, setCatalogBackfillQueueReasonFilter] = useState<CatalogBackfillQueueReasonFilter>("all");
+  const [catalogBackfillTab, setCatalogBackfillTab] = useState<CatalogBackfillTab>("priorityMetadata");
   const [catalogBackfillQueueRepairLoading, setCatalogBackfillQueueRepairLoading] = useState(false);
   const [catalogBackfillQueueRepairMessage, setCatalogBackfillQueueRepairMessage] = useState("");
   const [catalogBackfillRunLoading, setCatalogBackfillRunLoading] = useState(false);
@@ -1161,13 +1202,14 @@ export function App() {
   const [catalogBackfillMarket, setCatalogBackfillMarket] = useState("US");
   const [catalogBackfillIncludeAlbums, setCatalogBackfillIncludeAlbums] = useState(true);
   const [catalogBackfillForceRefresh, setCatalogBackfillForceRefresh] = useState(false);
-  const [catalogBackfillRequestDelaySeconds, setCatalogBackfillRequestDelaySeconds] = useState(0.5);
+  const [catalogBackfillRequestDelaySeconds, setCatalogBackfillRequestDelaySeconds] = useState(2.0);
   const [catalogBackfillMaxRuntimeSeconds, setCatalogBackfillMaxRuntimeSeconds] = useState(60);
   const [catalogBackfillMaxRequests, setCatalogBackfillMaxRequests] = useState(150);
   const [catalogBackfillMaxErrors, setCatalogBackfillMaxErrors] = useState(10);
   const [catalogBackfillMaxAlbumTracksPagesPerAlbum, setCatalogBackfillMaxAlbumTracksPagesPerAlbum] = useState(10);
   const [catalogBackfillMax429, setCatalogBackfillMax429] = useState(3);
   const [catalogBackfillAlbumTracklistPolicy, setCatalogBackfillAlbumTracklistPolicy] = useState<"all" | "priority_only" | "relevant_albums" | "none">("relevant_albums");
+  const [catalogBackfillFullRunMode, setCatalogBackfillFullRunMode] = useState<"tracklists_relevant" | "full_catalog">("tracklists_relevant");
   const [searchLookupEntityType, setSearchLookupEntityType] = useState<"albums" | "tracks" | "duplicate_albums">("albums");
   const [searchLookupQueueStatus, setSearchLookupQueueStatus] = useState<"all" | "not_queued" | "pending" | "done" | "error">("all");
   const [searchLookupSort, setSearchLookupSort] = useState<"default" | "recently_backfilled" | "name" | "incomplete_first">("default");
@@ -1200,6 +1242,14 @@ export function App() {
   const [releaseAlbumMergeDryRunByKey, setReleaseAlbumMergeDryRunByKey] = useState<Record<string, ReleaseAlbumMergeDryRunResponse>>({});
   const [releaseAlbumMergeDryRunLoadingKey, setReleaseAlbumMergeDryRunLoadingKey] = useState<string | null>(null);
   const [releaseAlbumMergeDryRunErrorByKey, setReleaseAlbumMergeDryRunErrorByKey] = useState<Record<string, string>>({});
+  const [selectedAlbumMergeReviewKey, setSelectedAlbumMergeReviewKey] = useState<string | null>(null);
+  const [albumSpotifyDuplicateFilter, setAlbumSpotifyDuplicateFilter] = useState<"all" | "not_previewed" | "safe_candidate" | "needs_review" | "unsafe">("all");
+  const [albumSpotifyDuplicateReasonFilter, setAlbumSpotifyDuplicateReasonFilter] = useState("all");
+  const [albumSpotifyDuplicateBulkPreviewLoading, setAlbumSpotifyDuplicateBulkPreviewLoading] = useState(false);
+  const [albumNameDuplicateGroupFilter, setAlbumNameDuplicateGroupFilter] = useState<"all" | "single_spotify_id" | "multiple_spotify_ids" | "no_spotify_id">("all");
+  const [albumNameDuplicatePreviewFilter, setAlbumNameDuplicatePreviewFilter] = useState<"all" | "not_previewed" | "safe_candidate" | "needs_review" | "unsafe">("all");
+  const [albumNameDuplicateReasonFilter, setAlbumNameDuplicateReasonFilter] = useState("all");
+  const [albumNameDuplicateBulkPreviewLoading, setAlbumNameDuplicateBulkPreviewLoading] = useState(false);
   const [trackDuplicateLookupResult, setTrackDuplicateLookupResult] = useState<TrackDuplicateLookupResponse | null>(null);
   const [trackDuplicateLookupLoading, setTrackDuplicateLookupLoading] = useState(false);
   const [trackDuplicateLookupLoaded, setTrackDuplicateLookupLoaded] = useState(false);
@@ -1221,7 +1271,9 @@ export function App() {
   const [identityAuditLoaded, setIdentityAuditLoaded] = useState(false);
   const [identityAuditError, setIdentityAuditError] = useState("");
   const [identityAuditLastLoadedAt, setIdentityAuditLastLoadedAt] = useState<number | null>(null);
-  const [identityAuditTab, setIdentityAuditTab] = useState<IdentityAuditTab>("overview");
+  const [identityAuditEntityTab, setIdentityAuditEntityTab] = useState<IdentityAuditEntityTab>("tracks");
+  const [trackIdentityAuditTab, setTrackIdentityAuditTab] = useState<TrackIdentityAuditTab>("overview");
+  const [albumIdentityAuditTab, setAlbumIdentityAuditTab] = useState<AlbumIdentityAuditTab>("overview");
   const [identityAuditSuggestedGroups, setIdentityAuditSuggestedGroups] = useState<SuggestedGroupsResponse | null>(null);
   const [identityAuditSuggestedLoading, setIdentityAuditSuggestedLoading] = useState(false);
   const [identityAuditSuggestedLoaded, setIdentityAuditSuggestedLoaded] = useState(false);
@@ -1483,7 +1535,7 @@ export function App() {
     const suggested = suggestedItems.map((group): UnifiedReviewItem => ({
       decision_key: groupDecisionKey(group),
       item_type: "group",
-      title: group.analysis_track_name || `Analysis Track ${group.analysis_track_id}`,
+      title: group.analysis_track_name || `Track Family ${group.analysis_track_id}`,
       subtitle: `${group.release_track_count} release tracks | ${Math.round(group.confidence * 100)}% confidence`,
       bucket_label: "Suggested groups",
       family_label: group.song_family_key || "Suggested groups",
@@ -1647,7 +1699,7 @@ export function App() {
   }, [identityAuditLocalDecisions]);
 
   useEffect(() => {
-    if (appPage !== "identityAudit" || identityAuditTab !== "family") {
+    if (appPage !== "identityAudit" || identityAuditEntityTab !== "tracks" || trackIdentityAuditTab !== "family") {
       return;
     }
     const unifiedItems = computeUnifiedReviewItems();
@@ -1668,7 +1720,8 @@ export function App() {
     }
   }, [
     appPage,
-    identityAuditTab,
+    identityAuditEntityTab,
+    trackIdentityAuditTab,
     identityAuditFocusedReviewKey,
     identityAuditLocalDecisions,
     identityAuditSuggestedGroups,
@@ -1678,7 +1731,7 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (appPage !== "identityAudit" || identityAuditTab !== "family") {
+    if (appPage !== "identityAudit" || identityAuditEntityTab !== "tracks" || trackIdentityAuditTab !== "family") {
       return;
     }
 
@@ -1777,7 +1830,8 @@ export function App() {
     return () => window.removeEventListener("keydown", onKeydown);
   }, [
     appPage,
-    identityAuditTab,
+    identityAuditEntityTab,
+    trackIdentityAuditTab,
     identityAuditFocusedReviewKey,
     identityAuditLocalDecisions,
     identityAuditSuggestedGroups,
@@ -1787,7 +1841,13 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (appPage !== "identityAudit" || identityAuditTab !== "release") {
+    if (appPage !== "identityAudit") {
+      return;
+    }
+    if (identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "release" && !trackDuplicateLookupLoaded && !trackDuplicateLookupLoading) {
+      void loadTrackDuplicateLookup(true);
+    }
+    if (identityAuditEntityTab !== "albums") {
       return;
     }
     if (!albumDuplicateLookupLoaded && !albumDuplicateLookupLoading) {
@@ -1796,12 +1856,10 @@ export function App() {
     if (!albumNameDuplicateLookupLoaded && !albumNameDuplicateLookupLoading) {
       void loadAlbumNameDuplicateLookup(true);
     }
-    if (!trackDuplicateLookupLoaded && !trackDuplicateLookupLoading) {
-      void loadTrackDuplicateLookup(true);
-    }
   }, [
     appPage,
-    identityAuditTab,
+    identityAuditEntityTab,
+    trackIdentityAuditTab,
     albumDuplicateLookupLoaded,
     albumDuplicateLookupLoading,
     albumNameDuplicateLookupLoaded,
@@ -3755,7 +3813,10 @@ export function App() {
     setTrackDuplicateLookupLoaded(false);
     setTrackDuplicateLookupError("");
     setTrackDuplicateLookupLastLoadedAt(null);
-    setIdentityAuditTab("overview");
+    setSelectedAlbumMergeReviewKey(null);
+    setIdentityAuditEntityTab("tracks");
+    setTrackIdentityAuditTab("overview");
+    setAlbumIdentityAuditTab("overview");
     setExperimentalMenuOpen(false);
     setAppPage("identityAudit");
   }
@@ -3777,7 +3838,8 @@ export function App() {
     setCatalogBackfillQueueError("");
     setCatalogBackfillQueueLastLoadedAt(null);
     setCatalogBackfillQueueStatusFilter("all");
-    setCatalogBackfillTab("recentRuns");
+    setCatalogBackfillQueueReasonFilter("all");
+    setCatalogBackfillTab("priorityMetadata");
     setCatalogBackfillQueueRepairLoading(false);
     setCatalogBackfillQueueRepairMessage("");
     setCatalogBackfillRunLoading(false);
@@ -3788,12 +3850,14 @@ export function App() {
     setCatalogBackfillMarket("US");
     setCatalogBackfillIncludeAlbums(true);
     setCatalogBackfillForceRefresh(false);
-    setCatalogBackfillRequestDelaySeconds(0.5);
+    setCatalogBackfillRequestDelaySeconds(2.0);
     setCatalogBackfillMaxRuntimeSeconds(60);
     setCatalogBackfillMaxRequests(150);
     setCatalogBackfillMaxErrors(10);
     setCatalogBackfillMaxAlbumTracksPagesPerAlbum(10);
     setCatalogBackfillMax429(3);
+    setCatalogBackfillAlbumTracklistPolicy("relevant_albums");
+    setCatalogBackfillFullRunMode("tracklists_relevant");
     setExperimentalMenuOpen(false);
     setAppPage("catalogBackfill");
   }
@@ -5666,7 +5730,377 @@ export function App() {
     });
   }
 
-  function renderIdentityAuditOverviewTab() {
+  function releaseAlbumMergeReadinessLabel(value: string | null | undefined): string {
+    return String(value ?? "unknown").replace(/_/g, " ");
+  }
+
+  function albumMergeReadinessTone(value: string | null | undefined): string {
+    if (value === "safe_candidate") {
+      return "rgba(46, 204, 113, 0.18)";
+    }
+    if (value === "needs_review") {
+      return "rgba(241, 196, 15, 0.18)";
+    }
+    return "rgba(231, 76, 60, 0.18)";
+  }
+
+  function renderAlbumMergeReadinessBadge(value: string | null | undefined) {
+    return (
+      <span
+        style={{
+          alignSelf: "flex-start",
+          background: albumMergeReadinessTone(value),
+          borderRadius: "999px",
+          display: "inline-flex",
+          fontSize: "12px",
+          fontWeight: 700,
+          padding: "4px 10px",
+          textTransform: "capitalize",
+        }}
+      >
+        {releaseAlbumMergeReadinessLabel(value)}
+      </span>
+    );
+  }
+
+  function summarizeAlbumMergeWarnings(preview: ReleaseAlbumMergePreviewResponse | undefined): string | null {
+    if (!preview) {
+      return null;
+    }
+    if (preview.warnings.length > 0) {
+      return preview.warnings[0];
+    }
+    if (preview.readiness_reasons.length > 0 && preview.merge_readiness !== "safe_candidate") {
+      return preview.readiness_reasons[0];
+    }
+    return null;
+  }
+
+  function spotifyAlbumUrl(spotifyAlbumId: string | null | undefined): string {
+    return spotifyAlbumId ? `https://open.spotify.com/album/${spotifyAlbumId}` : "";
+  }
+
+  function plainEnglishAlbumMergeExplanation(preview: ReleaseAlbumMergePreviewResponse | undefined): string | null {
+    if (!preview) {
+      return null;
+    }
+    const reasons = preview.readiness_reasons;
+    if (preview.merge_readiness === "safe_candidate") {
+      return "Safe candidate because the album name and primary artist align, there is strong single Spotify album evidence, and no album-track conflicts were found.";
+    }
+    if (preview.merge_readiness === "unsafe") {
+      if (reasons.some((reason) => reason.includes("different normalized album names"))) {
+        return "Unsafe because the normalized album names do not match, so these rows may represent different releases even if Spotify evidence overlaps.";
+      }
+      if (reasons.some((reason) => reason.includes("different normalized primary artists"))) {
+        return "Unsafe because the normalized primary artists do not match.";
+      }
+      if (reasons.some((reason) => reason.includes("not found"))) {
+        return "Unsafe because one or more of the requested release albums could not be found.";
+      }
+      return `Unsafe because ${reasons[0] ?? "the local release identity signals do not agree enough for a safe merge."}`;
+    }
+    if (reasons.some((reason) => reason.includes("collide"))) {
+      return "Needs review because the album rows overlap but some album-track rows would collide and need deduping.";
+    }
+    if (reasons.some((reason) => reason.includes("Multiple distinct Spotify album IDs"))) {
+      return "Needs review because the local rows share name or artist signals, but multiple Spotify album IDs are involved.";
+    }
+    if (reasons.some((reason) => reason.includes("No strong single Spotify album evidence"))) {
+      return "Needs review because there is not enough strong single-Spotify evidence to treat this as a low-risk merge.";
+    }
+    return `Needs review because ${reasons[0] ?? "the duplicate rows still need manual inspection."}`;
+  }
+
+  function albumMergeReasonKey(preview: ReleaseAlbumMergePreviewResponse | undefined): string {
+    if (!preview) {
+      return "not_previewed";
+    }
+    const reasons = preview.readiness_reasons;
+    if (preview.merge_readiness === "safe_candidate") {
+      return "safe_clean";
+    }
+    if (reasons.some((reason) => reason.includes("different normalized album names"))) {
+      return "name_mismatch";
+    }
+    if (reasons.some((reason) => reason.includes("different normalized primary artists"))) {
+      return "artist_mismatch";
+    }
+    if (reasons.some((reason) => reason.includes("not found"))) {
+      return "missing_album";
+    }
+    if (reasons.some((reason) => reason.includes("collide"))) {
+      return "album_track_conflicts";
+    }
+    if (reasons.some((reason) => reason.includes("Multiple distinct Spotify album IDs"))) {
+      return "multiple_spotify_ids";
+    }
+    if (reasons.some((reason) => reason.includes("No strong single Spotify album evidence"))) {
+      return "weak_spotify_evidence";
+    }
+    return "other";
+  }
+
+  function albumMergeReasonLabel(reasonKey: string): string {
+    const labels: Record<string, string> = {
+      album_track_conflicts: "Album-track conflicts",
+      artist_mismatch: "Artist mismatch",
+      missing_album: "Missing album row",
+      multiple_spotify_ids: "Multiple Spotify IDs",
+      name_mismatch: "Name mismatch",
+      not_previewed: "Not previewed",
+      other: "Other reason",
+      safe_clean: "Clean safety checks",
+      weak_spotify_evidence: "Weak Spotify evidence",
+    };
+    return labels[reasonKey] ?? reasonKey.replace(/_/g, " ");
+  }
+
+  function albumReasonFilterMatch(preview: ReleaseAlbumMergePreviewResponse | undefined, reasonFilter: string): boolean {
+    if (reasonFilter === "all") {
+      return true;
+    }
+    return albumMergeReasonKey(preview) === reasonFilter;
+  }
+
+  function albumReasonOptionsForTargets(
+    targets: Array<{ target: AlbumMergeReviewTarget }>,
+    readinessFilter: "all" | "not_previewed" | "safe_candidate" | "needs_review" | "unsafe",
+  ): Array<{ key: string; label: string; count: number }> {
+    const counts = new Map<string, number>();
+    for (const { target } of targets) {
+      const preview = releaseAlbumMergePreviewByKey[target.key];
+      if (!albumPreviewFilterMatch(preview, readinessFilter)) {
+        continue;
+      }
+      const reasonKey = albumMergeReasonKey(preview);
+      counts.set(reasonKey, (counts.get(reasonKey) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([key, count]) => ({ key, label: albumMergeReasonLabel(key), count }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }
+
+  function albumPreviewFilterMatch(
+    preview: ReleaseAlbumMergePreviewResponse | undefined,
+    filter: "all" | "not_previewed" | "safe_candidate" | "needs_review" | "unsafe",
+  ): boolean {
+    if (filter === "all") {
+      return true;
+    }
+    if (filter === "not_previewed") {
+      return !preview;
+    }
+    return preview?.merge_readiness === filter;
+  }
+
+  async function previewAlbumMergeTargetsInSession(targets: AlbumMergeReviewTarget[]) {
+    const nextPreviews: Record<string, ReleaseAlbumMergePreviewResponse> = {};
+    const nextErrors: Record<string, string> = {};
+    for (const target of targets) {
+      if (releaseAlbumMergePreviewByKey[target.key] || nextPreviews[target.key]) {
+        continue;
+      }
+      try {
+        nextPreviews[target.key] = await postReleaseAlbumMergePreview(target.releaseAlbumIds);
+      } catch (error) {
+        nextErrors[target.key] = formatUiErrorMessage(error, "Failed to preview release album merge.");
+      }
+    }
+    if (Object.keys(nextPreviews).length > 0) {
+      setReleaseAlbumMergePreviewByKey((current) => ({ ...current, ...nextPreviews }));
+    }
+    if (Object.keys(nextErrors).length > 0) {
+      setReleaseAlbumMergePreviewErrorByKey((current) => ({ ...current, ...nextErrors }));
+    }
+  }
+
+  function renderAlbumMemberRows(
+    rows: Array<{
+      release_album_id: number;
+      release_album_name: string;
+      artist_name: string;
+      spotify_album_id?: string | null;
+      spotify_album_name?: string | null;
+    }>,
+  ) {
+    return (
+      <div style={{ display: "grid", gap: "8px" }}>
+        {rows.map((row) => (
+          <div
+            key={`album-member-${row.release_album_id}`}
+            style={{
+              alignItems: "center",
+              background: "rgba(255, 255, 255, 0.03)",
+              borderRadius: "12px",
+              display: "grid",
+              gap: "4px",
+              gridTemplateColumns: "minmax(0, 1.3fr) minmax(0, 1fr)",
+              padding: "10px 12px",
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 700, overflowWrap: "anywhere" }}>{row.release_album_name}</div>
+              <div className="empty-copy" style={{ margin: 0 }}>{row.artist_name}</div>
+            </div>
+            <div style={{ justifySelf: "end", textAlign: "right" }}>
+              <div style={{ fontFamily: "monospace", fontSize: "12px" }}>release_album {row.release_album_id}</div>
+              {row.spotify_album_id ? (
+                <a
+                  className="empty-copy"
+                  href={spotifyAlbumUrl(row.spotify_album_id)}
+                  rel="noreferrer"
+                  style={{ display: "block", margin: 0, overflowWrap: "anywhere" }}
+                  target="_blank"
+                >
+                  {row.spotify_album_id}
+                  {row.spotify_album_name ? ` (${row.spotify_album_name})` : ""}
+                </a>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  function renderAlbumDuplicateCard(
+    target: AlbumMergeReviewTarget,
+    rows: Array<{
+      release_album_id: number;
+      release_album_name: string;
+      artist_name: string;
+      spotify_album_id?: string | null;
+      spotify_album_name?: string | null;
+    }>,
+    extraMeta: ReactNode,
+  ) {
+    const preview = releaseAlbumMergePreviewByKey[target.key];
+    const dryRun = releaseAlbumMergeDryRunByKey[target.key];
+    const previewError = releaseAlbumMergePreviewErrorByKey[target.key];
+    const dryRunError = releaseAlbumMergeDryRunErrorByKey[target.key];
+    const warningSummary = summarizeAlbumMergeWarnings(preview) ?? target.warningSummary ?? null;
+    return (
+      <article
+        key={`album-dup-card-${target.key}`}
+        style={{
+          background: "rgba(255, 255, 255, 0.03)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          borderRadius: "18px",
+          display: "grid",
+          gap: "14px",
+          padding: "18px",
+        }}
+      >
+        <div style={{ alignItems: "start", display: "flex", gap: "16px", justifyContent: "space-between" }}>
+          <div style={{ minWidth: 0 }}>
+            {target.spotifyAlbumId ? (
+              <h3 style={{ margin: 0 }}>
+                <a href={spotifyAlbumUrl(target.spotifyAlbumId)} rel="noreferrer" target="_blank">{target.title}</a>
+              </h3>
+            ) : (
+              <h3 style={{ margin: 0 }}>{target.title}</h3>
+            )}
+            <p className="empty-copy" style={{ margin: "6px 0 0 0" }}>{target.subtitle}</p>
+          </div>
+          <div style={{ display: "grid", gap: "8px", justifyItems: "end" }}>
+            <span className="identity-audit-stat">
+              <span>Duplicate count</span>
+              <strong>{target.duplicateCount}</strong>
+            </span>
+            {preview ? renderAlbumMergeReadinessBadge(preview.merge_readiness) : null}
+          </div>
+        </div>
+        {extraMeta}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+          <span className="identity-audit-stat">
+            <span>Release album IDs</span>
+            <strong>{target.releaseAlbumIds.join(", ")}</strong>
+          </span>
+          <span className="identity-audit-stat">
+            <span>Warnings</span>
+            <strong>{preview?.warnings.length ?? 0}</strong>
+          </span>
+          <span className="identity-audit-stat">
+            <span>Review source</span>
+            <strong>{target.sourceLabel}</strong>
+          </span>
+          <span className="identity-audit-stat">
+            <span>Reason</span>
+            <strong>{albumMergeReasonLabel(albumMergeReasonKey(preview))}</strong>
+          </span>
+        </div>
+        {preview ? <p className="identity-audit-tab-copy" style={{ margin: 0 }}>{plainEnglishAlbumMergeExplanation(preview)}</p> : null}
+        {warningSummary ? <p className="empty-copy" style={{ margin: 0 }}>Warning summary: {warningSummary}</p> : null}
+        {previewError ? <p className="empty-copy">{previewError}</p> : null}
+        {dryRunError ? <p className="empty-copy">{dryRunError}</p> : null}
+        {renderAlbumMemberRows(rows)}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
+          <button
+            className="track-ranking-chip"
+            disabled={releaseAlbumMergePreviewLoadingKey !== null}
+            onClick={() => {
+              setSelectedAlbumMergeReviewKey(target.key);
+              setAlbumIdentityAuditTab("merge_review");
+              void loadReleaseAlbumMergePreview(target.key, target.releaseAlbumIds);
+            }}
+            type="button"
+          >
+            {releaseAlbumMergePreviewLoadingKey === target.key ? "Loading..." : "Preview merge"}
+          </button>
+          {preview?.survivor_release_album_id != null ? (() => {
+            const survivorReleaseAlbumId = preview.survivor_release_album_id;
+            return (
+              <button
+                className="secondary-button"
+                disabled={releaseAlbumMergeDryRunLoadingKey !== null}
+                onClick={() => {
+                  setSelectedAlbumMergeReviewKey(target.key);
+                  setAlbumIdentityAuditTab("merge_review");
+                  void loadReleaseAlbumMergeDryRun(target.key, target.releaseAlbumIds, survivorReleaseAlbumId);
+                }}
+                type="button"
+              >
+                {releaseAlbumMergeDryRunLoadingKey === target.key ? "Loading..." : "Dry run"}
+              </button>
+            );
+          })() : null}
+        </div>
+        {preview || dryRun ? (
+          <details>
+            <summary>Details</summary>
+            {preview ? renderReleaseAlbumMergePreview(target.key) : null}
+          </details>
+        ) : null}
+      </article>
+    );
+  }
+
+  function collectAlbumMergeReviewTargets(): AlbumMergeReviewTarget[] {
+    const spotifyTargets = (albumDuplicateLookupResult?.items ?? []).map((group) => ({
+      key: releaseAlbumMergePreviewKey(`spotify:${group.spotify_album_id}`, group.release_albums),
+      title: group.spotify_album_name ?? group.release_albums[0]?.release_album_name ?? "Duplicate album group",
+      subtitle: `Spotify album ${group.spotify_album_id}`,
+      releaseAlbumIds: group.release_albums.map((item) => item.release_album_id),
+      duplicateCount: group.duplicate_count,
+      sourceLabel: "Duplicate Spotify IDs",
+      spotifyAlbumId: group.spotify_album_id,
+      spotifyAlbumName: group.spotify_album_name,
+    }));
+    const nameTargets = (albumNameDuplicateLookupResult?.items ?? []).map((group) => ({
+      key: releaseAlbumMergePreviewKey(`name:${group.normalized_album_name}:${group.normalized_primary_artist}`, group.release_albums),
+      title: group.release_albums[0]?.release_album_name ?? group.normalized_album_name,
+      subtitle: `${group.normalized_primary_artist} · ${group.spotify_album_ids.length > 0 ? group.spotify_album_ids.join(", ") : "No Spotify album ID"}`,
+      releaseAlbumIds: group.release_albums.map((item) => item.release_album_id),
+      duplicateCount: group.duplicate_count,
+      sourceLabel: "Duplicate Name + Artist",
+      spotifyAlbumId: group.spotify_album_ids.length === 1 ? group.spotify_album_ids[0] : null,
+      spotifyAlbumName: group.release_albums[0]?.spotify_album_name ?? null,
+    }));
+    return [...spotifyTargets, ...nameTargets];
+  }
+
+  function renderTrackIdentityAuditOverviewTab() {
     const canonicalCount = identityAudit?.same_name_canonical_splits.length ?? 0;
     const releaseCount = identityAudit?.release_track_source_splits.length ?? 0;
     const compositionCount = identityAudit?.analysis_track_groups.length ?? 0;
@@ -5703,7 +6137,7 @@ export function App() {
     );
   }
 
-  function renderIdentityAuditCanonicalTab() {
+  function renderTrackIdentityAuditCanonicalTab() {
     if (identityAuditError) {
       return <p className="empty-copy">{identityAuditError}</p>;
     }
@@ -5726,6 +6160,7 @@ export function App() {
     if (releaseAlbumMergePreviewLoadingKey) {
       return;
     }
+    setSelectedAlbumMergeReviewKey(key);
     setReleaseAlbumMergePreviewLoadingKey(key);
     setReleaseAlbumMergePreviewErrorByKey((current) => ({ ...current, [key]: "" }));
     try {
@@ -5745,6 +6180,7 @@ export function App() {
     if (releaseAlbumMergeDryRunLoadingKey) {
       return;
     }
+    setSelectedAlbumMergeReviewKey(key);
     setReleaseAlbumMergeDryRunLoadingKey(key);
     setReleaseAlbumMergeDryRunErrorByKey((current) => ({ ...current, [key]: "" }));
     try {
@@ -5792,6 +6228,10 @@ export function App() {
             </details>
           ) : null
         ))}
+        <details>
+          <summary>Raw dry run JSON</summary>
+          <pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(dryRun, null, 2)}</pre>
+        </details>
       </div>
     );
   }
@@ -5826,6 +6266,9 @@ export function App() {
             ))}
           </div>
         ) : null}
+        {plainEnglishAlbumMergeExplanation(preview) ? (
+          <p className="identity-audit-tab-copy" style={{ marginTop: 0 }}>{plainEnglishAlbumMergeExplanation(preview)}</p>
+        ) : null}
         <p className="empty-copy">
           Affected rows: source album maps {preview.affected.source_album_map_rows}, album artists {preview.affected.album_artist_rows}, release tracks {preview.affected.release_track_rows}, album tracks {preview.affected.album_track_rows}, album-track conflicts {preview.affected.album_track_conflicts}, raw listens {preview.affected.raw_play_event_rows}
         </p>
@@ -5851,158 +6294,22 @@ export function App() {
             </button>
           );
         })() : null}
+        <details>
+          <summary>Raw preview JSON</summary>
+          <pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(preview, null, 2)}</pre>
+        </details>
         {renderReleaseAlbumMergeDryRun(key)}
       </div>
     );
   }
 
-  function renderIdentityAuditReleaseTab() {
+  function renderTrackIdentityAuditReleaseTab() {
     const releaseTrackSplits = identityAudit?.release_track_source_splits ?? [];
     return (
       <div className="identity-audit-grid">
         <p className="identity-audit-tab-copy">
           Release review highlights candidates that likely belong to one release identity but are split today.
         </p>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Duplicate Albums (Same Spotify Album ID)</h3>
-            <span>{albumDuplicateLookupResult?.total ?? 0} groups</span>
-          </div>
-          {albumDuplicateLookupError ? <p className="empty-copy">{albumDuplicateLookupError}</p> : null}
-          {!albumDuplicateLookupResult && albumDuplicateLookupLoading ? (
-            <p className="empty-copy">Loading duplicate album groups...</p>
-          ) : null}
-          {!albumDuplicateLookupLoading && (!albumDuplicateLookupResult || albumDuplicateLookupResult.items.length === 0) ? (
-            <p className="empty-copy">No duplicate albums found.</p>
-          ) : null}
-          {albumDuplicateLookupResult && albumDuplicateLookupResult.items.length > 0 ? (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Name</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Album</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Dup Count</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Preview</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {albumDuplicateLookupResult.items.map((group) => {
-                    const previewKey = releaseAlbumMergePreviewKey(`spotify:${group.spotify_album_id}`, group.release_albums);
-                    const releaseAlbumIds = group.release_albums.map((item) => item.release_album_id);
-                    return (
-                      <Fragment key={`identity-release-dup-album-group-${group.spotify_album_id}`}>
-                        {group.release_albums.map((item, index) => (
-                          <tr key={`identity-release-dup-album-${group.spotify_album_id}-${item.release_album_id}`}>
-                            <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{index === 0 ? group.spotify_album_id : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? (group.spotify_album_name ?? "Unknown") : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_album_name}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? group.duplicate_count : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>
-                              {index === 0 ? (
-                                <button
-                                  className="track-ranking-chip"
-                                  type="button"
-                                  disabled={releaseAlbumMergePreviewLoadingKey !== null}
-                                  onClick={() => void loadReleaseAlbumMergePreview(previewKey, releaseAlbumIds)}
-                                >
-                                  {releaseAlbumMergePreviewLoadingKey === previewKey ? "Loading..." : "Preview merge"}
-                                </button>
-                              ) : null}
-                            </td>
-                          </tr>
-                        ))}
-                        {releaseAlbumMergePreviewByKey[previewKey] || releaseAlbumMergePreviewErrorByKey[previewKey] ? (
-                          <tr>
-                            <td colSpan={6} style={{ padding: "8px" }}>{renderReleaseAlbumMergePreview(previewKey)}</td>
-                          </tr>
-                        ) : null}
-                      </Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Duplicate Albums (Same Name + Primary Artist)</h3>
-            <span>{albumNameDuplicateLookupResult?.total ?? 0} groups</span>
-          </div>
-          {albumNameDuplicateLookupError ? <p className="empty-copy">{albumNameDuplicateLookupError}</p> : null}
-          {!albumNameDuplicateLookupResult && albumNameDuplicateLookupLoading ? (
-            <p className="empty-copy">Loading duplicate album name groups...</p>
-          ) : null}
-          {!albumNameDuplicateLookupLoading && (!albumNameDuplicateLookupResult || albumNameDuplicateLookupResult.items.length === 0) ? (
-            <p className="empty-copy">No duplicate album name groups found.</p>
-          ) : null}
-          {albumNameDuplicateLookupResult && albumNameDuplicateLookupResult.items.length > 0 ? (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Normalized Album</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Normalized Primary Artist</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album IDs</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Album</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Tracklist</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Catalog</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Queue</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Dup Count</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Preview</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {albumNameDuplicateLookupResult.items.map((group) => {
-                    const previewKey = releaseAlbumMergePreviewKey(`name:${group.normalized_album_name}:${group.normalized_primary_artist}`, group.release_albums);
-                    const releaseAlbumIds = group.release_albums.map((item) => item.release_album_id);
-                    return (
-                      <Fragment key={`identity-release-dup-name-album-group-${group.normalized_album_name}-${group.normalized_primary_artist}`}>
-                        {group.release_albums.map((item, index) => (
-                          <tr key={`identity-release-dup-name-album-${group.normalized_album_name}-${group.normalized_primary_artist}-${item.release_album_id}`}>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? group.normalized_album_name : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? group.normalized_primary_artist : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{index === 0 ? (group.spotify_album_ids.length > 0 ? group.spotify_album_ids.join(", ") : "None") : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_album_name}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{item.spotify_album_id ?? "None"}{item.spotify_album_name ? ` (${item.spotify_album_name})` : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{item.album_track_rows} / {item.total_tracks ?? "?"}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.catalog_status ?? "unknown"}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>{item.queue_status}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? group.duplicate_count : ""}</td>
-                            <td style={{ padding: "8px", verticalAlign: "top" }}>
-                              {index === 0 ? (
-                                <button
-                                  className="track-ranking-chip"
-                                  type="button"
-                                  disabled={releaseAlbumMergePreviewLoadingKey !== null}
-                                  onClick={() => void loadReleaseAlbumMergePreview(previewKey, releaseAlbumIds)}
-                                >
-                                  {releaseAlbumMergePreviewLoadingKey === previewKey ? "Loading..." : "Preview merge"}
-                                </button>
-                              ) : null}
-                            </td>
-                          </tr>
-                        ))}
-                        {releaseAlbumMergePreviewByKey[previewKey] || releaseAlbumMergePreviewErrorByKey[previewKey] ? (
-                          <tr>
-                            <td colSpan={11} style={{ padding: "8px" }}>{renderReleaseAlbumMergePreview(previewKey)}</td>
-                          </tr>
-                        ) : null}
-                      </Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </div>
         <div className="identity-audit-group">
           <div className="tracks-formula-heading">
             <h3>Duplicate Tracks (Same Spotify Track ID)</h3>
@@ -6071,7 +6378,368 @@ export function App() {
     );
   }
 
-  function renderIdentityAuditCompositionTab() {
+  function renderAlbumIdentityAuditOverviewTab() {
+    const mergeTargets = collectAlbumMergeReviewTargets();
+    const previewedCount = mergeTargets.filter((target) => releaseAlbumMergePreviewByKey[target.key]).length;
+    const dryRunCount = mergeTargets.filter((target) => releaseAlbumMergeDryRunByKey[target.key]).length;
+    return (
+      <div className="identity-audit-overview-grid">
+        <article className="identity-audit-overview-card">
+          <h3>Duplicate Spotify IDs</h3>
+          <p>Strongest album duplicate signal using one resolved Spotify album.</p>
+          <strong>{albumDuplicateLookupResult?.total ?? 0}</strong>
+        </article>
+        <article className="identity-audit-overview-card">
+          <h3>Duplicate Name + Artist</h3>
+          <p>Weaker text-based album duplicate signal when Spotify ID is missing or mixed.</p>
+          <strong>{albumNameDuplicateLookupResult?.total ?? 0}</strong>
+        </article>
+        <article className="identity-audit-overview-card">
+          <h3>Merge Previews</h3>
+          <p>Album groups already previewed in this session.</p>
+          <strong>{previewedCount}</strong>
+        </article>
+        <article className="identity-audit-overview-card">
+          <h3>Dry Runs</h3>
+          <p>Groups with a row-level dry-run plan available.</p>
+          <strong>{dryRunCount}</strong>
+        </article>
+      </div>
+    );
+  }
+
+  function renderAlbumIdentityAuditSpotifyDuplicatesTab() {
+    const allTargets = (albumDuplicateLookupResult?.items ?? []).map((group) => ({
+      group,
+      target: {
+        key: releaseAlbumMergePreviewKey(`spotify:${group.spotify_album_id}`, group.release_albums),
+        title: group.spotify_album_name ?? group.release_albums[0]?.release_album_name ?? "Duplicate album group",
+        subtitle: `Spotify album ${group.spotify_album_id}`,
+        releaseAlbumIds: group.release_albums.map((item) => item.release_album_id),
+        duplicateCount: group.duplicate_count,
+        sourceLabel: "Duplicate Spotify IDs",
+        spotifyAlbumId: group.spotify_album_id,
+        spotifyAlbumName: group.spotify_album_name,
+      } satisfies AlbumMergeReviewTarget,
+    }));
+    const reasonOptions = albumReasonOptionsForTargets(allTargets, albumSpotifyDuplicateFilter);
+    const targets = allTargets.filter(({ target }) => {
+      const preview = releaseAlbumMergePreviewByKey[target.key];
+      return albumPreviewFilterMatch(preview, albumSpotifyDuplicateFilter)
+        && albumReasonFilterMatch(preview, albumSpotifyDuplicateReasonFilter);
+    });
+    return (
+      <div className="identity-audit-grid">
+        <p className="identity-audit-tab-copy">
+          Review album duplicates that already resolve to the same Spotify album ID.
+        </p>
+        <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+          {[
+            ["all", "All"],
+            ["not_previewed", "Not previewed"],
+            ["safe_candidate", "Safe candidate"],
+            ["needs_review", "Needs review"],
+            ["unsafe", "Unsafe"],
+          ].map(([value, label]) => (
+            <button
+              className={`track-ranking-chip${albumSpotifyDuplicateFilter === value ? " track-ranking-chip-active" : ""}`}
+              key={`album-spotify-filter-${value}`}
+              onClick={() => {
+                setAlbumSpotifyDuplicateFilter(value as typeof albumSpotifyDuplicateFilter);
+                setAlbumSpotifyDuplicateReasonFilter("all");
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            className="secondary-button"
+            disabled={albumSpotifyDuplicateBulkPreviewLoading || !targets.some(({ target }) => !releaseAlbumMergePreviewByKey[target.key])}
+            onClick={() => {
+              void (async () => {
+                setAlbumSpotifyDuplicateBulkPreviewLoading(true);
+                try {
+                  await previewAlbumMergeTargetsInSession(targets.map((item) => item.target));
+                } finally {
+                  setAlbumSpotifyDuplicateBulkPreviewLoading(false);
+                }
+              })();
+            }}
+            type="button"
+          >
+            {albumSpotifyDuplicateBulkPreviewLoading ? "Previewing..." : "Preview listed groups"}
+          </button>
+        </div>
+        {reasonOptions.length > 0 ? (
+          <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            <span className="empty-copy" style={{ margin: 0 }}>Reasons</span>
+            <button
+              className={`track-ranking-chip${albumSpotifyDuplicateReasonFilter === "all" ? " track-ranking-chip-active" : ""}`}
+              onClick={() => setAlbumSpotifyDuplicateReasonFilter("all")}
+              type="button"
+            >
+              All reasons
+            </button>
+            {reasonOptions.map((option) => (
+              <button
+                className={`track-ranking-chip${albumSpotifyDuplicateReasonFilter === option.key ? " track-ranking-chip-active" : ""}`}
+                key={`album-spotify-reason-filter-${option.key}`}
+                onClick={() => setAlbumSpotifyDuplicateReasonFilter(option.key)}
+                type="button"
+              >
+                {option.label} ({option.count})
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {albumDuplicateLookupError ? <p className="empty-copy">{albumDuplicateLookupError}</p> : null}
+        {!albumDuplicateLookupResult && albumDuplicateLookupLoading ? <p className="empty-copy">Loading duplicate album groups...</p> : null}
+        {!albumDuplicateLookupLoading && (!albumDuplicateLookupResult || targets.length === 0) ? <p className="empty-copy">No duplicate albums found for this filter.</p> : null}
+        {targets.length ? (
+          <div style={{ display: "grid", gap: "16px" }}>
+            {targets.map(({ group, target }) => {
+              return renderAlbumDuplicateCard(
+                target,
+                group.release_albums,
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                  <span className="identity-audit-stat">
+                    <span>Spotify album ID</span>
+                    <strong style={{ fontFamily: "monospace" }}>
+                      <a href={spotifyAlbumUrl(group.spotify_album_id)} rel="noreferrer" target="_blank">{group.spotify_album_id}</a>
+                    </strong>
+                  </span>
+                  <span className="identity-audit-stat">
+                    <span>Spotify name</span>
+                    <strong>{group.spotify_album_name ?? "Unknown"}</strong>
+                  </span>
+                </div>,
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderAlbumIdentityAuditNameDuplicatesTab() {
+    const allTargets = (albumNameDuplicateLookupResult?.items ?? []).map((group) => ({
+      group,
+      target: {
+        key: releaseAlbumMergePreviewKey(`name:${group.normalized_album_name}:${group.normalized_primary_artist}`, group.release_albums),
+        title: group.release_albums[0]?.release_album_name ?? group.normalized_album_name,
+        subtitle: `${group.normalized_primary_artist} · ${group.spotify_album_ids.length > 0 ? group.spotify_album_ids.join(", ") : "No Spotify album ID"}`,
+        releaseAlbumIds: group.release_albums.map((item) => item.release_album_id),
+        duplicateCount: group.duplicate_count,
+        sourceLabel: "Duplicate Name + Artist",
+        spotifyAlbumId: group.spotify_album_ids.length === 1 ? group.spotify_album_ids[0] : null,
+        spotifyAlbumName: group.release_albums[0]?.spotify_album_name ?? null,
+      } satisfies AlbumMergeReviewTarget,
+    }));
+    const subgroupTargets = allTargets.filter(({ group }) => {
+      const subgroupMatch = albumNameDuplicateGroupFilter === "all"
+        || (albumNameDuplicateGroupFilter === "single_spotify_id" && group.spotify_album_ids.length === 1)
+        || (albumNameDuplicateGroupFilter === "multiple_spotify_ids" && group.spotify_album_ids.length > 1)
+        || (albumNameDuplicateGroupFilter === "no_spotify_id" && group.spotify_album_ids.length === 0);
+      return subgroupMatch;
+    });
+    const reasonOptions = albumReasonOptionsForTargets(subgroupTargets, albumNameDuplicatePreviewFilter);
+    const targets = subgroupTargets.filter(({ target }) => {
+      const preview = releaseAlbumMergePreviewByKey[target.key];
+      return albumPreviewFilterMatch(preview, albumNameDuplicatePreviewFilter)
+        && albumReasonFilterMatch(preview, albumNameDuplicateReasonFilter);
+    });
+    return (
+      <div className="identity-audit-grid">
+        <p className="identity-audit-tab-copy">
+          Review album duplicates grouped by normalized album name and normalized primary artist.
+        </p>
+        <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+          {[
+            ["all", "All"],
+            ["single_spotify_id", "Single Spotify ID"],
+            ["multiple_spotify_ids", "Multiple Spotify IDs"],
+            ["no_spotify_id", "No Spotify ID"],
+          ].map(([value, label]) => (
+            <button
+              className={`track-ranking-chip${albumNameDuplicateGroupFilter === value ? " track-ranking-chip-active" : ""}`}
+              key={`album-name-group-filter-${value}`}
+              onClick={() => {
+                setAlbumNameDuplicateGroupFilter(value as typeof albumNameDuplicateGroupFilter);
+                setAlbumNameDuplicateReasonFilter("all");
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+          {[
+            ["all", "All previews"],
+            ["not_previewed", "Not previewed"],
+            ["safe_candidate", "Safe candidate"],
+            ["needs_review", "Needs review"],
+            ["unsafe", "Unsafe"],
+          ].map(([value, label]) => (
+            <button
+              className={`track-ranking-chip${albumNameDuplicatePreviewFilter === value ? " track-ranking-chip-active" : ""}`}
+              key={`album-name-preview-filter-${value}`}
+              onClick={() => {
+                setAlbumNameDuplicatePreviewFilter(value as typeof albumNameDuplicatePreviewFilter);
+                setAlbumNameDuplicateReasonFilter("all");
+              }}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            className="secondary-button"
+            disabled={albumNameDuplicateBulkPreviewLoading || !targets.some(({ target }) => !releaseAlbumMergePreviewByKey[target.key])}
+            onClick={() => {
+              void (async () => {
+                setAlbumNameDuplicateBulkPreviewLoading(true);
+                try {
+                  await previewAlbumMergeTargetsInSession(targets.map((item) => item.target));
+                } finally {
+                  setAlbumNameDuplicateBulkPreviewLoading(false);
+                }
+              })();
+            }}
+            type="button"
+          >
+            {albumNameDuplicateBulkPreviewLoading ? "Previewing..." : "Preview listed groups"}
+          </button>
+        </div>
+        {reasonOptions.length > 0 ? (
+          <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            <span className="empty-copy" style={{ margin: 0 }}>Reasons</span>
+            <button
+              className={`track-ranking-chip${albumNameDuplicateReasonFilter === "all" ? " track-ranking-chip-active" : ""}`}
+              onClick={() => setAlbumNameDuplicateReasonFilter("all")}
+              type="button"
+            >
+              All reasons
+            </button>
+            {reasonOptions.map((option) => (
+              <button
+                className={`track-ranking-chip${albumNameDuplicateReasonFilter === option.key ? " track-ranking-chip-active" : ""}`}
+                key={`album-name-reason-filter-${option.key}`}
+                onClick={() => setAlbumNameDuplicateReasonFilter(option.key)}
+                type="button"
+              >
+                {option.label} ({option.count})
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {albumNameDuplicateLookupError ? <p className="empty-copy">{albumNameDuplicateLookupError}</p> : null}
+        {!albumNameDuplicateLookupResult && albumNameDuplicateLookupLoading ? <p className="empty-copy">Loading duplicate album name groups...</p> : null}
+        {!albumNameDuplicateLookupLoading && (!albumNameDuplicateLookupResult || targets.length === 0) ? <p className="empty-copy">No duplicate album name groups found for this filter.</p> : null}
+        {targets.length ? (
+          <div style={{ display: "grid", gap: "16px" }}>
+            {targets.map(({ group, target }) => {
+              return renderAlbumDuplicateCard(
+                target,
+                group.release_albums,
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                  <span className="identity-audit-stat">
+                    <span>Normalized album</span>
+                    <strong>{group.normalized_album_name}</strong>
+                  </span>
+                  <span className="identity-audit-stat">
+                    <span>Normalized artist</span>
+                    <strong>{group.normalized_primary_artist}</strong>
+                  </span>
+                  <span className="identity-audit-stat">
+                    <span>Spotify album IDs</span>
+                    <strong>{group.spotify_album_ids.length > 0 ? group.spotify_album_ids.join(", ") : "None"}</strong>
+                  </span>
+                </div>,
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderAlbumIdentityAuditMergeReviewTab() {
+    const targets = collectAlbumMergeReviewTargets();
+    const selectedTarget = targets.find((target) => target.key === selectedAlbumMergeReviewKey) ?? null;
+    const reviewedTargets = targets.filter((target) => releaseAlbumMergePreviewByKey[target.key] || releaseAlbumMergeDryRunByKey[target.key]);
+    return (
+      <div className="identity-audit-grid">
+        <p className="identity-audit-tab-copy">
+          Merge Review keeps the selected album group front and center and preserves full preview and dry-run details.
+        </p>
+        {!selectedTarget && reviewedTargets.length === 0 ? (
+          <p className="empty-copy">Choose Preview merge from an album duplicate group to start a review.</p>
+        ) : null}
+        {selectedTarget ? (
+          <div className="identity-audit-group">
+            <div className="tracks-formula-heading">
+              <h3>Selected Group</h3>
+              <span>{selectedTarget.sourceLabel}</span>
+            </div>
+            {renderReleaseAlbumMergePreview(selectedTarget.key)}
+          </div>
+        ) : null}
+        {reviewedTargets.length > 0 ? (
+          <div className="identity-audit-group">
+            <div className="tracks-formula-heading">
+              <h3>Reviewed Groups</h3>
+              <span>{reviewedTargets.length}</span>
+            </div>
+            <div style={{ display: "grid", gap: "12px" }}>
+              {reviewedTargets.map((target) => {
+                const preview = releaseAlbumMergePreviewByKey[target.key];
+                const dryRun = releaseAlbumMergeDryRunByKey[target.key];
+                return (
+                  <button
+                    key={`album-reviewed-target-${target.key}`}
+                    className="secondary-button"
+                    onClick={() => setSelectedAlbumMergeReviewKey(target.key)}
+                    style={{ alignItems: "center", display: "flex", justifyContent: "space-between", textAlign: "left" }}
+                    type="button"
+                  >
+                    <span>
+                      <strong>{target.title}</strong>
+                      <span className="empty-copy" style={{ display: "block", marginTop: "4px" }}>{target.releaseAlbumIds.join(", ")}</span>
+                    </span>
+                    <span style={{ alignItems: "center", display: "flex", gap: "8px" }}>
+                      {preview ? renderAlbumMergeReadinessBadge(preview.merge_readiness) : null}
+                      {dryRun ? <span className="empty-copy">Dry run ready</span> : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderArtistIdentityAuditPlaceholder() {
+    return (
+      <div className="identity-audit-grid">
+        <div className="identity-audit-group">
+          <div className="tracks-formula-heading">
+            <h3>Artists</h3>
+            <span>Placeholder</span>
+          </div>
+          <p className="identity-audit-tab-copy">
+            Artist audit review is not wired yet. This space is reserved so artist joins can land without mixing them into track or album review.
+          </p>
+          <p className="empty-copy">No artist-specific audit diagnostics are available in this build.</p>
+        </div>
+      </div>
+    );
+  }
+
+  function renderTrackIdentityAuditCompositionTab() {
     if (identityAuditError) {
       return <p className="empty-copy">{identityAuditError}</p>;
     }
@@ -6088,7 +6756,7 @@ export function App() {
     );
   }
 
-  function renderIdentityAuditAmbiguousTab() {
+  function renderTrackIdentityAuditAmbiguousTab() {
     const familyOptions = identityAuditAmbiguous?.family_counts ?? [];
     const suggestedItems = identityAuditSuggestedGroups?.items ?? [];
     const filteredItems = computeAmbiguousTrackItems();
@@ -6142,7 +6810,7 @@ export function App() {
       }
       if (item.item_type === "group") {
         const group = item.group;
-        const label = group?.analysis_track_name || (group?.analysis_track_id != null ? `analysis_track ${group.analysis_track_id}` : item.decision_key);
+        const label = group?.analysis_track_name || (group?.analysis_track_id != null ? `track_family ${group.analysis_track_id}` : item.decision_key);
         const entry = {
           decision_key: item.decision_key,
           id: group?.analysis_track_id ?? item.decision_key,
@@ -6855,7 +7523,7 @@ export function App() {
                   <article className="identity-audit-example" key={`suggested-${group.analysis_track_id}`}>
                     <div className="identity-audit-example-header">
                       <div>
-                        <h4>{group.analysis_track_name || `Analysis Track ${group.analysis_track_id}`}</h4>
+                        <h4>{group.analysis_track_name || `Track Family ${group.analysis_track_id}`}</h4>
                         <p>{group.match_method || "suggested"} | {Math.round(group.confidence * 100)}% confidence</p>
                       </div>
                       <span className="identity-audit-type-badge">Suggested group</span>
@@ -7037,12 +7705,23 @@ export function App() {
     if (!profile) {
       return null;
     }
-    const tabs: Array<{ value: IdentityAuditTab; label: string }> = [
+    const trackTabs: Array<{ value: TrackIdentityAuditTab; label: string }> = [
       { value: "overview", label: "Overview" },
       { value: "canonical", label: "Canonical Splits" },
       { value: "release", label: "Release" },
       { value: "composition", label: "Composition Groups" },
       { value: "family", label: "Family" },
+    ];
+    const albumTabs: Array<{ value: AlbumIdentityAuditTab; label: string }> = [
+      { value: "overview", label: "Overview" },
+      { value: "spotify_duplicates", label: "Duplicate Spotify IDs" },
+      { value: "name_duplicates", label: "Duplicate Name + Artist" },
+      { value: "merge_review", label: "Merge Review" },
+    ];
+    const identityEntityTabs: Array<{ value: IdentityAuditEntityTab; label: string }> = [
+      { value: "tracks", label: "Tracks" },
+      { value: "albums", label: "Albums" },
+      { value: "artists", label: "Artists" },
     ];
 
     return (
@@ -7080,27 +7759,64 @@ export function App() {
           <span>Identity samples: {identityAudit ? `${identityAudit.limit} per group` : "not loaded"}</span>
           <span>Suggested groups: {identityAuditSuggestedGroups?.summary.total_groups ?? 0}</span>
           <span>Ambiguous queue: {identityAuditAmbiguous?.summary.total_review_entries ?? 0}</span>
+          <span>Album duplicate Spotify ID groups: {albumDuplicateLookupLoaded ? (albumDuplicateLookupResult?.total ?? 0) : "not loaded"}</span>
+          <span>Album duplicate name groups: {albumNameDuplicateLookupLoaded ? (albumNameDuplicateLookupResult?.total ?? 0) : "not loaded"}</span>
           {identityAuditLastLoadedAt ? <span>Identity loaded {new Date(identityAuditLastLoadedAt).toLocaleTimeString()}</span> : null}
           {identityAuditSuggestedLastLoadedAt ? <span>Suggested loaded {new Date(identityAuditSuggestedLastLoadedAt).toLocaleTimeString()}</span> : null}
           {identityAuditAmbiguousLastLoadedAt ? <span>Ambiguous loaded {new Date(identityAuditAmbiguousLastLoadedAt).toLocaleTimeString()}</span> : null}
+          {albumDuplicateLookupLastLoadedAt ? <span>Album duplicates loaded {new Date(albumDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
+          {albumNameDuplicateLookupLastLoadedAt ? <span>Album names loaded {new Date(albumNameDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
         </div>
-        <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit sections">
-          {tabs.map((tab) => (
+        <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit entity type">
+          {identityEntityTabs.map((tab) => (
             <button
-              className={`track-ranking-chip${identityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
-              key={`identity-tab-${tab.value}`}
-              onClick={() => setIdentityAuditTab(tab.value)}
+              className={`track-ranking-chip${identityAuditEntityTab === tab.value ? " track-ranking-chip-active" : ""}`}
+              key={`identity-entity-tab-${tab.value}`}
+              onClick={() => setIdentityAuditEntityTab(tab.value)}
               type="button"
             >
               {tab.label}
             </button>
           ))}
         </div>
-        {identityAuditTab === "overview" ? renderIdentityAuditOverviewTab() : null}
-        {identityAuditTab === "canonical" ? renderIdentityAuditCanonicalTab() : null}
-        {identityAuditTab === "release" ? renderIdentityAuditReleaseTab() : null}
-        {identityAuditTab === "composition" ? renderIdentityAuditCompositionTab() : null}
-        {identityAuditTab === "family" ? renderIdentityAuditAmbiguousTab() : null}
+        {identityAuditEntityTab !== "artists" ? (
+          <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit sections">
+            {identityAuditEntityTab === "tracks"
+              ? trackTabs.map((tab) => (
+                <button
+                  className={`track-ranking-chip${trackIdentityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
+                  key={`track-identity-tab-${tab.value}`}
+                  onClick={() => setTrackIdentityAuditTab(tab.value)}
+                  type="button"
+                >
+                  {tab.label}
+                </button>
+              ))
+              : null}
+            {identityAuditEntityTab === "albums"
+              ? albumTabs.map((tab) => (
+                <button
+                  className={`track-ranking-chip${albumIdentityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
+                  key={`album-identity-tab-${tab.value}`}
+                  onClick={() => setAlbumIdentityAuditTab(tab.value)}
+                  type="button"
+                >
+                  {tab.label}
+                </button>
+              ))
+              : null}
+          </div>
+        ) : null}
+        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "overview" ? renderTrackIdentityAuditOverviewTab() : null}
+        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "canonical" ? renderTrackIdentityAuditCanonicalTab() : null}
+        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "release" ? renderTrackIdentityAuditReleaseTab() : null}
+        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "composition" ? renderTrackIdentityAuditCompositionTab() : null}
+        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "family" ? renderTrackIdentityAuditAmbiguousTab() : null}
+        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "overview" ? renderAlbumIdentityAuditOverviewTab() : null}
+        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "spotify_duplicates" ? renderAlbumIdentityAuditSpotifyDuplicatesTab() : null}
+        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "name_duplicates" ? renderAlbumIdentityAuditNameDuplicatesTab() : null}
+        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "merge_review" ? renderAlbumIdentityAuditMergeReviewTab() : null}
+        {identityAuditEntityTab === "artists" ? renderArtistIdentityAuditPlaceholder() : null}
       </section>
     );
   }
@@ -7111,9 +7827,12 @@ export function App() {
     }
 
     const latestDisplayRun = catalogBackfillLatestResult ?? catalogBackfillCoverage?.latest_run ?? null;
+    const identityCritical = catalogBackfillCoverage?.identity_critical;
+    const catalogExpansion = catalogBackfillCoverage?.catalog_expansion;
     const coveragePercent = typeof catalogBackfillCoverage?.track_duration_coverage_percent === "number"
       ? `${catalogBackfillCoverage.track_duration_coverage_percent.toFixed(2)}%`
       : "0.00%";
+    const missingIdentityCritical = (identityCritical?.missing_source_track_metadata ?? 0) + (identityCritical?.missing_source_album_metadata ?? 0);
     const latestWarnings = Array.isArray((latestDisplayRun as { warnings?: unknown[] } | null)?.warnings)
       ? ((latestDisplayRun as { warnings?: string[] }).warnings ?? [])
       : [];
@@ -7153,264 +7872,198 @@ export function App() {
           </div>
         </div>
 
-        <div className="tracks-only-summary">
-          <span>Known release tracks: {catalogBackfillCoverage?.known_release_tracks ?? 0}</span>
-          <span>Track catalog rows: {catalogBackfillCoverage?.track_catalog_rows ?? 0}</span>
-          <span>Duration coverage: {catalogBackfillCoverage?.track_duration_coverage_count ?? 0} ({coveragePercent})</span>
-          <span>Known release albums: {catalogBackfillCoverage?.known_release_albums ?? 0}</span>
-          <span>Album catalog rows: {catalogBackfillCoverage?.album_catalog_rows ?? 0}</span>
-          <span>Album track rows: {catalogBackfillCoverage?.album_track_rows ?? 0}</span>
-          <span>Recent run errors: {catalogBackfillCoverage?.recent_errors_count ?? 0}</span>
-          {catalogBackfillCoverageLastLoadedAt ? <span>Coverage loaded {new Date(catalogBackfillCoverageLastLoadedAt).toLocaleTimeString()}</span> : null}
-        </div>
-
-        <div className="info-card-body">
-          <h3>Coverage</h3>
-          {catalogBackfillCoverageError ? <p className="empty-copy">{catalogBackfillCoverageError}</p> : null}
-          {!catalogBackfillCoverage && catalogBackfillCoverageLoading ? <p className="empty-copy">Loading coverage...</p> : null}
-          {catalogBackfillCoverage?.latest_run ? (
-            <p className="empty-copy">
-              Latest run {catalogBackfillCoverage.latest_run.id}: {catalogBackfillCoverage.latest_run.status ?? "unknown"} | started{" "}
-              {formatDebugTimestamp(catalogBackfillCoverage.latest_run.started_at)}
-            </p>
-          ) : (
-            <p className="empty-copy">No catalog backfill runs recorded yet.</p>
-          )}
-        </div>
-
-        <div className="info-card-body">
-          <h3>Run Backfill</h3>
-          <div className="identity-audit-ambiguous-toolbar">
-            <label>
-              Limit
-              <input
-                min={1}
-                onChange={(event) => setCatalogBackfillLimit(Math.max(1, Number(event.target.value) || 1))}
-                type="number"
-                value={catalogBackfillLimit}
-              />
-            </label>
-            <label>
-              Offset
-              <input
-                min={0}
-                onChange={(event) => setCatalogBackfillOffset(Math.max(0, Number(event.target.value) || 0))}
-                type="number"
-                value={catalogBackfillOffset}
-              />
-            </label>
-            <label>
-              Market
-              <input
-                onChange={(event) => setCatalogBackfillMarket(event.target.value.toUpperCase())}
-                type="text"
-                value={catalogBackfillMarket}
-              />
-            </label>
-            <label>
-              Request delay (s)
-              <input
-                min={0.2}
-                onChange={(event) => setCatalogBackfillRequestDelaySeconds(Math.max(0.2, Number(event.target.value) || 0.2))}
-                step={0.1}
-                type="number"
-                value={catalogBackfillRequestDelaySeconds}
-              />
-            </label>
-            <label>
-              Max runtime (s)
-              <input
-                max={300}
-                min={5}
-                onChange={(event) => setCatalogBackfillMaxRuntimeSeconds(Math.min(300, Math.max(5, Number(event.target.value) || 5)))}
-                type="number"
-                value={catalogBackfillMaxRuntimeSeconds}
-              />
-            </label>
-            <label>
-              Max requests
-              <input
-                max={1000}
-                min={1}
-                onChange={(event) => setCatalogBackfillMaxRequests(Math.min(1000, Math.max(1, Number(event.target.value) || 1)))}
-                type="number"
-                value={catalogBackfillMaxRequests}
-              />
-            </label>
-            <label>
-              Max errors
-              <input
-                max={100}
-                min={1}
-                onChange={(event) => setCatalogBackfillMaxErrors(Math.min(100, Math.max(1, Number(event.target.value) || 1)))}
-                type="number"
-                value={catalogBackfillMaxErrors}
-              />
-            </label>
-            <label>
-              Max album pages
-              <input
-                max={50}
-                min={1}
-                onChange={(event) => setCatalogBackfillMaxAlbumTracksPagesPerAlbum(Math.min(50, Math.max(1, Number(event.target.value) || 1)))}
-                type="number"
-                value={catalogBackfillMaxAlbumTracksPagesPerAlbum}
-              />
-            </label>
-            <label>
-              Album tracklist policy
-              <select
-                onChange={(event) =>
-                  setCatalogBackfillAlbumTracklistPolicy(
-                    (event.target.value as "all" | "priority_only" | "relevant_albums" | "none") ?? "relevant_albums",
-                  )
-                }
-                value={catalogBackfillAlbumTracklistPolicy}
-              >
-                <option value="all">All</option>
-                <option value="relevant_albums">Relevant albums</option>
-                <option value="priority_only">Prioritized only</option>
-                <option value="none">None</option>
-              </select>
-            </label>
-            <label>
-              Max 429 responses
-              <input
-                max={20}
-                min={1}
-                onChange={(event) => setCatalogBackfillMax429(Math.min(20, Math.max(1, Number(event.target.value) || 1)))}
-                type="number"
-                value={catalogBackfillMax429}
-              />
-            </label>
-            <label className="recent-debug-filter">
-              <input
-                checked={catalogBackfillIncludeAlbums}
-                onChange={(event) => setCatalogBackfillIncludeAlbums(event.currentTarget.checked)}
-                type="checkbox"
-              />
-              Include albums
-            </label>
-            <label className="recent-debug-filter">
-              <input
-                checked={catalogBackfillForceRefresh}
-                onChange={(event) => setCatalogBackfillForceRefresh(event.currentTarget.checked)}
-                type="checkbox"
-              />
-              Force refresh
-            </label>
+        <div className="track-ranking-toggle" role="group" aria-label="Catalog backfill sections">
+          {[
+            ["overview", "Overview"],
+            ["priorityMetadata", "Priority Metadata"],
+            ["fullBackfill", "Full Backfill"],
+            ["queue", "Queue"],
+            ["recentRuns", "Recent Runs"],
+          ].map(([value, label]) => (
             <button
-              className="primary-button"
-              disabled={catalogBackfillRunLoading}
-              onClick={() => {
-                void runCatalogBackfill();
-              }}
+              className={`track-ranking-chip${catalogBackfillTab === value ? " track-ranking-chip-active" : ""}`}
+              key={`catalog-backfill-tab-${value}`}
+              onClick={() => setCatalogBackfillTab(value as CatalogBackfillTab)}
               type="button"
             >
-              {catalogBackfillRunLoading ? "Running..." : "Run Backfill"}
+              {label}
             </button>
-          </div>
-          <p className="empty-copy">
-            Runs are bounded. If a stop limit is reached, partial catalog rows are kept and you can continue with the next
-            offset.
-          </p>
-          {catalogBackfillRunError ? <p className="empty-copy">{catalogBackfillRunError}</p> : null}
+          ))}
         </div>
 
-        <div className="info-card-body">
-          <h3>Latest Run Result</h3>
-          {!latestDisplayRun ? (
-            <p className="empty-copy">Run backfill to see latest results.</p>
-          ) : (
+        {catalogBackfillTab === "overview" ? (
+          <div className="info-card-body">
+            <h3>Overview</h3>
+            {catalogBackfillCoverageError ? <p className="empty-copy">{catalogBackfillCoverageError}</p> : null}
+            {!catalogBackfillCoverage && catalogBackfillCoverageLoading ? <p className="empty-copy">Loading coverage...</p> : null}
+            <div className="tracks-only-summary">
+              <span>Known release tracks: {catalogBackfillCoverage?.known_release_tracks ?? 0}</span>
+              <span>Track catalog rows: {catalogBackfillCoverage?.track_catalog_rows ?? 0}</span>
+              <span>Duration coverage: {catalogBackfillCoverage?.track_duration_coverage_count ?? 0} ({coveragePercent})</span>
+              <span>Known release albums: {catalogBackfillCoverage?.known_release_albums ?? 0}</span>
+              <span>Album catalog rows: {catalogBackfillCoverage?.album_catalog_rows ?? 0}</span>
+              <span>Album track rows: {catalogBackfillCoverage?.album_track_rows ?? 0}</span>
+              <span>Identity-critical missing: {missingIdentityCritical}</span>
+              <span>Missing tracklists: {catalogExpansion?.missing_album_tracklists ?? 0}</span>
+              <span>Recent run errors: {catalogBackfillCoverage?.recent_errors_count ?? 0}</span>
+              {catalogBackfillCoverageLastLoadedAt ? <span>Coverage loaded {new Date(catalogBackfillCoverageLastLoadedAt).toLocaleTimeString()}</span> : null}
+            </div>
+            {catalogBackfillCoverage?.latest_run ? (
+              <p className="empty-copy">
+                Latest run {catalogBackfillCoverage.latest_run.id}: {catalogBackfillCoverage.latest_run.status ?? "unknown"} | mode {catalogBackfillCoverage.latest_run.run_mode ?? "unknown"} | started{" "}
+                {formatDebugTimestamp(catalogBackfillCoverage.latest_run.started_at)}
+              </p>
+            ) : (
+              <p className="empty-copy">No catalog backfill runs recorded yet.</p>
+            )}
+          </div>
+        ) : null}
+
+        {catalogBackfillTab === "priorityMetadata" ? (
+          <div className="info-card-body">
+            <h3>Priority Metadata</h3>
+            <p className="empty-copy">Fetches source-layer Spotify track and album metadata for identity decisions. It does not expand unlistened album tracklists.</p>
+            <div className="tracks-only-summary">
+              <span>Missing source track metadata: {identityCritical?.missing_source_track_metadata ?? 0}</span>
+              <span>Missing source album metadata: {identityCritical?.missing_source_album_metadata ?? 0}</span>
+              <span>Missing identity-critical metadata: {missingIdentityCritical}</span>
+              <span>Missing ISRC: {identityCritical?.missing_track_isrc ?? 0}</span>
+              <span>Missing duration: {identityCritical?.missing_track_duration_ms ?? 0}</span>
+              <span>Missing album release date: {identityCritical?.missing_album_release_date ?? 0}</span>
+              <span>Missing album external IDs: {identityCritical?.missing_album_external_ids ?? 0}</span>
+            </div>
+            <div className="identity-audit-ambiguous-toolbar">
+              <label>
+                Limit
+                <input min={1} onChange={(event) => setCatalogBackfillLimit(Math.max(1, Number(event.target.value) || 1))} type="number" value={catalogBackfillLimit} />
+              </label>
+              <label>
+                Offset
+                <input min={0} onChange={(event) => setCatalogBackfillOffset(Math.max(0, Number(event.target.value) || 0))} type="number" value={catalogBackfillOffset} />
+              </label>
+              <label>
+                Market
+                <input onChange={(event) => setCatalogBackfillMarket(event.target.value.toUpperCase())} type="text" value={catalogBackfillMarket} />
+              </label>
+              <label>
+                Max requests
+                <input max={1000} min={1} onChange={(event) => setCatalogBackfillMaxRequests(Math.min(1000, Math.max(1, Number(event.target.value) || 1)))} type="number" value={catalogBackfillMaxRequests} />
+              </label>
+              <label>
+                Max runtime (s)
+                <input max={300} min={5} onChange={(event) => setCatalogBackfillMaxRuntimeSeconds(Math.min(300, Math.max(5, Number(event.target.value) || 5)))} type="number" value={catalogBackfillMaxRuntimeSeconds} />
+              </label>
+              <label className="recent-debug-filter">
+                <input checked={catalogBackfillForceRefresh} onChange={(event) => setCatalogBackfillForceRefresh(event.currentTarget.checked)} type="checkbox" />
+                Force refresh
+              </label>
+              <button className="primary-button" disabled={catalogBackfillRunLoading} onClick={() => void runCatalogBackfill("metadata_only")} type="button">
+                {catalogBackfillRunLoading ? "Running..." : "Run priority metadata"}
+              </button>
+            </div>
+            <p className="empty-copy">Config: run_mode=metadata_only, include_albums=true, album_tracklist_policy=none, reason=identity_metadata.</p>
+            {catalogBackfillRunError ? <p className="empty-copy">{catalogBackfillRunError}</p> : null}
+          </div>
+        ) : null}
+
+        {catalogBackfillTab === "fullBackfill" ? (
+          <div className="info-card-body">
+            <h3>Full Backfill</h3>
+            <p className="empty-copy">Slower tracklist-capable enrichment for broader catalog completeness. This is secondary to priority identity metadata.</p>
+            <div className="tracks-only-summary">
+              <span>Missing tracklists: {catalogExpansion?.missing_album_tracklists ?? 0}</span>
+              <span>Relevant album tracklist backlog: {catalogExpansion?.relevant_album_tracklist_backlog ?? 0}</span>
+              <span>Unlistened tracklist rows stored: {catalogExpansion?.unlistened_tracklist_rows ?? 0}</span>
+            </div>
+            <div className="identity-audit-ambiguous-toolbar">
+              <label>
+                Run mode
+                <select onChange={(event) => setCatalogBackfillFullRunMode(event.target.value as "tracklists_relevant" | "full_catalog")} value={catalogBackfillFullRunMode}>
+                  <option value="tracklists_relevant">tracklists_relevant</option>
+                  <option value="full_catalog">full_catalog</option>
+                </select>
+              </label>
+              <label>
+                Album tracklist policy
+                <select onChange={(event) => setCatalogBackfillAlbumTracklistPolicy(event.target.value as "all" | "priority_only" | "relevant_albums" | "none")} value={catalogBackfillAlbumTracklistPolicy}>
+                  <option value="relevant_albums">Relevant albums</option>
+                  <option value="priority_only">Prioritized only</option>
+                  <option value="all">All</option>
+                </select>
+              </label>
+              <label>
+                Limit
+                <input min={1} onChange={(event) => setCatalogBackfillLimit(Math.max(1, Number(event.target.value) || 1))} type="number" value={catalogBackfillLimit} />
+              </label>
+              <label>
+                Max album pages
+                <input max={50} min={1} onChange={(event) => setCatalogBackfillMaxAlbumTracksPagesPerAlbum(Math.min(50, Math.max(1, Number(event.target.value) || 1)))} type="number" value={catalogBackfillMaxAlbumTracksPagesPerAlbum} />
+              </label>
+              <label className="recent-debug-filter">
+                <input checked={catalogBackfillIncludeAlbums} onChange={(event) => setCatalogBackfillIncludeAlbums(event.currentTarget.checked)} type="checkbox" />
+                Include albums
+              </label>
+              <button className="secondary-button" disabled={catalogBackfillRunLoading} onClick={() => void runCatalogBackfill(catalogBackfillFullRunMode)} type="button">
+                {catalogBackfillRunLoading ? "Running..." : "Run full tracklist backfill"}
+              </button>
+            </div>
+            <p className="empty-copy">Config: run_mode={catalogBackfillFullRunMode}, album_tracklist_policy={catalogBackfillAlbumTracklistPolicy}, reason={catalogBackfillFullRunMode === "tracklists_relevant" ? "tracklist_completion" : "full_backfill"}.</p>
+            {catalogBackfillRunError ? <p className="empty-copy">{catalogBackfillRunError}</p> : null}
+          </div>
+        ) : null}
+
+        {latestDisplayRun ? (
+          <div className="info-card-body">
+            <h3>Latest Run Result</h3>
             <div className="tracks-only-summary">
               <span>Status: {latestDisplayRun.status ?? "unknown"}</span>
+              <span>Mode: {latestDisplayRun.run_mode ?? "unknown"}</span>
+              <span>Reason: {latestDisplayRun.run_reason ?? "none"}</span>
               <span>Partial: {latestDisplayRun.partial ? "yes" : "no"}</span>
               <span>Stop reason: {latestDisplayRun.stop_reason ?? "none"}</span>
               <span>Tracks seen/fetched/upserted: {latestDisplayRun.tracks_seen} / {latestDisplayRun.tracks_fetched} / {latestDisplayRun.tracks_upserted}</span>
               <span>Albums seen/fetched: {latestDisplayRun.albums_seen} / {latestDisplayRun.albums_fetched}</span>
-              <span>Album tracks upserted: {latestDisplayRun.album_tracks_upserted}</span>
-              <span>
-                Album tracklists seen/skipped/fetched: {latestDisplayRun.album_tracklists_seen ?? 0} /{" "}
-                {latestDisplayRun.album_tracklists_skipped_by_policy ?? 0} / {latestDisplayRun.album_tracklists_fetched ?? 0}
-              </span>
+              <span>Album tracklists seen/skipped/fetched: {latestDisplayRun.album_tracklists_seen ?? 0} / {latestDisplayRun.album_tracklists_skipped_by_policy ?? 0} / {latestDisplayRun.album_tracklists_fetched ?? 0}</span>
               <span>Album tracklist policy: {latestDisplayRun.album_tracklist_policy ?? "all"}</span>
               <span>Errors: {latestDisplayRun.errors}</span>
               <span>Requests total: {latestDisplayRun.requests_total}</span>
               <span>Requests 429: {latestDisplayRun.requests_429}</span>
-              <span>Max Retry-After: {latestDisplayRun.max_retry_after_seconds}</span>
-              {"last_retry_after_seconds" in latestDisplayRun ? (
-                <span>Last Retry-After: {latestDisplayRun.last_retry_after_seconds ?? 0}</span>
-              ) : null}
-              <span>Final delay: {latestDisplayRun.final_request_delay_seconds}</span>
-              <span>Has more: {latestDisplayRun.has_more ? "yes" : "no"}</span>
               <span>Warnings: {latestWarningsCount}</span>
               {latestWarnings.length > 0 ? <span>Warning details: {latestWarnings.join(" | ")}</span> : null}
               {showLatestLastError ? <span>Last error: {latestDisplayRun.last_error}</span> : null}
             </div>
-          )}
-        </div>
-
-        <div className="track-ranking-toggle" role="group" aria-label="Catalog backfill sections">
-          <button
-            className={`track-ranking-chip${catalogBackfillTab === "recentRuns" ? " track-ranking-chip-active" : ""}`}
-            onClick={() => setCatalogBackfillTab("recentRuns")}
-            type="button"
-          >
-            Recent Runs
-          </button>
-          <button
-            className={`track-ranking-chip${catalogBackfillTab === "queue" ? " track-ranking-chip-active" : ""}`}
-            onClick={() => setCatalogBackfillTab("queue")}
-            type="button"
-          >
-            Queue
-          </button>
-        </div>
+          </div>
+        ) : null}
 
         {catalogBackfillTab === "recentRuns" ? (
           <div className="info-card-body">
             <div className="section-column-header">
               <h3>Recent Runs</h3>
-              <button
-                className="secondary-button"
-                disabled={catalogBackfillRunsLoading}
-                onClick={() => void loadCatalogBackfillRuns(true)}
-                type="button"
-              >
+              <button className="secondary-button" disabled={catalogBackfillRunsLoading} onClick={() => void loadCatalogBackfillRuns(true)} type="button">
                 {catalogBackfillRunsLoading ? "Refreshing..." : "Refresh"}
               </button>
             </div>
             {catalogBackfillRunsError ? <p className="empty-copy">{catalogBackfillRunsError}</p> : null}
             {!catalogBackfillRuns && catalogBackfillRunsLoading ? <p className="empty-copy">Loading recent runs...</p> : null}
-            {catalogBackfillRunsLastLoadedAt ? (
-              <p className="empty-copy">Runs loaded {new Date(catalogBackfillRunsLastLoadedAt).toLocaleTimeString()}</p>
-            ) : null}
+            {catalogBackfillRunsLastLoadedAt ? <p className="empty-copy">Runs loaded {new Date(catalogBackfillRunsLastLoadedAt).toLocaleTimeString()}</p> : null}
             {!catalogBackfillRuns || catalogBackfillRuns.items.length === 0 ? (
               <p className="empty-copy">No runs available.</p>
             ) : (
               <div className="recent-debug-grid">
-                {catalogBackfillRuns.items.map((run) => (
-                  <div className="recent-debug-row" key={`catalog-run-${run.id}`}>
-                    {(() => {
-                      const runWarnings = Array.isArray(run.warnings) ? run.warnings : [];
-                      const runWarningsCount = runWarnings.length > 0 ? runWarnings.length : (run.warnings_count ?? 0);
-                      const runLastError = (run.status ?? "unknown") === "ok" ? "none" : (run.last_error ?? "none");
-                      return (
-                        <>
-                    <span className="recent-debug-key">
-                      Run {run.id} | {formatDebugTimestamp(run.started_at)} {"->"} {formatDebugTimestamp(run.completed_at)}
-                    </span>
-                    <span className="recent-debug-value">
-                      status={run.status ?? "unknown"}{run.status === "partial" ? " [PARTIAL/STOPPED]" : ""} | tracks={run.tracks_seen}/{run.tracks_fetched}/{run.tracks_upserted} | albums={run.albums_seen}/{run.albums_fetched} | album_tracks={run.album_tracks_upserted} | errors={run.errors} | requests_429={run.requests_429} | has_more={run.has_more ? "yes" : "no"} | warnings={runWarningsCount} | last_error={runLastError}
-                    </span>
-                    {runWarnings.length > 0 ? (
-                      <span className="recent-debug-value">warning_details={runWarnings.join(" | ")}</span>
-                    ) : null}
-                        </>
-                      );
-                    })()}
-                  </div>
-                ))}
+                {catalogBackfillRuns.items.map((run) => {
+                  const runWarnings = Array.isArray(run.warnings) ? run.warnings : [];
+                  const runWarningsCount = runWarnings.length > 0 ? runWarnings.length : (run.warnings_count ?? 0);
+                  const runLastError = (run.status ?? "unknown") === "ok" ? "none" : (run.last_error ?? "none");
+                  return (
+                    <div className="recent-debug-row" key={`catalog-run-${run.id}`}>
+                      <span className="recent-debug-key">Run {run.id} | {formatDebugTimestamp(run.started_at)} {"->"} {formatDebugTimestamp(run.completed_at)}</span>
+                      <span className="recent-debug-value">
+                        mode={run.run_mode ?? "unknown"} | reason={run.run_reason ?? "none"} | policy={run.album_tracklist_policy ?? "all"} | status={run.status ?? "unknown"}{run.status === "partial" ? " [PARTIAL/STOPPED]" : ""} | tracks={run.tracks_seen}/{run.tracks_fetched}/{run.tracks_upserted} | albums={run.albums_seen}/{run.albums_fetched} | album_tracks={run.album_tracks_upserted} | errors={run.errors} | requests_429={run.requests_429} | warnings={runWarningsCount} | last_error={runLastError}
+                      </span>
+                      {runWarnings.length > 0 ? <span className="recent-debug-value">warning_details={runWarnings.join(" | ")}</span> : null}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -7425,9 +8078,8 @@ export function App() {
                   Status
                   <select
                     onChange={(event) => {
-                      const nextFilter = (event.target.value as "all" | "pending" | "done" | "error");
-                      setCatalogBackfillQueueStatusFilter(nextFilter);
-                      void loadCatalogBackfillQueue(true, nextFilter);
+                      const nextFilter = event.target.value as "all" | "pending" | "done" | "error";
+                      void loadCatalogBackfillQueue(true, nextFilter, catalogBackfillQueueReasonFilter);
                     }}
                     value={catalogBackfillQueueStatusFilter}
                   >
@@ -7437,22 +8089,26 @@ export function App() {
                     <option value="error">Error</option>
                   </select>
                 </label>
-                <button
-                  className="secondary-button"
-                  disabled={catalogBackfillQueueRepairLoading}
-                  onClick={() => {
-                    void repairCatalogBackfillQueueStatuses();
-                  }}
-                  type="button"
-                >
+                <label>
+                  Reason
+                  <select
+                    onChange={(event) => {
+                      const nextFilter = event.target.value as CatalogBackfillQueueReasonFilter;
+                      void loadCatalogBackfillQueue(true, catalogBackfillQueueStatusFilter, nextFilter);
+                    }}
+                    value={catalogBackfillQueueReasonFilter}
+                  >
+                    <option value="all">All reasons</option>
+                    <option value="identity_metadata">identity_metadata</option>
+                    <option value="manual_priority">manual_priority</option>
+                    <option value="tracklist_completion">tracklist_completion</option>
+                    <option value="full_backfill">full_backfill</option>
+                  </select>
+                </label>
+                <button className="secondary-button" disabled={catalogBackfillQueueRepairLoading} onClick={() => void repairCatalogBackfillQueueStatuses()} type="button">
                   {catalogBackfillQueueRepairLoading ? "Repairing..." : "Repair queue statuses"}
                 </button>
-                <button
-                  className="secondary-button"
-                  disabled={catalogBackfillQueueLoading}
-                  onClick={() => void loadCatalogBackfillQueue(true)}
-                  type="button"
-                >
+                <button className="secondary-button" disabled={catalogBackfillQueueLoading} onClick={() => void loadCatalogBackfillQueue(true)} type="button">
                   {catalogBackfillQueueLoading ? "Refreshing..." : "Refresh"}
                 </button>
               </div>
@@ -7461,26 +8117,24 @@ export function App() {
               <span>Pending: {catalogBackfillQueue?.counts.pending ?? 0}</span>
               <span>Done: {catalogBackfillQueue?.counts.done ?? 0}</span>
               <span>Error: {catalogBackfillQueue?.counts.error ?? 0}</span>
+              <span>identity_metadata: {catalogBackfillQueue?.reason_counts?.identity_metadata ?? 0}</span>
+              <span>manual_priority: {catalogBackfillQueue?.reason_counts?.manual_priority ?? 0}</span>
+              <span>tracklist_completion: {catalogBackfillQueue?.reason_counts?.tracklist_completion ?? 0}</span>
+              <span>full_backfill: {catalogBackfillQueue?.reason_counts?.full_backfill ?? 0}</span>
               <span>Total: {catalogBackfillQueue?.total ?? 0}</span>
             </div>
             {catalogBackfillQueueRepairMessage ? <p className="empty-copy">{catalogBackfillQueueRepairMessage}</p> : null}
             {catalogBackfillQueueError ? <p className="empty-copy">{catalogBackfillQueueError}</p> : null}
             {!catalogBackfillQueue && catalogBackfillQueueLoading ? <p className="empty-copy">Loading queue...</p> : null}
-            {catalogBackfillQueueLastLoadedAt ? (
-              <p className="empty-copy">Queue loaded {new Date(catalogBackfillQueueLastLoadedAt).toLocaleTimeString()}</p>
-            ) : null}
+            {catalogBackfillQueueLastLoadedAt ? <p className="empty-copy">Queue loaded {new Date(catalogBackfillQueueLastLoadedAt).toLocaleTimeString()}</p> : null}
             {!catalogBackfillQueue || catalogBackfillQueue.items.length === 0 ? (
               <p className="empty-copy">No queue items.</p>
             ) : (
               <div className="recent-debug-grid">
                 {catalogBackfillQueue.items.map((item) => (
                   <div className="recent-debug-row" key={`catalog-queue-${item.id}`}>
-                    <span className="recent-debug-key">
-                      {item.entity_type}:{item.spotify_id} | status={item.status} | priority={item.priority} | attempts={item.attempts}
-                    </span>
-                    <span className="recent-debug-value">
-                      requested={formatDebugTimestamp(item.requested_at)} | last_attempted={formatDebugTimestamp(item.last_attempted_at)} | reason={item.reason ?? "none"} | last_error={item.last_error ?? "none"}
-                    </span>
+                    <span className="recent-debug-key">{item.entity_type}:{item.spotify_id} | status={item.status} | priority={item.priority} | attempts={item.attempts}</span>
+                    <span className="recent-debug-value">requested={formatDebugTimestamp(item.requested_at)} | last_attempted={formatDebugTimestamp(item.last_attempted_at)} | reason={item.reason ?? "none"} | last_error={item.last_error ?? "none"}</span>
                   </div>
                 ))}
               </div>
@@ -7706,7 +8360,7 @@ export function App() {
             <p className="empty-copy">Visible incomplete tracks with Spotify IDs: {visibleIncompleteTrackIds.length}</p>
           ) : null}
           <p className="empty-copy">Catalog status shows what data exists. Queue status shows whether backfill work is scheduled.</p>
-          <p className="empty-copy">Prioritized items are added to the catalog backfill queue. They are not fetched immediately.</p>
+          <p className="empty-copy">Prioritized items are added to the catalog backfill queue. Run and monitor them from Catalog Backfill.</p>
           {albumCatalogLookupError ? <p className="empty-copy">{albumCatalogLookupError}</p> : null}
           {trackCatalogLookupError ? <p className="empty-copy">{trackCatalogLookupError}</p> : null}
           {albumDuplicateLookupError ? <p className="empty-copy">{albumDuplicateLookupError}</p> : null}
@@ -9012,12 +9666,14 @@ export function App() {
 
   async function fetchCatalogBackfillQueue(
     statusFilter: "all" | "pending" | "done" | "error" = "all",
+    reasonFilter: CatalogBackfillQueueReasonFilter = "all",
     limit: number = 50,
     offset: number = 0
   ): Promise<CatalogBackfillQueueResponse> {
     const statusQuery = statusFilter === "all" ? "" : `&status=${encodeURIComponent(statusFilter)}`;
+    const reasonQuery = reasonFilter === "all" ? "" : `&reason=${encodeURIComponent(reasonFilter)}`;
     const response = await fetch(
-      `${apiBaseUrl}/debug/spotify/catalog-backfill/queue?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${statusQuery}`,
+      `${apiBaseUrl}/debug/spotify/catalog-backfill/queue?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${statusQuery}${reasonQuery}`,
       {
         credentials: "include",
       },
@@ -9243,16 +9899,25 @@ export function App() {
     return payload as ReleaseAlbumMergeDryRunResponse;
   }
 
-  async function postCatalogBackfillRun(): Promise<CatalogBackfillRunResponse> {
+  async function postCatalogBackfillRun(runMode: CatalogBackfillRunMode): Promise<CatalogBackfillRunResponse> {
+    const isPriorityMetadata = runMode === "metadata_only";
+    const runReason = isPriorityMetadata
+      ? "identity_metadata"
+      : runMode === "tracklists_relevant"
+        ? "tracklist_completion"
+        : "full_backfill";
+    const effectiveAlbumTracklistPolicy = isPriorityMetadata ? "none" : catalogBackfillAlbumTracklistPolicy;
     const response = await fetch(`${apiBaseUrl}/debug/spotify/catalog-backfill`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        run_mode: runMode,
+        reason: runReason,
         limit: Math.max(1, Math.round(catalogBackfillLimit)),
         offset: Math.max(0, Math.round(catalogBackfillOffset)),
         market: catalogBackfillMarket.trim() || "US",
-        include_albums: catalogBackfillIncludeAlbums,
+        include_albums: isPriorityMetadata ? true : catalogBackfillIncludeAlbums,
         force_refresh: catalogBackfillForceRefresh,
         request_delay_seconds: Math.max(0.2, catalogBackfillRequestDelaySeconds),
         max_runtime_seconds: Math.min(300, Math.max(5, Math.round(catalogBackfillMaxRuntimeSeconds))),
@@ -9260,7 +9925,7 @@ export function App() {
         max_errors: Math.min(100, Math.max(1, Math.round(catalogBackfillMaxErrors))),
         max_album_tracks_pages_per_album: Math.min(50, Math.max(1, Math.round(catalogBackfillMaxAlbumTracksPagesPerAlbum))),
         max_429: Math.min(20, Math.max(1, Math.round(catalogBackfillMax429))),
-        album_tracklist_policy: catalogBackfillAlbumTracklistPolicy,
+        album_tracklist_policy: effectiveAlbumTracklistPolicy,
       }),
     });
     const payload = (await response.json()) as
@@ -9712,7 +10377,8 @@ export function App() {
 
   async function loadCatalogBackfillQueue(
     reset: boolean = false,
-    explicitFilter?: "all" | "pending" | "done" | "error"
+    explicitFilter?: "all" | "pending" | "done" | "error",
+    explicitReasonFilter?: CatalogBackfillQueueReasonFilter
   ) {
     if (catalogBackfillQueueLoading) {
       return;
@@ -9723,13 +10389,17 @@ export function App() {
       setCatalogBackfillQueueLastLoadedAt(null);
     }
     const activeFilter = explicitFilter ?? catalogBackfillQueueStatusFilter;
+    const activeReasonFilter = explicitReasonFilter ?? catalogBackfillQueueReasonFilter;
     if (explicitFilter && explicitFilter !== catalogBackfillQueueStatusFilter) {
       setCatalogBackfillQueueStatusFilter(explicitFilter);
+    }
+    if (explicitReasonFilter && explicitReasonFilter !== catalogBackfillQueueReasonFilter) {
+      setCatalogBackfillQueueReasonFilter(explicitReasonFilter);
     }
     setCatalogBackfillQueueLoading(true);
     setCatalogBackfillQueueError("");
     try {
-      const payload = await fetchCatalogBackfillQueue(activeFilter, 50, 0);
+      const payload = await fetchCatalogBackfillQueue(activeFilter, activeReasonFilter, 50, 0);
       setCatalogBackfillQueue(payload);
       setCatalogBackfillQueueLoaded(true);
       setCatalogBackfillQueueLastLoadedAt(Date.now());
@@ -9925,7 +10595,7 @@ export function App() {
         spotifyAlbumIds.map((spotifyId) => ({
           entity_type: "album",
           spotify_id: spotifyId,
-          reason: "album_lookup_visible_incomplete",
+          reason: "manual_priority",
           priority: 80,
         })),
       );
@@ -9965,7 +10635,7 @@ export function App() {
         spotifyTrackIds.map((spotifyId) => ({
           entity_type: "track",
           spotify_id: spotifyId,
-          reason: "track_lookup_visible_incomplete",
+          reason: "manual_priority",
           priority: 80,
         })),
       );
@@ -9978,14 +10648,14 @@ export function App() {
     }
   }
 
-  async function runCatalogBackfill() {
+  async function runCatalogBackfill(runMode: CatalogBackfillRunMode) {
     if (catalogBackfillRunLoading) {
       return;
     }
     setCatalogBackfillRunLoading(true);
     setCatalogBackfillRunError("");
     try {
-      const result = await postCatalogBackfillRun();
+      const result = await postCatalogBackfillRun(runMode);
       setCatalogBackfillLatestResult(result);
       await Promise.all([loadCatalogBackfillCoverage(true), loadCatalogBackfillRuns(true), loadCatalogBackfillQueue(true)]);
     } catch (error) {
