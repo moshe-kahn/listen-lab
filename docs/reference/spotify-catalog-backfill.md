@@ -30,13 +30,21 @@ It is enrichment-only. It must not create, merge, promote, or repair ListenLab i
   - `album_tracklists`
   - `all`
 - In `metadata_only`, `target=tracks` selects missing/incomplete track metadata only and does not fetch albums or tracklists.
-- Track metadata candidate ordering prioritizes:
+- `priority_scope=identity_and_top_listened` is the default for `reason=identity_metadata`.
+- Priority track metadata selection includes only:
   - duplicate resolved Spotify track groups
   - release-track source splits
   - suggested analysis groups
+  - top listened tracks derived from play facts
+  - tracks on top listened albums
+  - tracks by top listened artists
+  - recent repeat tracks
+- `priority_scope=all` remains available for intentional broad/deferred metadata passes.
+- Track metadata candidate ordering prioritizes:
+  - identity relevance
+  - top-listened relevance
   - track listen count
   - artist listen count
-  - accepted source mapping
   - Spotify ID tie-break
 
 ## Request Controls
@@ -53,6 +61,7 @@ It is enrichment-only. It must not create, merge, promote, or repair ListenLab i
 - `max_album_tracks_pages_per_album`
 - `album_tracklist_policy`
 - `run_mode`
+- `priority_scope`
 - `reason`
 - `target`
 
@@ -79,9 +88,8 @@ Worker defaults:
 - `reason=identity_metadata`
 - `album_tracklist_policy=none`
 - `include_albums=false`
-- current code is temporarily set to `limit=250`, `max_requests=275`, `max_runtime_seconds=900`
-- recommended next safe setting before more live runs is `limit=100`, `max_requests=110`, `max_runtime_seconds=300`
-- `request_delay_seconds=2.0`
+- `limit=50`, `max_requests=60`, `max_runtime_seconds=360`
+- `request_delay_seconds=5.0`
 - `market=US`
 
 The worker:
@@ -90,11 +98,23 @@ The worker:
   - 60 minute window
   - 15 minute local cooldown at `>=550` requests
   - 30 minute local cooldown at `>=650` requests
+  - when below `550`, caps the next run's `max_requests` to the remaining soft budget and lowers `limit` accordingly
 - prevents overlapping worker runs with `spotify_catalog_worker_lock`
 - replaces locks older than 2 hours
 - stores each invocation in `spotify_catalog_worker_invocation`
 - stores latest state/cooldown in `spotify_catalog_worker_state`
 - sets rate-limit cooldown from valid `Retry-After`, otherwise 60 minutes
+- after an expired rate-limit cooldown, runs a one-request single-track canary before normal backfill:
+  - `canary_attempt`
+  - `canary_success`
+  - `canary_rate_limited`
+  - `canary_failed_non_429`
+  - `canary_skipped_no_candidate`
+- consecutive `canary_rate_limited` results use exponential fallback cooldowns:
+  - first canary 429: 6 hours
+  - second canary 429: 12 hours
+  - third and later canary 429: 24 hours
+  - valid Spotify `Retry-After` can extend but not shorten that fallback
 - never runs album metadata, album tracklists, Full Backfill, Identity Audit, or merge/apply behavior
 
 Default CLI behavior remains one-shot and JSON-line compatible:
@@ -116,7 +136,7 @@ python3 -m backend.scripts.run_spotify_track_metadata_worker \
 Loop mode:
 - runs one worker iteration at a time
 - sleeps between clean runs
-- sleeps until worker-reported cooldown for `skipped_cooldown`, `skipped_request_budget`, or `partial/rate_limited`
+- sleeps until worker-reported cooldown for `skipped_cooldown`, `skipped_request_budget`, `skipped_canary_rate_limited`, or `partial/rate_limited`
 - exits cleanly on Ctrl-C
 - prints condensed terminal status lines
 - appends full JSONL events when `--jsonl-output` is provided

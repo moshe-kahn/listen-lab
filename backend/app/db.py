@@ -1274,6 +1274,10 @@ CREATE TABLE IF NOT EXISTS spotify_catalog_worker_invocation (
 CREATE INDEX IF NOT EXISTS idx_spotify_catalog_worker_invocation_worker_started
   ON spotify_catalog_worker_invocation(worker_name, started_at DESC);
 """,
+    24: """
+ALTER TABLE spotify_catalog_worker_state
+ADD COLUMN consecutive_post_cooldown_canary_429s INTEGER NOT NULL DEFAULT 0;
+""",
 }
 
 

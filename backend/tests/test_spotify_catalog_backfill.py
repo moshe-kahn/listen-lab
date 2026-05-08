@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from backend.app.spotify_catalog_backfill import (
     enqueue_spotify_catalog_backfill_items,
     dry_run_release_album_merge,
+    get_identity_readiness_track_metadata_priority_comparison,
+    get_spotify_track_metadata_priority_debug,
     list_spotify_catalog_backfill_queue,
     preview_release_album_merge,
     repair_spotify_catalog_backfill_queue_statuses,
@@ -80,6 +82,35 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
                     ("spotify", track_id, f"spotify:track:{track_id}", f"Track {track_id}", "{}"),
                 )
             connection.commit()
+
+    def _seed_accepted_source_track(self, spotify_track_id: str, *, name: str | None = None) -> int:
+        track_name = name or f"Track {spotify_track_id}"
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    (track_name, track_name.lower()),
+                ).lastrowid
+            )
+            source_track_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", spotify_track_id, f"spotify:track:{spotify_track_id}", track_name, "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_map (
+                  source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                """,
+                (source_track_id, release_track_id),
+            )
+            connection.commit()
+        return release_track_id
 
     @staticmethod
     def _analysis_track_map_digest(connection: sqlite3.Connection) -> tuple[int, str]:
@@ -1627,7 +1658,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(["t-identity"], [item["spotify_id"] for item in filtered["items"]])
 
     def test_metadata_only_fetches_source_album_metadata_without_tracklists(self) -> None:
-        self._seed_source_tracks(["t1"])
+        self._seed_accepted_source_track("t1")
         with closing(sqlite3.connect(self.db_path)) as connection:
             release_album_id = int(
                 connection.execute(
@@ -1667,6 +1698,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             run_mode="metadata_only",
             include_albums=False,
             album_tracklist_policy="all",
+            priority_scope="all",
             limit=5,
             sleeper=lambda _: None,
             fetcher=fetcher,
@@ -1688,7 +1720,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertFalse(any(url.endswith("/tracks") and "/albums/" in url for url in called_urls))
 
     def test_metadata_only_target_tracks_does_not_fetch_albums_even_when_include_albums_true(self) -> None:
-        self._seed_source_tracks(["t1"])
+        self._seed_accepted_source_track("t1")
         called_urls: list[str] = []
 
         def fetcher(
@@ -1706,6 +1738,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             run_mode="metadata_only",
             target="tracks",
             include_albums=True,
+            priority_scope="all",
             limit=5,
             sleeper=lambda _: None,
             fetcher=fetcher,
@@ -1721,7 +1754,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertFalse(any("/v1/albums" in url for url in called_urls))
 
     def test_metadata_only_target_all_preserves_current_mixed_behavior(self) -> None:
-        self._seed_source_tracks(["t1"])
+        self._seed_accepted_source_track("t1")
 
         def fetcher(
             url: str, params: dict[str, Any], access_token: str
@@ -1741,6 +1774,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             target="all",
             include_albums=False,
             album_tracklist_policy="all",
+            priority_scope="all",
             limit=5,
             sleeper=lambda _: None,
             fetcher=fetcher,
@@ -1974,7 +2008,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertIn("metadata_only target=album_tracklists is invalid", str(result["last_error"]))
 
     def test_metadata_only_ignores_non_identity_queue_rows(self) -> None:
-        self._seed_source_tracks(["t-missing"])
+        self._seed_accepted_source_track("t-missing")
         with closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(
                 """
@@ -2030,6 +2064,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         result = run_spotify_catalog_backfill(
             access_token="token",
             run_mode="metadata_only",
+            priority_scope="all",
             limit=5,
             sleeper=lambda _: None,
             fetcher=fetcher,
@@ -2101,7 +2136,8 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(0, result["album_tracks_upserted"])
 
     def test_metadata_only_selects_missing_track_metadata_before_complete_lexicographic_tracks(self) -> None:
-        self._seed_source_tracks(["000-complete", "999-missing"])
+        self._seed_accepted_source_track("000-complete")
+        self._seed_accepted_source_track("999-missing")
         with closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(
                 """
@@ -2140,6 +2176,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         result = run_spotify_catalog_backfill(
             access_token="token",
             run_mode="metadata_only",
+            priority_scope="all",
             limit=1,
             sleeper=lambda _: None,
             fetcher=fetcher,
@@ -2150,7 +2187,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(1, result["tracks_fetched"])
         self.assertEqual(1, result["tracks_upserted"])
 
-    def test_metadata_only_prioritizes_identity_relevant_missing_tracks(self) -> None:
+    def test_priority_metadata_selects_identity_relevant_missing_tracks(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
             duplicate_source_id = int(
                 connection.execute(
@@ -2304,15 +2341,211 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         )
 
         self.assertEqual("ok", result["status"])
-        self.assertEqual(5, result["tracks_fetched"])
-        self.assertEqual(
-            [["trk-identity", "trk-high", "trk-artist", "trk-mapped", "trk-raw-tail"]],
-            seen_batches,
+        self.assertEqual(1, result["tracks_fetched"])
+        self.assertEqual([["trk-identity"]], seen_batches)
+
+    def test_priority_metadata_selects_top_listened_missing_tracks(self) -> None:
+        self._seed_accepted_source_track("trk-top", name="Top Track")
+        self._seed_accepted_source_track("trk-deferred", name="Deferred Track")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            for index in range(5):
+                connection.execute(
+                    """
+                    INSERT INTO fact_play_event (
+                      canonical_ended_at, spotify_track_id, spotify_album_id, track_name_canonical, artist_name_canonical,
+                      timing_source, matched_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"2026-04-27T00:0{index}:00Z",
+                        "trk-top",
+                        "album-top",
+                        "Top Track",
+                        "Top Artist",
+                        "seed",
+                        "matched",
+                    ),
+                )
+            connection.commit()
+
+        seen_batches: list[list[str]] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                seen_batches.append(ids)
+                return 200, {}, {"tracks": [_track_payload(track_id, f"album-{track_id}") for track_id in ids]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="tracks",
+            include_albums=False,
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
         )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual([["trk-top"]], seen_batches)
+
+    def test_priority_metadata_includes_nonrepresentative_readiness_blocking_split_track(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Split Track", "split track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("trk-complete", "trk-readiness-missing"):
+                source_track_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "spotify",
+                            spotify_track_id,
+                            f"spotify:track:{spotify_track_id}",
+                            "Split Track",
+                            "{}",
+                        ),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_track_id, release_track_id),
+                )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "trk-complete",
+                    "Split Track",
+                    181000,
+                    0,
+                    1,
+                    1,
+                    "album-complete",
+                    json.dumps([{"name": "Artist A"}]),
+                    json.dumps({"external_ids": {"isrc": "ISRC1"}}),
+                    "2026-05-01T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, release_date, total_tracks, artists_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "album-complete",
+                    "Album Complete",
+                    "2024-01-01",
+                    1,
+                    json.dumps([{"name": "Artist A"}]),
+                    "2026-05-01T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.commit()
+
+        comparison = get_identity_readiness_track_metadata_priority_comparison(sample_limit=10)
+        self.assertEqual(1, comparison["blocked_groups"])
+        self.assertEqual(1, comparison["distinct_spotify_source_tracks_missing_track_metadata"])
+        self.assertEqual(1, comparison["included_by_priority_scope"])
+        self.assertEqual(0, comparison["not_included_by_priority_scope"])
+
+        seen_batches: list[list[str]] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                seen_batches.append(ids)
+                return 200, {}, {"tracks": [_track_payload(track_id, f"album-{track_id}") for track_id in ids]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="tracks",
+            include_albums=False,
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual([["trk-readiness-missing"]], seen_batches)
+
+    def test_priority_metadata_defers_missing_tracks_with_no_priority_flags(self) -> None:
+        self._seed_accepted_source_track("trk-deferred", name="Deferred Track")
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            raise AssertionError(f"priority metadata should not fetch deferred track: {url}")
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="tracks",
+            include_albums=False,
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(0, result["tracks_seen"])
+        self.assertEqual(0, result["tracks_fetched"])
+
+    def test_broad_metadata_scope_can_select_deferred_missing_tracks(self) -> None:
+        self._seed_accepted_source_track("trk-deferred", name="Deferred Track")
+        seen_batches: list[list[str]] = []
+
+        def fetcher(
+            url: str, params: dict[str, Any], access_token: str
+        ) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            if url.endswith("/v1/tracks"):
+                ids = [value for value in str(params.get("ids") or "").split(",") if value]
+                seen_batches.append(ids)
+                return 200, {}, {"tracks": [_track_payload(track_id, f"album-{track_id}") for track_id in ids]}, None
+            raise AssertionError(url)
+
+        result = run_spotify_catalog_backfill(
+            access_token="token",
+            run_mode="metadata_only",
+            target="tracks",
+            include_albums=False,
+            priority_scope="all",
+            limit=5,
+            sleeper=lambda _: None,
+            fetcher=fetcher,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual([["trk-deferred"]], seen_batches)
 
     def test_progress_callback_emits_start_and_ten_track_progress(self) -> None:
         track_ids = [f"t{i:02d}" for i in range(10)]
-        self._seed_source_tracks(track_ids)
+        for track_id in track_ids:
+            self._seed_accepted_source_track(track_id)
         events: list[dict[str, Any]] = []
 
         def fetcher(
@@ -2328,6 +2561,7 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             run_mode="metadata_only",
             target="tracks",
             include_albums=False,
+            priority_scope="all",
             limit=10,
             sleeper=lambda _: None,
             fetcher=fetcher,
@@ -5787,6 +6021,13 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(1, body["known_release_albums"])
         self.assertEqual(1, body["album_catalog_rows"])
         self.assertEqual(1, body["album_track_rows"])
+        self.assertEqual(0, body["identity_critical"]["missing_priority_track_metadata"])
+        self.assertEqual(0, body["identity_critical"]["missing_identity_ambiguous_track_metadata"])
+        self.assertEqual(0, body["identity_critical"]["missing_top_track_metadata"])
+        self.assertEqual(2, body["catalog_expansion"]["missing_deferred_track_metadata"])
+        self.assertEqual(2, body["track_metadata_priority"]["counts"]["total_missing_accepted_source_track_metadata"])
+        self.assertEqual(2, body["track_metadata_priority"]["counts"]["missing_deferred_track_metadata"])
+        self.assertIn("deferred", body["track_metadata_priority"]["samples"])
         self.assertIsInstance(body["latest_run"], dict)
         self.assertEqual("failed", body["latest_run"]["status"])
         self.assertEqual(1, body["recent_errors_count"])

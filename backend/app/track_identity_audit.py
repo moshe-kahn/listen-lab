@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -836,6 +838,342 @@ def query_analysis_track_group_examples(*, limit: int = 5) -> list[dict[str, Any
                 }
             )
     return examples
+
+
+IDENTITY_READINESS_BUCKETS = (
+    "metadata-complete",
+    "evidence-agrees",
+    "blocked-by-missing-metadata",
+    "safe-candidate",
+    "needs-review",
+    "unsafe",
+)
+
+
+def track_identity_readiness_source_ctes() -> str:
+    return """
+        WITH primary_artists AS (
+          SELECT
+            ordered.release_track_id,
+            group_concat(ordered.artist_name, ', ') AS release_artist_signature
+          FROM (
+            SELECT
+              ta.release_track_id,
+              a.canonical_name AS artist_name
+            FROM track_artist ta
+            JOIN artist a ON a.id = ta.artist_id
+            WHERE ta.role = 'primary'
+            ORDER BY ta.release_track_id, COALESCE(ta.billing_index, 999999), ta.id, a.canonical_name
+          ) ordered
+          GROUP BY ordered.release_track_id
+        ),
+        accepted_spotify_sources AS (
+          SELECT
+            rt.id AS release_track_id,
+            rt.primary_name AS release_track_name,
+            rt.normalized_name AS release_track_normalized_name,
+            COALESCE(pa.release_artist_signature, '') AS release_artist_signature,
+            st.id AS source_track_id,
+            st.external_id AS spotify_track_id,
+            st.source_name_raw AS source_name_raw,
+            st.isrc AS source_isrc,
+            stc.name AS catalog_name,
+            stc.duration_ms AS catalog_duration_ms,
+            stc.album_id AS catalog_album_id,
+            stc.artists_json AS catalog_artists_json,
+            stc.raw_json AS catalog_raw_json,
+            stc.fetched_at AS catalog_fetched_at,
+            stc.last_status AS catalog_last_status,
+            sac.name AS album_name,
+            sac.release_date AS album_release_date,
+            sac.fetched_at AS album_fetched_at,
+            sac.last_status AS album_last_status
+          FROM source_track_map stm
+          JOIN source_track st ON st.id = stm.source_track_id
+          JOIN release_track rt ON rt.id = stm.release_track_id
+          LEFT JOIN primary_artists pa ON pa.release_track_id = rt.id
+          LEFT JOIN spotify_track_catalog stc ON stc.spotify_track_id = st.external_id
+          LEFT JOIN spotify_album_catalog sac ON sac.spotify_album_id = stc.album_id
+          WHERE stm.status = 'accepted'
+            AND st.source_name = 'spotify'
+            AND st.external_id IS NOT NULL
+            AND st.external_id != ''
+        ),
+        duplicate_cases AS (
+          SELECT
+            'duplicate_spotify_track_id' AS case_type,
+            spotify_track_id AS case_key,
+            COUNT(DISTINCT release_track_id) AS release_track_count,
+            COUNT(DISTINCT spotify_track_id) AS spotify_track_count
+          FROM accepted_spotify_sources
+          GROUP BY spotify_track_id
+          HAVING COUNT(DISTINCT release_track_id) > 1
+        ),
+        split_cases AS (
+          SELECT
+            'release_track_source_split' AS case_type,
+            CAST(release_track_id AS TEXT) AS case_key,
+            COUNT(DISTINCT release_track_id) AS release_track_count,
+            COUNT(DISTINCT spotify_track_id) AS spotify_track_count
+          FROM accepted_spotify_sources
+          GROUP BY release_track_id
+          HAVING COUNT(DISTINCT spotify_track_id) > 1
+        ),
+        cases AS (
+          SELECT * FROM duplicate_cases
+          UNION ALL
+          SELECT * FROM split_cases
+        )
+    """
+
+
+def _normalize_evidence_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_list(value: Any) -> list[Any]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _artist_signature_from_json(value: Any) -> str:
+    names: list[str] = []
+    for item in _json_list(value):
+        if isinstance(item, dict):
+            name = _normalize_evidence_text(item.get("name"))
+            if name:
+                names.append(name)
+    return " | ".join(names)
+
+
+def _catalog_isrc(row: sqlite3.Row) -> str:
+    raw_payload = _json_object(row["catalog_raw_json"])
+    external_ids = raw_payload.get("external_ids")
+    raw_isrc = external_ids.get("isrc") if isinstance(external_ids, dict) else None
+    return _normalize_evidence_text(row["source_isrc"] or raw_isrc)
+
+
+def _catalog_metadata_missing(row: sqlite3.Row) -> list[str]:
+    missing: list[str] = []
+    spotify_track_id = str(row["spotify_track_id"] or "")
+    if not row["catalog_fetched_at"] or row["catalog_last_status"] != "ok":
+        missing.append(f"{spotify_track_id}:track_catalog")
+    if not _normalize_evidence_text(row["catalog_name"]):
+        missing.append(f"{spotify_track_id}:track_name")
+    if row["catalog_duration_ms"] is None:
+        missing.append(f"{spotify_track_id}:duration")
+    if not _normalize_evidence_text(row["catalog_album_id"]):
+        missing.append(f"{spotify_track_id}:album_id")
+    if not _artist_signature_from_json(row["catalog_artists_json"]):
+        missing.append(f"{spotify_track_id}:artists")
+    if not _catalog_isrc(row):
+        missing.append(f"{spotify_track_id}:isrc")
+    if row["album_fetched_at"] is None or row["album_last_status"] != "ok":
+        missing.append(f"{spotify_track_id}:album_catalog")
+    if not _normalize_evidence_text(row["album_name"]):
+        missing.append(f"{spotify_track_id}:album_name")
+    if not _normalize_evidence_text(row["album_release_date"]):
+        missing.append(f"{spotify_track_id}:album_release_date")
+    return missing
+
+
+def _track_readiness_from_rows(case_type: str, rows: list[sqlite3.Row]) -> dict[str, Any]:
+    missing_metadata: list[str] = []
+    for row in rows:
+        missing_metadata.extend(_catalog_metadata_missing(row))
+
+    metadata_complete = not missing_metadata
+    catalog_names = {_normalize_evidence_text(row["catalog_name"]) for row in rows if _normalize_evidence_text(row["catalog_name"])}
+    catalog_artists = {_artist_signature_from_json(row["catalog_artists_json"]) for row in rows if _artist_signature_from_json(row["catalog_artists_json"])}
+    catalog_isrcs = {_catalog_isrc(row) for row in rows if _catalog_isrc(row)}
+    catalog_durations = [int(row["catalog_duration_ms"]) for row in rows if row["catalog_duration_ms"] is not None]
+    release_names = {_normalize_evidence_text(row["release_track_normalized_name"] or row["release_track_name"]) for row in rows}
+    release_artist_names = {_normalize_evidence_text(row["release_artist_signature"]) for row in rows if _normalize_evidence_text(row["release_artist_signature"])}
+
+    duration_delta_ms = (max(catalog_durations) - min(catalog_durations)) if len(catalog_durations) > 1 else 0
+    same_catalog_name = len(catalog_names) <= 1
+    same_catalog_artists = len(catalog_artists) <= 1
+    same_catalog_isrc = len(catalog_isrcs) <= 1
+    same_release_name = len(release_names) <= 1
+    same_release_artists = len(release_artist_names) <= 1
+    duration_agrees = duration_delta_ms <= 2_000
+
+    if case_type == "duplicate_spotify_track_id":
+        evidence_agrees = metadata_complete and same_release_name and same_release_artists
+    else:
+        evidence_agrees = (
+            metadata_complete
+            and same_catalog_name
+            and same_catalog_artists
+            and duration_agrees
+            and (same_catalog_isrc or not catalog_isrcs)
+        )
+
+    conflict_reasons: list[str] = []
+    review_reasons: list[str] = []
+    if not same_release_name:
+        conflict_reasons.append("release track names differ")
+    if case_type == "release_track_source_split" and not same_catalog_name:
+        conflict_reasons.append("Spotify catalog track names differ")
+    if case_type == "release_track_source_split" and duration_delta_ms > 30_000:
+        conflict_reasons.append("Spotify catalog durations differ by more than 30 seconds")
+    elif case_type == "release_track_source_split" and not duration_agrees:
+        review_reasons.append("Spotify catalog durations differ by more than 2 seconds")
+    if not same_release_artists:
+        review_reasons.append("local primary artists differ")
+    if case_type == "release_track_source_split" and not same_catalog_artists:
+        review_reasons.append("Spotify catalog artists differ")
+    if case_type == "release_track_source_split" and not same_catalog_isrc:
+        review_reasons.append("Spotify catalog ISRCs differ")
+
+    if not metadata_complete:
+        readiness = "blocked-by-missing-metadata"
+        readiness_reason = "Missing local Spotify catalog metadata prevents evidence comparison."
+    elif conflict_reasons:
+        readiness = "unsafe"
+        readiness_reason = "; ".join(conflict_reasons)
+    elif evidence_agrees:
+        readiness = "safe-candidate"
+        readiness_reason = "Spotify catalog evidence and local release signals agree."
+    else:
+        readiness = "needs-review"
+        readiness_reason = "; ".join(review_reasons) or "Metadata is complete, but evidence is not strong enough for a safe candidate."
+
+    buckets: list[str] = []
+    if metadata_complete:
+        buckets.append("metadata-complete")
+    if evidence_agrees:
+        buckets.append("evidence-agrees")
+    buckets.append(readiness)
+
+    return {
+        "readiness": readiness,
+        "readiness_reason": readiness_reason,
+        "buckets": buckets,
+        "metadata_complete": metadata_complete,
+        "evidence_agrees": evidence_agrees,
+        "missing_metadata": sorted(set(missing_metadata)),
+        "evidence": {
+            "catalog_track_names": sorted(catalog_names),
+            "catalog_artist_signatures": sorted(catalog_artists),
+            "catalog_isrcs": sorted(catalog_isrcs),
+            "duration_delta_ms": duration_delta_ms,
+            "release_track_names": sorted(release_names),
+            "release_artist_signatures": sorted(release_artist_names),
+        },
+    }
+
+
+def _readiness_track_item(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "release_track_id": int(row["release_track_id"]),
+        "release_track_name": str(row["release_track_name"] or ""),
+        "release_artist_signature": str(row["release_artist_signature"] or ""),
+        "source_track_id": int(row["source_track_id"]),
+        "spotify_track_id": str(row["spotify_track_id"] or ""),
+        "source_name_raw": row["source_name_raw"],
+        "source_isrc": row["source_isrc"],
+        "catalog_track_name": row["catalog_name"],
+        "catalog_duration_ms": int(row["catalog_duration_ms"]) if row["catalog_duration_ms"] is not None else None,
+        "catalog_album_id": row["catalog_album_id"],
+        "catalog_last_status": row["catalog_last_status"],
+        "catalog_fetched_at": row["catalog_fetched_at"],
+        "catalog_album_name": row["album_name"],
+        "catalog_album_release_date": row["album_release_date"],
+        "catalog_album_last_status": row["album_last_status"],
+    }
+
+
+def build_track_identity_readiness_report(*, limit: int = 200, offset: int = 0) -> dict[str, Any]:
+    bounded_limit = max(1, min(int(limit), 500))
+    bounded_offset = max(0, int(offset))
+    base_sql = track_identity_readiness_source_ctes()
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        total = int(connection.execute(f"{base_sql} SELECT COUNT(*) FROM cases").fetchone()[0])
+        case_rows = connection.execute(
+            f"""
+            {base_sql}
+            SELECT case_type, case_key, release_track_count, spotify_track_count
+            FROM cases
+            ORDER BY
+              CASE case_type WHEN 'duplicate_spotify_track_id' THEN 0 ELSE 1 END,
+              release_track_count DESC,
+              spotify_track_count DESC,
+              case_key ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (bounded_limit, bounded_offset),
+        ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for case_row in case_rows:
+            if case_row["case_type"] == "duplicate_spotify_track_id":
+                rows = connection.execute(
+                    f"{base_sql} SELECT * FROM accepted_spotify_sources WHERE spotify_track_id = ? ORDER BY release_track_id ASC",
+                    (case_row["case_key"],),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"{base_sql} SELECT * FROM accepted_spotify_sources WHERE release_track_id = ? ORDER BY spotify_track_id ASC",
+                    (int(case_row["case_key"]),),
+                ).fetchall()
+            readiness = _track_readiness_from_rows(str(case_row["case_type"]), rows)
+            items.append(
+                {
+                    "case_type": str(case_row["case_type"]),
+                    "case_key": str(case_row["case_key"]),
+                    "release_track_count": int(case_row["release_track_count"] or 0),
+                    "spotify_track_count": int(case_row["spotify_track_count"] or 0),
+                    **readiness,
+                    "tracks": [_readiness_track_item(row) for row in rows],
+                }
+            )
+
+    bucket_counts = {bucket: 0 for bucket in IDENTITY_READINESS_BUCKETS}
+    for item in items:
+        for bucket in item["buckets"]:
+            bucket_counts[bucket] += 1
+
+    return {
+        "ok": True,
+        "source": {
+            "kind": "sqlite",
+            "uses_spotify_api": False,
+            "mutates_identity": False,
+        },
+        "summary": {
+            "total_groups": total,
+            "returned_groups": len(items),
+            "returned_bucket_counts": bucket_counts,
+            "returned_final_readiness_counts": {
+                bucket: sum(1 for item in items if item["readiness"] == bucket)
+                for bucket in ("blocked-by-missing-metadata", "safe-candidate", "needs-review", "unsafe")
+            },
+        },
+        "pagination": {
+            "limit": bounded_limit,
+            "offset": bounded_offset,
+            "returned": len(items),
+            "has_more": bounded_offset + len(items) < total,
+        },
+        "items": items,
+    }
 
 
 def build_track_identity_audit(limit: int = 5) -> dict[str, Any]:

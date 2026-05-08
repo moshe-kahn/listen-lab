@@ -10,6 +10,7 @@ from typing import Any, Callable
 import httpx
 
 from backend.app.db import sqlite_connection
+from backend.app.track_identity_audit import track_identity_readiness_source_ctes
 
 
 TRACK_BATCH_SIZE = 50
@@ -31,9 +32,16 @@ ALBUM_TRACKLIST_POLICIES = {"all", "priority_only", "relevant_albums", "none"}
 CATALOG_BACKFILL_RUN_MODES = {"metadata_only", "tracklists_relevant", "full_catalog"}
 CATALOG_BACKFILL_REASONS = {"identity_metadata", "manual_priority", "tracklist_completion", "full_backfill"}
 CATALOG_BACKFILL_TARGETS = {"tracks", "albums", "album_tracklists", "all"}
+TRACK_METADATA_PRIORITY_SCOPES = {"identity_and_top_listened", "all"}
+DEFAULT_TRACK_METADATA_PRIORITY_SCOPE = "identity_and_top_listened"
 METADATA_ONLY_QUEUE_REASONS = {"identity_metadata"}
 TRACK_BATCH_FORBIDDEN_WARNING = "Spotify batch track endpoint unavailable/forbidden; using single-track fallback"
 ALBUM_BATCH_FORBIDDEN_WARNING = "Spotify batch album endpoint unavailable/forbidden; using single-album fallback"
+TOP_TRACK_PRIORITY_LIMIT = 500
+TOP_ALBUM_PRIORITY_LIMIT = 100
+TOP_ARTIST_PRIORITY_LIMIT = 100
+RECENT_TRACK_REPEAT_DAYS = 90
+RECENT_TRACK_REPEAT_MIN_PLAYS = 3
 
 
 class _PartialStop(Exception):
@@ -219,20 +227,103 @@ def _known_track_ids(*, limit: int, offset: int) -> tuple[list[str], bool]:
 
 
 def _known_track_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[str], bool]:
-    bounded_limit = max(1, min(int(limit), MAX_LIMIT))
-    bounded_offset = max(0, int(offset))
+    return _known_track_ids_missing_metadata_for_scope(limit=limit, offset=offset, priority_scope="all")
 
-    with sqlite_connection() as connection:
-        rows = connection.execute(
-            """
+
+def _track_metadata_priority_ctes() -> str:
+    return """
             WITH fact_track_listens AS (
               SELECT
                 spotify_track_id,
-                count(*) AS listen_count
+                count(*) AS listen_count,
+                max(canonical_ended_at) AS last_played_at,
+                sum(
+                  CASE
+                    WHEN julianday(canonical_ended_at) >= (
+                      SELECT julianday(max(canonical_ended_at)) - ?
+                      FROM fact_play_event
+                      WHERE canonical_ended_at IS NOT NULL
+                    )
+                    THEN 1 ELSE 0
+                  END
+                ) AS recent_listen_count
               FROM fact_play_event
               WHERE spotify_track_id IS NOT NULL
                 AND spotify_track_id != ''
               GROUP BY spotify_track_id
+            ),
+            ranked_fact_tracks AS (
+              SELECT
+                spotify_track_id,
+                listen_count,
+                recent_listen_count,
+                row_number() OVER (
+                  ORDER BY listen_count DESC, last_played_at DESC, spotify_track_id ASC
+                ) AS track_rank
+              FROM fact_track_listens
+            ),
+            fact_album_listens AS (
+              SELECT
+                spotify_album_id,
+                count(*) AS album_listen_count,
+                max(canonical_ended_at) AS last_played_at
+              FROM fact_play_event
+              WHERE spotify_album_id IS NOT NULL
+                AND spotify_album_id != ''
+              GROUP BY spotify_album_id
+            ),
+            top_album_ids AS (
+              SELECT spotify_album_id
+              FROM (
+                SELECT
+                  spotify_album_id,
+                  row_number() OVER (
+                    ORDER BY album_listen_count DESC, last_played_at DESC, spotify_album_id ASC
+                  ) AS album_rank
+                FROM fact_album_listens
+              )
+              WHERE album_rank <= ?
+            ),
+            fact_artist_listens AS (
+              SELECT
+                lower(trim(COALESCE(artist_name_canonical, ''))) AS artist_key,
+                count(*) AS artist_listen_count,
+                max(canonical_ended_at) AS last_played_at
+              FROM fact_play_event
+              WHERE trim(COALESCE(artist_name_canonical, '')) != ''
+              GROUP BY artist_key
+            ),
+            top_artist_keys AS (
+              SELECT artist_key
+              FROM (
+                SELECT
+                  artist_key,
+                  row_number() OVER (
+                    ORDER BY artist_listen_count DESC, last_played_at DESC, artist_key ASC
+                  ) AS artist_rank
+                FROM fact_artist_listens
+              )
+              WHERE artist_rank <= ?
+            ),
+            top_list_track_ids AS (
+              SELECT spotify_track_id
+              FROM ranked_fact_tracks
+              WHERE track_rank <= ?
+                 OR recent_listen_count >= ?
+              UNION
+              SELECT DISTINCT fpe.spotify_track_id
+              FROM fact_play_event fpe
+              JOIN top_album_ids top_albums
+                ON top_albums.spotify_album_id = fpe.spotify_album_id
+              WHERE fpe.spotify_track_id IS NOT NULL
+                AND fpe.spotify_track_id != ''
+              UNION
+              SELECT DISTINCT fpe.spotify_track_id
+              FROM fact_play_event fpe
+              JOIN top_artist_keys top_artists
+                ON top_artists.artist_key = lower(trim(COALESCE(fpe.artist_name_canonical, '')))
+              WHERE fpe.spotify_track_id IS NOT NULL
+                AND fpe.spotify_track_id != ''
             ),
             fact_track_artist_listens AS (
               SELECT
@@ -248,14 +339,7 @@ def _known_track_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[
                   AND trim(COALESCE(artist_name_canonical, '')) != ''
                 GROUP BY spotify_track_id, artist_key
               ) track_stats
-              JOIN (
-                SELECT
-                  lower(trim(COALESCE(artist_name_canonical, ''))) AS artist_key,
-                  count(*) AS artist_listen_count
-                FROM fact_play_event
-                WHERE trim(COALESCE(artist_name_canonical, '')) != ''
-                GROUP BY artist_key
-              ) artist_stats
+              JOIN fact_artist_listens artist_stats
                 ON artist_stats.artist_key = track_stats.artist_key
               GROUP BY track_stats.spotify_track_id
             ),
@@ -268,17 +352,21 @@ def _known_track_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[
                 AND spotify_track_id != ''
               GROUP BY spotify_track_id
             ),
-            mapped_release_track_candidates AS (
+            accepted_source_tracks AS (
               SELECT
+                st.id AS source_track_id,
                 st.external_id AS spotify_track_id,
                 stm.release_track_id,
-                max(COALESCE(ftl.listen_count, 0), COALESCE(rtl.listen_count, 0)) AS listen_count,
+                COALESCE(NULLIF(rt.primary_name, ''), NULLIF(st.source_name_raw, ''), st.external_id) AS track_name,
+                max(COALESCE(ftl.listen_count, 0), COALESCE(rtl.listen_count, 0)) AS track_listen_count,
                 COALESCE(ftal.artist_listen_count, 0) AS artist_listen_count,
                 st.id AS source_track_row_id,
                 stm.id AS source_track_map_row_id
               FROM source_track st
               JOIN source_track_map stm
                 ON stm.source_track_id = st.id
+              LEFT JOIN release_track rt
+                ON rt.id = stm.release_track_id
               LEFT JOIN fact_track_listens ftl
                 ON ftl.spotify_track_id = st.external_id
               LEFT JOIN fact_track_artist_listens ftal
@@ -290,51 +378,17 @@ def _known_track_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[
                 AND st.external_id != ''
                 AND stm.status = 'accepted'
             ),
-            mapped_release_track_ids AS (
-              SELECT
-                spotify_track_id,
-                release_track_id,
-                listen_count,
-                artist_listen_count
-              FROM (
-                SELECT
-                  spotify_track_id,
-                  release_track_id,
-                  listen_count,
-                  artist_listen_count,
-                  row_number() OVER (
-                    PARTITION BY release_track_id
-                    ORDER BY
-                      listen_count DESC,
-                      spotify_track_id ASC,
-                      source_track_map_row_id ASC,
-                      source_track_row_id ASC
-                  ) AS rn
-                FROM mapped_release_track_candidates
-              )
-              WHERE rn = 1
-            ),
-            duplicate_release_track_ids AS (
-              SELECT release_track_id
-              FROM (
-                SELECT
-                  release_track_id,
-                  count(*) OVER (PARTITION BY spotify_track_id) AS duplicate_count
-                FROM mapped_release_track_ids
-              )
-              WHERE duplicate_count > 1
+            duplicate_spotify_track_ids AS (
+              SELECT spotify_track_id
+              FROM accepted_source_tracks
+              GROUP BY spotify_track_id
+              HAVING count(DISTINCT release_track_id) > 1
             ),
             split_release_track_ids AS (
-              SELECT stm.release_track_id
-              FROM source_track_map stm
-              JOIN source_track st
-                ON st.id = stm.source_track_id
-              WHERE stm.status = 'accepted'
-                AND st.source_name = 'spotify'
-                AND st.external_id IS NOT NULL
-                AND st.external_id != ''
-              GROUP BY stm.release_track_id
-              HAVING count(DISTINCT st.external_id) > 1
+              SELECT release_track_id
+              FROM accepted_source_tracks
+              GROUP BY release_track_id
+              HAVING count(DISTINCT spotify_track_id) > 1
             ),
             suggested_analysis_release_track_ids AS (
               SELECT atm.release_track_id
@@ -349,130 +403,431 @@ def _known_track_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[
                 ON suggested_groups.analysis_track_id = atm.analysis_track_id
               WHERE atm.status = 'suggested'
             ),
-            unmapped_source_track_ids AS (
-              SELECT
-                st.external_id AS spotify_track_id,
-                max(COALESCE(ftl.listen_count, 0), COALESCE(rtl.listen_count, 0)) AS track_listen_count,
-                COALESCE(ftal.artist_listen_count, 0) AS artist_listen_count,
-                0 AS needs_identity_review,
-                0 AS mapped_accepted
-              FROM source_track st
-              LEFT JOIN source_track_map stm
-                ON stm.source_track_id = st.id
-              LEFT JOIN fact_track_listens ftl
-                ON ftl.spotify_track_id = st.external_id
-              LEFT JOIN fact_track_artist_listens ftal
-                ON ftal.spotify_track_id = st.external_id
-              LEFT JOIN raw_track_listens rtl
-                ON rtl.spotify_track_id = st.external_id
-              WHERE st.source_name = 'spotify'
-                AND st.external_id IS NOT NULL
-                AND st.external_id != ''
-                AND stm.id IS NULL
+            latest_fact_track_text AS (
+              SELECT spotify_track_id, track_name_canonical, artist_name_canonical
+              FROM (
+                SELECT
+                  spotify_track_id,
+                  track_name_canonical,
+                  artist_name_canonical,
+                  row_number() OVER (
+                    PARTITION BY spotify_track_id
+                    ORDER BY canonical_ended_at DESC, id DESC
+                  ) AS rn
+                FROM fact_play_event
+                WHERE spotify_track_id IS NOT NULL
+                  AND spotify_track_id != ''
+              )
+              WHERE rn = 1
             ),
-            raw_track_ids AS (
-              SELECT spotify_track_id AS spotify_track_id
-              FROM raw_spotify_recent
-              WHERE spotify_track_id IS NOT NULL AND spotify_track_id != ''
-              UNION
-              SELECT spotify_track_id AS spotify_track_id
-              FROM raw_spotify_history
-              WHERE spotify_track_id IS NOT NULL AND spotify_track_id != ''
-            ),
-            unmapped_raw_track_ids AS (
+            missing_track_priority AS (
               SELECT
-                raw.spotify_track_id,
-                max(COALESCE(ftl.listen_count, 0), COALESCE(rtl.listen_count, 0)) AS track_listen_count,
-                COALESCE(ftal.artist_listen_count, 0) AS artist_listen_count,
-                0 AS needs_identity_review,
-                0 AS mapped_accepted
-              FROM raw_track_ids raw
-              LEFT JOIN source_track st
-                ON st.source_name = 'spotify'
-               AND st.external_id = raw.spotify_track_id
-              LEFT JOIN source_track_map stm
-                ON stm.source_track_id = st.id
-              LEFT JOIN fact_track_listens ftl
-                ON ftl.spotify_track_id = raw.spotify_track_id
-              LEFT JOIN fact_track_artist_listens ftal
-                ON ftal.spotify_track_id = raw.spotify_track_id
-              LEFT JOIN raw_track_listens rtl
-                ON rtl.spotify_track_id = raw.spotify_track_id
-              WHERE stm.id IS NULL
-            ),
-            candidate_ids AS (
-              SELECT
-                mrt.spotify_track_id,
-                mrt.listen_count AS track_listen_count,
-                mrt.artist_listen_count,
-                CASE
-                  WHEN dup.release_track_id IS NOT NULL THEN 1
-                  WHEN split.release_track_id IS NOT NULL THEN 1
-                  WHEN suggested.release_track_id IS NOT NULL THEN 1
-                  ELSE 0
-                END AS needs_identity_review,
-                1 AS mapped_accepted
-              FROM mapped_release_track_ids mrt
-              LEFT JOIN duplicate_release_track_ids dup
-                ON dup.release_track_id = mrt.release_track_id
-              LEFT JOIN split_release_track_ids split
-                ON split.release_track_id = mrt.release_track_id
-              LEFT JOIN suggested_analysis_release_track_ids suggested
-                ON suggested.release_track_id = mrt.release_track_id
-              UNION
-              SELECT
+                source_track_id,
                 spotify_track_id,
+                release_track_id,
+                track_name,
+                artist_name,
                 track_listen_count,
                 artist_listen_count,
-                needs_identity_review,
-                mapped_accepted
-              FROM unmapped_source_track_ids
-              UNION
-              SELECT
-                spotify_track_id,
-                track_listen_count,
-                artist_listen_count,
-                needs_identity_review,
-                mapped_accepted
-              FROM unmapped_raw_track_ids
-            ),
-            known_ids AS (
-              SELECT
-                spotify_track_id,
-                max(track_listen_count) AS track_listen_count,
-                max(artist_listen_count) AS artist_listen_count,
-                max(needs_identity_review) AS needs_identity_review,
-                max(mapped_accepted) AS mapped_accepted
-              FROM candidate_ids
-              GROUP BY spotify_track_id
+                identity_relevant,
+                top_list_relevant
+              FROM (
+                SELECT
+                  ast.source_track_id,
+                  ast.spotify_track_id,
+                  ast.release_track_id,
+                  COALESCE(NULLIF(ast.track_name, ''), NULLIF(lft.track_name_canonical, ''), ast.spotify_track_id) AS track_name,
+                  lft.artist_name_canonical AS artist_name,
+                  ast.track_listen_count,
+                  ast.artist_listen_count,
+                  CASE
+                    WHEN dup.spotify_track_id IS NOT NULL THEN 1
+                    WHEN split.release_track_id IS NOT NULL THEN 1
+                    WHEN suggested.release_track_id IS NOT NULL THEN 1
+                    ELSE 0
+                  END AS identity_relevant,
+                  CASE
+                    WHEN top_list.spotify_track_id IS NOT NULL THEN 1
+                    ELSE 0
+                  END AS top_list_relevant,
+                  row_number() OVER (
+                    PARTITION BY ast.spotify_track_id
+                    ORDER BY
+                      CASE
+                        WHEN dup.spotify_track_id IS NOT NULL THEN 1
+                        WHEN split.release_track_id IS NOT NULL THEN 1
+                        WHEN suggested.release_track_id IS NOT NULL THEN 1
+                        ELSE 0
+                      END DESC,
+                      CASE WHEN top_list.spotify_track_id IS NOT NULL THEN 1 ELSE 0 END DESC,
+                      ast.track_listen_count DESC,
+                      ast.artist_listen_count DESC,
+                      ast.release_track_id ASC,
+                      ast.source_track_map_row_id ASC,
+                      ast.source_track_row_id ASC
+                  ) AS rn
+                FROM accepted_source_tracks ast
+                LEFT JOIN duplicate_spotify_track_ids dup
+                  ON dup.spotify_track_id = ast.spotify_track_id
+                LEFT JOIN split_release_track_ids split
+                  ON split.release_track_id = ast.release_track_id
+                LEFT JOIN suggested_analysis_release_track_ids suggested
+                  ON suggested.release_track_id = ast.release_track_id
+                LEFT JOIN top_list_track_ids top_list
+                  ON top_list.spotify_track_id = ast.spotify_track_id
+                LEFT JOIN latest_fact_track_text lft
+                  ON lft.spotify_track_id = ast.spotify_track_id
+                LEFT JOIN spotify_track_catalog stc
+                  ON stc.spotify_track_id = ast.spotify_track_id
+                WHERE stc.spotify_track_id IS NULL
+                   OR stc.duration_ms IS NULL
+                   OR stc.disc_number IS NULL
+                   OR stc.track_number IS NULL
+                   OR stc.album_id IS NULL
+                   OR json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') IS NULL
+                   OR json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') = ''
+                   OR lower(COALESCE(stc.last_status, '')) = 'error'
+              )
+              WHERE rn = 1
             )
-            SELECT known_ids.spotify_track_id
-            FROM known_ids
-            LEFT JOIN spotify_track_catalog stc
-              ON stc.spotify_track_id = known_ids.spotify_track_id
-            WHERE stc.spotify_track_id IS NULL
-               OR stc.duration_ms IS NULL
-               OR stc.disc_number IS NULL
-               OR stc.track_number IS NULL
-               OR stc.album_id IS NULL
-               OR json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') IS NULL
-               OR json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') = ''
-               OR lower(COALESCE(stc.last_status, '')) = 'error'
+            """
+
+
+def _track_metadata_priority_params() -> tuple[int, int, int, int, int]:
+    return (
+        RECENT_TRACK_REPEAT_DAYS,
+        TOP_ALBUM_PRIORITY_LIMIT,
+        TOP_ARTIST_PRIORITY_LIMIT,
+        TOP_TRACK_PRIORITY_LIMIT,
+        RECENT_TRACK_REPEAT_MIN_PLAYS,
+    )
+
+
+def _known_track_ids_missing_metadata_for_scope(
+    *,
+    limit: int,
+    offset: int,
+    priority_scope: str = "all",
+) -> tuple[list[str], bool]:
+    bounded_limit = max(1, min(int(limit), MAX_LIMIT))
+    bounded_offset = max(0, int(offset))
+    normalized_scope = str(priority_scope or "all").strip().lower()
+    if normalized_scope not in TRACK_METADATA_PRIORITY_SCOPES:
+        normalized_scope = "all"
+    priority_filter = ""
+    if normalized_scope == "identity_and_top_listened":
+        priority_filter = "WHERE identity_relevant = 1 OR top_list_relevant = 1"
+
+    with sqlite_connection() as connection:
+        rows = connection.execute(
+            f"""
+            {_track_metadata_priority_ctes()}
+            SELECT spotify_track_id
+            FROM missing_track_priority
+            {priority_filter}
             ORDER BY
-              known_ids.needs_identity_review DESC,
-              known_ids.track_listen_count DESC,
-              known_ids.artist_listen_count DESC,
-              known_ids.mapped_accepted DESC,
-              known_ids.spotify_track_id ASC
+              identity_relevant DESC,
+              top_list_relevant DESC,
+              track_listen_count DESC,
+              artist_listen_count DESC,
+              spotify_track_id ASC
             LIMIT ?
             OFFSET ?
             """,
-            (bounded_limit + 1, bounded_offset),
+            (*_track_metadata_priority_params(), bounded_limit + 1, bounded_offset),
         ).fetchall()
 
     ids = [str(row[0]) for row in rows if row and row[0]]
     has_more = len(ids) > bounded_limit
     return ids[:bounded_limit], has_more
+
+
+def get_identity_readiness_track_metadata_priority_comparison(*, sample_limit: int = 5) -> dict[str, Any]:
+    bounded_sample_limit = max(0, min(int(sample_limit), 25))
+    readiness_sql = f"""
+        {track_identity_readiness_source_ctes()},
+        duplicate_case_sources AS (
+          SELECT
+            cases.case_type,
+            cases.case_key,
+            sources.source_track_id,
+            sources.spotify_track_id,
+            sources.release_track_id,
+            sources.release_track_name,
+            sources.source_name_raw,
+            CASE
+              WHEN sources.catalog_fetched_at IS NULL
+                OR lower(COALESCE(sources.catalog_last_status, '')) = 'error'
+                OR sources.catalog_name IS NULL
+                OR trim(COALESCE(sources.catalog_name, '')) = ''
+                OR sources.catalog_duration_ms IS NULL
+                OR sources.catalog_album_id IS NULL
+                OR trim(COALESCE(sources.catalog_album_id, '')) = ''
+                OR sources.catalog_artists_json IS NULL
+                OR trim(COALESCE(sources.catalog_artists_json, '')) IN ('', '[]')
+                OR (
+                  (sources.source_isrc IS NULL OR trim(COALESCE(sources.source_isrc, '')) = '')
+                  AND (
+                    json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') IS NULL
+                    OR json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') = ''
+                  )
+                )
+                OR sources.catalog_album_id IS NULL
+                OR sources.catalog_album_id = ''
+              THEN 1 ELSE 0
+            END AS track_metadata_missing,
+            CASE
+              WHEN sources.album_fetched_at IS NULL
+                OR lower(COALESCE(sources.album_last_status, '')) = 'error'
+                OR sources.album_name IS NULL
+                OR trim(COALESCE(sources.album_name, '')) = ''
+                OR sources.album_release_date IS NULL
+                OR trim(COALESCE(sources.album_release_date, '')) = ''
+              THEN 1 ELSE 0
+            END AS album_metadata_missing
+          FROM cases
+          JOIN accepted_spotify_sources sources
+            ON sources.spotify_track_id = cases.case_key
+          WHERE cases.case_type = 'duplicate_spotify_track_id'
+        ),
+        split_case_sources AS (
+          SELECT
+            cases.case_type,
+            cases.case_key,
+            sources.source_track_id,
+            sources.spotify_track_id,
+            sources.release_track_id,
+            sources.release_track_name,
+            sources.source_name_raw,
+            CASE
+              WHEN sources.catalog_fetched_at IS NULL
+                OR lower(COALESCE(sources.catalog_last_status, '')) = 'error'
+                OR sources.catalog_name IS NULL
+                OR trim(COALESCE(sources.catalog_name, '')) = ''
+                OR sources.catalog_duration_ms IS NULL
+                OR sources.catalog_album_id IS NULL
+                OR trim(COALESCE(sources.catalog_album_id, '')) = ''
+                OR sources.catalog_artists_json IS NULL
+                OR trim(COALESCE(sources.catalog_artists_json, '')) IN ('', '[]')
+                OR (
+                  (sources.source_isrc IS NULL OR trim(COALESCE(sources.source_isrc, '')) = '')
+                  AND (
+                    json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') IS NULL
+                    OR json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') = ''
+                  )
+                )
+                OR sources.catalog_album_id IS NULL
+                OR sources.catalog_album_id = ''
+              THEN 1 ELSE 0
+            END AS track_metadata_missing,
+            CASE
+              WHEN sources.album_fetched_at IS NULL
+                OR lower(COALESCE(sources.album_last_status, '')) = 'error'
+                OR sources.album_name IS NULL
+                OR trim(COALESCE(sources.album_name, '')) = ''
+                OR sources.album_release_date IS NULL
+                OR trim(COALESCE(sources.album_release_date, '')) = ''
+              THEN 1 ELSE 0
+            END AS album_metadata_missing
+          FROM cases
+          JOIN accepted_spotify_sources sources
+            ON sources.release_track_id = CAST(cases.case_key AS INTEGER)
+          WHERE cases.case_type = 'release_track_source_split'
+        ),
+        case_sources AS (
+          SELECT * FROM duplicate_case_sources
+          UNION ALL
+          SELECT * FROM split_case_sources
+        ),
+        blocked_cases AS (
+          SELECT case_type, case_key
+          FROM case_sources
+          GROUP BY case_type, case_key
+          HAVING max(track_metadata_missing) = 1
+              OR max(album_metadata_missing) = 1
+        )
+        SELECT DISTINCT
+          cs.source_track_id,
+          cs.spotify_track_id,
+          cs.release_track_id,
+          cs.release_track_name,
+          cs.source_name_raw,
+          cs.track_metadata_missing,
+          cs.album_metadata_missing
+        FROM case_sources cs
+        JOIN blocked_cases bc
+          ON bc.case_type = cs.case_type
+         AND bc.case_key = cs.case_key
+        ORDER BY cs.spotify_track_id ASC, cs.release_track_id ASC, cs.source_track_id ASC
+    """
+    blocked_groups_sql = f"""
+        {track_identity_readiness_source_ctes()},
+        duplicate_case_sources AS (
+          SELECT
+            cases.case_type,
+            cases.case_key,
+            CASE
+              WHEN sources.catalog_fetched_at IS NULL
+                OR lower(COALESCE(sources.catalog_last_status, '')) = 'error'
+                OR sources.catalog_name IS NULL
+                OR trim(COALESCE(sources.catalog_name, '')) = ''
+                OR sources.catalog_duration_ms IS NULL
+                OR sources.catalog_album_id IS NULL
+                OR trim(COALESCE(sources.catalog_album_id, '')) = ''
+                OR sources.catalog_artists_json IS NULL
+                OR trim(COALESCE(sources.catalog_artists_json, '')) IN ('', '[]')
+                OR (
+                  (sources.source_isrc IS NULL OR trim(COALESCE(sources.source_isrc, '')) = '')
+                  AND (
+                    json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') IS NULL
+                    OR json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') = ''
+                  )
+                )
+              THEN 1 ELSE 0
+            END AS track_metadata_missing,
+            CASE
+              WHEN sources.album_fetched_at IS NULL
+                OR lower(COALESCE(sources.album_last_status, '')) = 'error'
+                OR sources.album_name IS NULL
+                OR trim(COALESCE(sources.album_name, '')) = ''
+                OR sources.album_release_date IS NULL
+                OR trim(COALESCE(sources.album_release_date, '')) = ''
+              THEN 1 ELSE 0
+            END AS album_metadata_missing
+          FROM cases
+          JOIN accepted_spotify_sources sources
+            ON sources.spotify_track_id = cases.case_key
+          WHERE cases.case_type = 'duplicate_spotify_track_id'
+        ),
+        split_case_sources AS (
+          SELECT
+            cases.case_type,
+            cases.case_key,
+            CASE
+              WHEN sources.catalog_fetched_at IS NULL
+                OR lower(COALESCE(sources.catalog_last_status, '')) = 'error'
+                OR sources.catalog_name IS NULL
+                OR trim(COALESCE(sources.catalog_name, '')) = ''
+                OR sources.catalog_duration_ms IS NULL
+                OR sources.catalog_album_id IS NULL
+                OR trim(COALESCE(sources.catalog_album_id, '')) = ''
+                OR sources.catalog_artists_json IS NULL
+                OR trim(COALESCE(sources.catalog_artists_json, '')) IN ('', '[]')
+                OR (
+                  (sources.source_isrc IS NULL OR trim(COALESCE(sources.source_isrc, '')) = '')
+                  AND (
+                    json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') IS NULL
+                    OR json_extract(COALESCE(sources.catalog_raw_json, '{{}}'), '$.external_ids.isrc') = ''
+                  )
+                )
+              THEN 1 ELSE 0
+            END AS track_metadata_missing,
+            CASE
+              WHEN sources.album_fetched_at IS NULL
+                OR lower(COALESCE(sources.album_last_status, '')) = 'error'
+                OR sources.album_name IS NULL
+                OR trim(COALESCE(sources.album_name, '')) = ''
+                OR sources.album_release_date IS NULL
+                OR trim(COALESCE(sources.album_release_date, '')) = ''
+              THEN 1 ELSE 0
+            END AS album_metadata_missing
+          FROM cases
+          JOIN accepted_spotify_sources sources
+            ON sources.release_track_id = CAST(cases.case_key AS INTEGER)
+          WHERE cases.case_type = 'release_track_source_split'
+        ),
+        case_sources AS (
+          SELECT * FROM duplicate_case_sources
+          UNION ALL
+          SELECT * FROM split_case_sources
+        )
+        SELECT count(*)
+        FROM (
+          SELECT case_type, case_key
+          FROM case_sources
+          GROUP BY case_type, case_key
+          HAVING max(track_metadata_missing) = 1
+              OR max(album_metadata_missing) = 1
+        )
+    """
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        readiness_rows = connection.execute(readiness_sql).fetchall()
+        blocked_group_count = int(connection.execute(blocked_groups_sql).fetchone()[0] or 0)
+        priority_rows = connection.execute(
+            f"""
+            {_track_metadata_priority_ctes()}
+            SELECT spotify_track_id, identity_relevant, top_list_relevant
+            FROM missing_track_priority
+            """,
+            _track_metadata_priority_params(),
+        ).fetchall()
+
+    priority_by_track_id = {
+        str(row["spotify_track_id"]): {
+            "identity_relevant": bool(row["identity_relevant"]),
+            "top_list_relevant": bool(row["top_list_relevant"]),
+        }
+        for row in priority_rows
+        if row["spotify_track_id"]
+    }
+    blocker_by_track_id: dict[str, dict[str, Any]] = {}
+    for row in readiness_rows:
+        spotify_track_id = str(row["spotify_track_id"] or "")
+        if not spotify_track_id:
+            continue
+        item = blocker_by_track_id.setdefault(
+            spotify_track_id,
+            {
+                "spotify_track_id": spotify_track_id,
+                "source_track_id": int(row["source_track_id"]),
+                "release_track_id": int(row["release_track_id"]),
+                "release_track_name": str(row["release_track_name"] or ""),
+                "source_name_raw": row["source_name_raw"],
+                "track_metadata_missing": False,
+                "album_metadata_missing": False,
+            },
+        )
+        item["track_metadata_missing"] = bool(item["track_metadata_missing"] or row["track_metadata_missing"])
+        item["album_metadata_missing"] = bool(item["album_metadata_missing"] or row["album_metadata_missing"])
+
+    blockers = list(blocker_by_track_id.values())
+    track_metadata_blockers = [item for item in blockers if item["track_metadata_missing"]]
+    included = [
+        item
+        for item in track_metadata_blockers
+        if priority_by_track_id.get(item["spotify_track_id"], {}).get("identity_relevant")
+        or priority_by_track_id.get(item["spotify_track_id"], {}).get("top_list_relevant")
+    ]
+    not_included = [item for item in track_metadata_blockers if item not in included]
+
+    def _sample(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        sampled: list[dict[str, Any]] = []
+        for item in sorted(items, key=lambda value: value["spotify_track_id"])[:bounded_sample_limit]:
+            priority = priority_by_track_id.get(item["spotify_track_id"], {})
+            sampled.append(
+                {
+                    **item,
+                    "identity_relevant": bool(priority.get("identity_relevant")),
+                    "top_list_relevant": bool(priority.get("top_list_relevant")),
+                }
+            )
+        return sampled
+
+    return {
+        "priority_scope": DEFAULT_TRACK_METADATA_PRIORITY_SCOPE,
+        "blocked_groups": blocked_group_count,
+        "distinct_spotify_source_tracks_needed": len(blockers),
+        "distinct_spotify_source_tracks_missing_track_metadata": len(track_metadata_blockers),
+        "included_by_priority_scope": len(included),
+        "not_included_by_priority_scope": len(not_included),
+        "album_metadata_only_blockers": len(
+            [item for item in blockers if item["album_metadata_missing"] and not item["track_metadata_missing"]]
+        ),
+        "samples": {
+            "not_included_by_priority_scope": _sample(not_included),
+            "included_by_priority_scope": _sample(included),
+        },
+    }
 
 
 def _known_source_album_ids(*, limit: int, offset: int) -> tuple[list[str], bool]:
@@ -581,6 +936,101 @@ def _known_album_ids_missing_metadata(*, limit: int, offset: int) -> tuple[list[
     ids = [str(row[0]) for row in rows if row and row[0]]
     has_more = len(ids) > bounded_limit
     return ids[:bounded_limit], has_more
+
+
+def get_spotify_track_metadata_priority_debug(*, sample_limit: int = 5) -> dict[str, Any]:
+    bounded_sample_limit = max(0, min(int(sample_limit), 25))
+    readiness_comparison = get_identity_readiness_track_metadata_priority_comparison(
+        sample_limit=bounded_sample_limit
+    )
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        counts_row = connection.execute(
+            f"""
+            {_track_metadata_priority_ctes()}
+            SELECT
+              count(*) AS total_missing_accepted_source_track_metadata,
+              sum(CASE WHEN identity_relevant = 1 THEN 1 ELSE 0 END) AS missing_identity_ambiguous_track_metadata,
+              sum(CASE WHEN top_list_relevant = 1 THEN 1 ELSE 0 END) AS missing_top_track_metadata,
+              sum(CASE WHEN identity_relevant = 1 OR top_list_relevant = 1 THEN 1 ELSE 0 END) AS missing_priority_track_metadata,
+              sum(CASE WHEN identity_relevant = 1 AND top_list_relevant = 1 THEN 1 ELSE 0 END) AS identity_top_overlap,
+              sum(CASE WHEN identity_relevant = 0 AND top_list_relevant = 0 THEN 1 ELSE 0 END) AS missing_deferred_track_metadata
+            FROM missing_track_priority
+            """,
+            _track_metadata_priority_params(),
+        ).fetchone()
+
+        def _sample(where_sql: str) -> list[dict[str, Any]]:
+            if bounded_sample_limit <= 0:
+                return []
+            rows = connection.execute(
+                f"""
+                {_track_metadata_priority_ctes()}
+                SELECT
+                  source_track_id,
+                  spotify_track_id,
+                  track_name,
+                  artist_name,
+                  identity_relevant,
+                  top_list_relevant,
+                  track_listen_count,
+                  artist_listen_count
+                FROM missing_track_priority
+                WHERE {where_sql}
+                ORDER BY
+                  identity_relevant DESC,
+                  top_list_relevant DESC,
+                  track_listen_count DESC,
+                  artist_listen_count DESC,
+                  spotify_track_id ASC
+                LIMIT ?
+                """,
+                (*_track_metadata_priority_params(), bounded_sample_limit),
+            ).fetchall()
+            return [
+                {
+                    "source_track_id": int(row["source_track_id"]),
+                    "spotify_track_id": row["spotify_track_id"],
+                    "track_name": row["track_name"],
+                    "artist_name": row["artist_name"],
+                    "identity_relevant": bool(row["identity_relevant"]),
+                    "top_list_relevant": bool(row["top_list_relevant"]),
+                    "deferred_backlog": not bool(row["identity_relevant"] or row["top_list_relevant"]),
+                    "track_listen_count": int(row["track_listen_count"] or 0),
+                    "artist_listen_count": int(row["artist_listen_count"] or 0),
+                }
+                for row in rows
+            ]
+
+        counts = dict(counts_row or {})
+        samples = {
+            "identity_ambiguous": _sample("identity_relevant = 1"),
+            "top_list": _sample("top_list_relevant = 1"),
+            "deferred": _sample("identity_relevant = 0 AND top_list_relevant = 0"),
+        }
+
+    return {
+        "priority_scope": DEFAULT_TRACK_METADATA_PRIORITY_SCOPE,
+        "top_thresholds": {
+            "top_track_limit": TOP_TRACK_PRIORITY_LIMIT,
+            "top_album_limit": TOP_ALBUM_PRIORITY_LIMIT,
+            "top_artist_limit": TOP_ARTIST_PRIORITY_LIMIT,
+            "recent_track_repeat_days": RECENT_TRACK_REPEAT_DAYS,
+            "recent_track_repeat_min_plays": RECENT_TRACK_REPEAT_MIN_PLAYS,
+        },
+        "counts": {
+            key: int(counts.get(key) or 0)
+            for key in (
+                "total_missing_accepted_source_track_metadata",
+                "missing_priority_track_metadata",
+                "missing_identity_ambiguous_track_metadata",
+                "missing_top_track_metadata",
+                "identity_top_overlap",
+                "missing_deferred_track_metadata",
+            )
+        },
+        "samples": samples,
+        "identity_readiness_blockers": readiness_comparison,
+    }
 
 
 def _representative_album_ids(album_ids: set[str]) -> list[str]:
@@ -3316,6 +3766,7 @@ def get_spotify_catalog_backfill_coverage() -> dict[str, Any]:
                 """
             ).fetchone()[0]
         )
+        track_metadata_priority = get_spotify_track_metadata_priority_debug(sample_limit=5)
         missing_source_album_metadata = int(
             connection.execute(
                 """
@@ -3549,6 +4000,11 @@ def get_spotify_catalog_backfill_coverage() -> dict[str, Any]:
         "recent_errors_count": recent_errors_count,
         "identity_critical": {
             "missing_source_track_metadata": missing_source_track_metadata,
+            "missing_priority_track_metadata": track_metadata_priority["counts"]["missing_priority_track_metadata"],
+            "missing_identity_ambiguous_track_metadata": track_metadata_priority["counts"][
+                "missing_identity_ambiguous_track_metadata"
+            ],
+            "missing_top_track_metadata": track_metadata_priority["counts"]["missing_top_track_metadata"],
             "missing_source_album_metadata": missing_source_album_metadata,
             "missing_track_isrc": missing_track_isrc,
             "missing_track_duration_ms": missing_track_duration_ms,
@@ -3556,10 +4012,12 @@ def get_spotify_catalog_backfill_coverage() -> dict[str, Any]:
             "missing_album_external_ids": missing_album_external_ids,
         },
         "catalog_expansion": {
+            "missing_deferred_track_metadata": track_metadata_priority["counts"]["missing_deferred_track_metadata"],
             "missing_album_tracklists": missing_album_tracklists,
             "relevant_album_tracklist_backlog": relevant_album_tracklist_backlog,
             "unlistened_tracklist_rows": unlistened_tracklist_rows,
         },
+        "track_metadata_priority": track_metadata_priority,
     }
 
 
@@ -3782,6 +4240,83 @@ def _upsert_album_catalog_error(*, spotify_album_id: str, market: str, fetched_a
         )
 
 
+def _source_track_id_for_spotify_track(*, spotify_track_id: str) -> int | None:
+    with sqlite_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT st.id
+            FROM source_track st
+            JOIN source_track_map stm
+              ON stm.source_track_id = st.id
+            WHERE st.source_name = 'spotify'
+              AND st.external_id = ?
+              AND stm.status = 'accepted'
+            ORDER BY st.id ASC
+            LIMIT 1
+            """,
+            (spotify_track_id,),
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def run_spotify_track_metadata_canary(
+    *,
+    access_token: str,
+    market: str = "US",
+    fetcher: (
+        Callable[[str, dict[str, Any], str], tuple[int, dict[str, str], dict[str, Any], str | None]] | None
+    ) = None,
+) -> dict[str, Any]:
+    track_ids, _ = _known_track_ids_missing_metadata_for_scope(
+        limit=1,
+        offset=0,
+        priority_scope=DEFAULT_TRACK_METADATA_PRIORITY_SCOPE,
+    )
+    spotify_track_id = track_ids[0] if track_ids else None
+    if not spotify_track_id:
+        return {"status": "skipped_no_candidate", "requests_total": 0, "requests_429": 0}
+
+    request_fetcher = fetcher or _default_fetcher
+    status_code, headers, payload, raw_text = request_fetcher(
+        f"https://api.spotify.com/v1/tracks/{spotify_track_id}",
+        {"market": market},
+        access_token,
+    )
+    source_track_id = _source_track_id_for_spotify_track(spotify_track_id=spotify_track_id)
+    retry_after_raw = headers.get("Retry-After")
+    retry_after_seconds = 0.0
+    if retry_after_raw:
+        try:
+            retry_after_seconds = max(0.0, float(retry_after_raw))
+        except ValueError:
+            retry_after_seconds = 0.0
+    base = {
+        "source_track_id": source_track_id,
+        "spotify_track_id": spotify_track_id,
+        "status_code": int(status_code),
+        "retry_after_seconds": retry_after_seconds,
+        "requests_total": 1,
+        "requests_429": 1 if int(status_code) == 429 else 0,
+        "max_retry_after_seconds": retry_after_seconds,
+    }
+    if int(status_code) == 429:
+        return {
+            **base,
+            "status": "rate_limited",
+            "stop_reason": "post_cooldown_canary_429",
+            "last_error": "Post-cooldown canary hit Spotify 429.",
+        }
+    if int(status_code) >= 400:
+        body = _compact_error_body(payload, raw_text)
+        detail = f"Post-cooldown canary failed with status {status_code}"
+        if body:
+            detail = f"{detail}: {body}"
+        return {**base, "status": "failed_non_429", "last_error": detail}
+
+    _upsert_track_catalog(track=payload, market=market, fetched_at=_utc_now(), last_status="ok", last_error=None)
+    return {**base, "status": "success", "requests_success": 1}
+
+
 def _upsert_album_track(*, album_id: str, track: dict[str, Any], market: str, fetched_at: str, last_status: str, last_error: str | None) -> None:
     artists = track.get("artists") if isinstance(track.get("artists"), list) else []
     with sqlite_connection(write=True) as connection:
@@ -3953,6 +4488,7 @@ def run_spotify_catalog_backfill(
     force_refresh: bool = False,
     album_tracklist_policy: str = "all",
     target: str | None = None,
+    priority_scope: str | None = None,
     sleeper: Callable[[float], None] | None = None,
     fetcher: Callable[[str, dict[str, Any], str], tuple[int, dict[str, str], dict[str, Any], str | None]] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -3980,11 +4516,16 @@ def run_spotify_catalog_backfill(
     normalized_target = str(target or "all").strip().lower()
     if normalized_target not in CATALOG_BACKFILL_TARGETS:
         normalized_target = "all"
+    normalized_priority_scope = str(priority_scope or "").strip().lower() or None
+    if normalized_priority_scope is not None and normalized_priority_scope not in TRACK_METADATA_PRIORITY_SCOPES:
+        normalized_priority_scope = None
     if normalized_run_mode == "metadata_only":
         if not target_was_provided:
             include_albums = True
         normalized_album_tracklist_policy = "none"
         normalized_reason = normalized_reason or "identity_metadata"
+        if normalized_reason == "identity_metadata" and normalized_priority_scope is None:
+            normalized_priority_scope = DEFAULT_TRACK_METADATA_PRIORITY_SCOPE
     elif normalized_run_mode == "tracklists_relevant":
         include_albums = True
         if normalized_album_tracklist_policy in {"all", "none"}:
@@ -4089,6 +4630,7 @@ def run_spotify_catalog_backfill(
             "market": normalized_market,
             "run_mode": normalized_run_mode,
             "run_reason": normalized_reason,
+            "priority_scope": normalized_priority_scope,
             "target": normalized_target,
             "limit": bounded_limit,
             "offset": bounded_offset,
@@ -4281,7 +4823,11 @@ def run_spotify_catalog_backfill(
         album_track_fetch_ids: set[str] = set()
         queued_album_track_fetch_queue_ids: dict[str, list[int]] = {}
         if normalized_run_mode == "metadata_only" and run_tracks:
-            seeded_track_ids, has_more = _known_track_ids_missing_metadata(limit=bounded_limit, offset=bounded_offset)
+            seeded_track_ids, has_more = _known_track_ids_missing_metadata_for_scope(
+                limit=bounded_limit,
+                offset=bounded_offset,
+                priority_scope=normalized_priority_scope or "all",
+            )
         elif run_tracks:
             seeded_track_ids, has_more = _known_track_ids(limit=bounded_limit, offset=bounded_offset)
         else:
@@ -4306,6 +4852,7 @@ def run_spotify_catalog_backfill(
                     "target": normalized_target,
                     "run_mode": normalized_run_mode,
                     "reason": normalized_reason,
+                    "priority_scope": normalized_priority_scope,
                     "album_tracklist_policy": normalized_album_tracklist_policy,
                     "include_albums": bool(include_albums),
                     "limit": bounded_limit,

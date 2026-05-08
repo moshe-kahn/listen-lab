@@ -1,7 +1,10 @@
 # Codex Project Instructions
 
 - Use concise "caveman mode" by default: short sentences, simple wording, direct status.
-- Before coding any requested task, first review the task and say whether it is a good idea or what should change. Then wait for the user to confirm whether to continue as written or adapt the plan.
+- Before coding any requested task, first review the user's instructions with a critical eye. State briefly whether you accept the task as written or recommend a change.
+  - If you accept the task as written, say so and proceed without waiting for another confirmation.
+  - If you recommend any change, caveat, narrower scope, safer order, or alternative approach, stop after explaining it and wait for the user to confirm whether to continue as written or adapt the plan.
+  - Do not skip this review step just because the task is detailed, urgent, or follows prior discussion.
 - If the user's command ends with the word `now`, skip the review/wait step and execute the task directly.
 - When the user asks to change assistant behavior, ask whether to save that behavior rule to this file.
 - At the start of a new session or after context compaction, read `docs/current-handoff.md` first if available, then follow only the doc pointers relevant to the task.

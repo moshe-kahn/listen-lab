@@ -56,6 +56,48 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
         self.assertEqual([], body["items"])
         self.assertEqual(0, body["summary"]["total_groups"])
 
+    def test_readiness_endpoint_empty_result_shape_and_no_spotify_call(self) -> None:
+        payload = {
+            "ok": True,
+            "source": {"kind": "sqlite", "uses_spotify_api": False, "mutates_identity": False},
+            "summary": {
+                "total_groups": 0,
+                "returned_groups": 0,
+                "returned_bucket_counts": {
+                    "metadata-complete": 0,
+                    "evidence-agrees": 0,
+                    "blocked-by-missing-metadata": 0,
+                    "safe-candidate": 0,
+                    "needs-review": 0,
+                    "unsafe": 0,
+                },
+                "returned_final_readiness_counts": {
+                    "blocked-by-missing-metadata": 0,
+                    "safe-candidate": 0,
+                    "needs-review": 0,
+                    "unsafe": 0,
+                },
+            },
+            "pagination": {"limit": 50, "offset": 0, "returned": 0, "has_more": False},
+            "items": [],
+        }
+        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.main.build_track_identity_readiness_report",
+            return_value=payload,
+        ), patch("backend.app.main.refresh_access_token_if_needed") as refresh_mock, patch(
+            "backend.app.main.run_spotify_catalog_backfill"
+        ) as run_mock:
+            client = TestClient(app)
+            response = client.get("/debug/tracks/identity-audit/readiness?limit=50&offset=0")
+
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertFalse(body["source"]["uses_spotify_api"])
+        self.assertEqual([], body["items"])
+        refresh_mock.assert_not_called()
+        run_mock.assert_not_called()
+
     def test_submission_preview_validate_endpoint_shape(self) -> None:
         payload = {
             "ok": True,

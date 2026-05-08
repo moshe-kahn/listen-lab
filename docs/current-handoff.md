@@ -13,12 +13,50 @@ Recommended docs:
 Avoid asking future agents to read every doc by default. The repo docs include historical and product planning material that is not always relevant.
 
 ## Current Active Area
-The active work has pivoted from release-album apply planning to Spotify catalog backfill/completeness.
+The active work should now pivot back from Spotify catalog backfill to read-only Identity Audit readiness.
 
 Reason for pivot:
-- Identity Audit duplicate review is under-informed until source-catalog evidence is more complete.
-- Spotify metadata should be fetched at the source layer, not directly for release-layer rows.
-- Identity Audit remains read-only and should consume catalog evidence later.
+- Spotify track metadata backfill is currently constrained by practical 429/cooldown behavior.
+- The priority worker now limits identity metadata fetching to priority tracks instead of the full accepted Spotify source-track backlog.
+- Enough additional Spotify source-track metadata has been fetched to inspect whether duplicate/split Identity Audit cases are now better informed.
+- Identity Audit remains read-only and should consume catalog evidence; do not apply, merge, promote, or mutate identity mappings.
+
+Latest completed work:
+- Added read-only track Identity Audit readiness report:
+  - `GET /debug/tracks/identity-audit/readiness`
+  - builder: `build_track_identity_readiness_report(...)`
+  - shared CTE helper: `track_identity_readiness_source_ctes()`
+- Report buckets duplicate/split track cases into:
+  - `metadata-complete`
+  - `evidence-agrees`
+  - `blocked-by-missing-metadata`
+  - `safe-candidate`
+  - `needs-review`
+  - `unsafe`
+- Current local DB readiness numbers from latest run:
+  - blocked duplicate/split groups: `1706`
+  - distinct Spotify source tracks in blocked groups: `3597`
+  - tracks missing track metadata: `2463`
+  - those included by default `identity_and_top_listened` priority scope: `2463`
+  - not included by priority scope: `0`
+  - album-metadata-only blockers: `1045`
+- Added read-only priority validation debug under catalog coverage:
+  - `track_metadata_priority.identity_readiness_blockers`
+  - helper: `get_identity_readiness_track_metadata_priority_comparison(...)`
+- Priority selector now evaluates identity relevance across all accepted Spotify source tracks in duplicate/split cases, then dedupes by Spotify ID.
+  - This fixed/guards the non-representative split case where one source track was complete and another same-release-track source was still missing metadata.
+  - Deferred singleton backlog remains excluded from default `identity_metadata` selection.
+- No Spotify calls, Full Backfill, merge/apply, or identity mapping mutations were added.
+
+Clarified identity model:
+- `source_track` remains source/provider identity: one Spotify ID per row.
+- Different Spotify IDs that are likely the same real track should generally remain separate source rows and map to the same `release_track`, not collapse into one `source_track`.
+- `analysis_track` is current schema name for the higher analytics/song-family-ish grouping layer; product wording may call this Track Family later.
+- Current metadata evidence helps readiness/ranking only. There is no automatic merge/apply from readiness.
+- Spotify `popularity` is not currently available in local fetched track payloads:
+  - local `spotify_track_catalog` rows inspected: `2844`
+  - rows with `raw_json.popularity`: `0`
+  - sample raw keys: `album`, `artists`, `disc_number`, `duration_ms`, `explicit`, `external_ids`, `external_urls`, `href`, `id`, `is_local`, `is_playable`, `name`, `track_number`, `type`, `uri`
 
 Current Catalog Backfill UI structure:
 - `Overview`
@@ -36,12 +74,14 @@ Priority Metadata:
   - `include_albums = true`
   - `album_tracklist_policy = "none"`
   - `reason = "identity_metadata"`
+  - `priority_scope = "identity_and_top_listened"`
 - new explicit targets:
   - `target = "tracks"` for true track metadata only
   - `target = "albums"` for true album metadata only
   - `target = "album_tracklists"` for explicit tracklist-only expansion modes
   - `target = "all"` for current mixed behavior
-- fetches listened/source-mapped Spotify tracks
+- fetches priority source-mapped Spotify tracks only: identity-ambiguous candidates or tracks connected to top listened tracks/albums/artists/recent repeats
+- leaves other accepted Spotify source tracks visible as deferred catalog backlog
 - fetches Spotify albums referenced by those tracks and existing accepted source album/raw album IDs
 - does not fetch full album tracklists
 - does not expand unlistened album tracks
@@ -230,12 +270,15 @@ Recent backend behavior fixes:
 - omitted `request_delay_seconds` defaults to `2.0`; explicit caller values are still respected.
 - `429` handling records valid `Retry-After`; Spotify has sometimes returned 429 without valid `Retry-After`.
 - album metadata candidate selection now filters/prioritizes incomplete album metadata before applying `limit`.
+- identity metadata track selection now defaults to `priority_scope=identity_and_top_listened`; broad accepted Spotify source-track backlog remains visible as deferred catalog backlog and is not selected by default.
+- identity metadata track selection now covers all readiness-blocking duplicate/split source tracks, including non-representative accepted Spotify IDs on a split release track.
+- coverage debug now reports readiness blocker priority comparison at `track_metadata_priority.identity_readiness_blockers`.
 
 One-shot worker:
 - module: `backend/app/spotify_catalog_worker.py`
 - CLI: `python3 -m backend.scripts.run_spotify_track_metadata_worker`
 - worker name: `spotify_track_metadata`
-- current job config: `target=tracks`, `run_mode=metadata_only`, `reason=identity_metadata`, `album_tracklist_policy=none`, `include_albums=false`, `limit=250`, `max_requests=275`, `max_runtime_seconds=900`, `request_delay_seconds=2.0`, `market=US`
+- current job config: `target=tracks`, `run_mode=metadata_only`, `reason=identity_metadata`, `priority_scope=identity_and_top_listened`, `album_tracklist_policy=none`, `include_albums=false`, `limit=50`, `max_requests=60`, `max_runtime_seconds=360`, `request_delay_seconds=5.0`, `market=US`
 - persists `spotify_catalog_worker_state`, `spotify_catalog_worker_lock`, and `spotify_catalog_worker_invocation`
 - skips on active cooldown, skips on non-stale overlap, replaces locks older than 2 hours, then exits after one bounded job
 - rate-limit cooldown is valid `Retry-After` when present, otherwise 60 minutes
@@ -243,7 +286,53 @@ One-shot worker:
   - counts `spotify_catalog_backfill_run.requests_total` for the last 60 minutes
   - skips with `skipped_request_budget` at `>=550` requests and sets 15 minute local cooldown
   - skips with 30 minute local cooldown at `>=650` requests
+  - when below `550`, caps the next run's `max_requests` to the remaining soft budget and lowers `limit` accordingly
+  - Spotify's published app-wide Web API rate limit is a rolling 30-second window with an app-specific quota; the local 60-minute budget is an extra conservative guard, not Spotify's documented quota window
   - real Spotify `429` cooldown remains separate and still uses valid `Retry-After`, otherwise 60 minutes
+- has a post-cooldown canary gate:
+  - runs only after an expired worker cooldown whose previous result stopped for `rate_limited`
+  - selects one missing/incomplete priority source Spotify track via the existing priority missing-metadata selector
+  - makes exactly one single-track `GET /v1/tracks/{id}` request with the same local token/client path
+  - on success, upserts that track catalog row and continues the normal worker run
+  - on 429, stops before normal backfill with `skipped_canary_rate_limited`, `stop_reason=post_cooldown_canary_429`
+  - tracks `consecutive_post_cooldown_canary_429s` in `spotify_catalog_worker_state`
+  - canary 429 fallback cooldown uses exponential backoff: 6 hours, then 12 hours, then capped at 24 hours
+
+## Latest Verification
+Commands run after readiness/priority validation work:
+- `./.venv/bin/python -m unittest backend.tests.test_track_identity_audit_read_models backend.tests.test_track_identity_audit_routes`
+- `./.venv/bin/python -m unittest backend.tests.test_spotify_catalog_worker`
+- selector-focused `backend.tests.test_spotify_catalog_backfill` tests:
+  - `test_priority_metadata_selects_identity_relevant_missing_tracks`
+  - `test_priority_metadata_selects_top_listened_missing_tracks`
+  - `test_priority_metadata_includes_nonrepresentative_readiness_blocking_split_track`
+  - `test_priority_metadata_defers_missing_tracks_with_no_priority_flags`
+  - `test_broad_metadata_scope_can_select_deferred_missing_tracks`
+  - `test_catalog_backfill_coverage_counts`
+- full catalog backfill module:
+  - `./.venv/bin/python -m unittest backend.tests.test_spotify_catalog_backfill`
+- py compile:
+  - `./.venv/bin/python -m py_compile backend/app/track_identity_audit.py backend/app/spotify_catalog_backfill.py backend/app/main.py backend/app/spotify_catalog_worker.py backend/tests/test_track_identity_audit_read_models.py backend/tests/test_track_identity_audit_routes.py backend/tests/test_spotify_catalog_backfill.py backend/tests/test_spotify_catalog_worker.py`
+
+All passed.
+
+## Recommended Next Task
+Stay read-only. Inspect representative-selection policy for duplicate/split Spotify track IDs:
+- Current system does not choose representative Spotify ID from readiness metadata yet.
+- Define a read-only preview/ranking policy before any mutation:
+  - user listen count first
+  - complete metadata
+  - same ISRC/duration/name evidence
+  - album type/release date rules
+  - deterministic tie-break
+- Do not use Spotify popularity unless future fetched payloads contain it.
+  - Current local payloads do not.
+  - if Spotify provides `Retry-After`, canary cooldown uses `max(retry_after_seconds, fallback_cooldown_seconds)`
+  - canary 429 JSONL/result fields include `consecutive_post_cooldown_canary_429s`, `retry_after_seconds`, `fallback_cooldown_seconds`, `cooldown_until`, and `stop_reason=post_cooldown_canary_429`
+  - resets `consecutive_post_cooldown_canary_429s` to `0` only after a successful canary followed by a normal successful/partial non-429 worker run
+  - on non-429 API failure, stops before normal backfill with `skipped_canary_failed` and does not set metadata complete
+  - if no candidate exists, emits `canary_skipped_no_candidate` and continues normally
+  - JSONL/progress events: `canary_attempt`, `canary_success`, `canary_rate_limited`, `canary_failed_non_429`, `canary_skipped_no_candidate`
 - CLI default remains one-shot and JSON-compatible.
 - CLI loop mode exists:
   - `--loop`
@@ -255,14 +344,22 @@ One-shot worker:
   - loop respects worker cooldowns and `skipped_request_budget`; it does not bypass or recalculate them
 - does not run Full Backfill, album metadata, album tracklists, Identity Audit, merge/apply, or any identity mutation
 
-Current catalog coverage after Run 52:
-- missing source track metadata: `28,706`
-- missing track ISRC: `28,708`
-- missing track duration: `28,706`
+Current catalog coverage after Run 62:
+- missing source track metadata: `27,506`
+- measured missing accepted source track metadata: `25,617`
+- priority missing source track metadata: `4,732`
+- identity-ambiguous missing source track metadata: `1,815`
+- top-listened missing source track metadata: `3,237`
+- identity/top overlap: `320`
+- deferred accepted source track metadata: `20,885`
+- missing track ISRC: `27,508`
+- missing track duration: `27,506`
 - missing source album metadata: `0`
 - missing album release date: `0`
 - missing album UPC/EAN: `3`
 - missing album tracklists: `228` separate catalog-expansion backlog
+- relevant album tracklist backlog: `29`
+- unlistened tracklist rows: `345`
 
 Known remaining album UPC/EAN gaps are acceptable single/EP-like releases:
 - `0cFaOb8C6eLR26DFx3vAVo` - `Yo-yo`, `album_type=single`, `total_tracks=1`
@@ -288,14 +385,27 @@ Recent live runs:
 - Run 50: one-shot worker, `limit=100`, status `ok`, tracks fetched/upserted `100/100`, requests `101`, 429 `0`.
 - Run 51: after changing worker to `limit=250`, status `partial`, fetched/upserted `1/1`, requests `3`, 429 `1`; Spotify provided no valid `Retry-After`, fallback cooldown used.
 - Run 52: manual early cooldown test after shortening local DB cooldown to ~5 minutes, status `partial`, fetched/upserted `0/0`, requests `2`, 429 `1`; confirms 5 minute retry was too early. Current worker state cooldown until `2026-05-06T03:41:20.672449Z`.
+- Run 53: old 250-limit config was still in effect, status `ok`, tracks fetched/upserted `250/250`, requests `251`, 429 `0`.
+- Run 54: old 250-limit config was still in effect, status `ok`, tracks fetched/upserted `250/250`, requests `251`, 429 `0`.
+- Run 55: old 250-limit config was still in effect, status `partial`, tracks fetched/upserted `100/100`, requests `102`, 429 `1`; Spotify provided no valid `Retry-After`, fallback cooldown used. Worker state cooldown until `2026-05-06T12:39:55.840067Z`.
+- Run 56: corrected 100-limit config, status `partial`, tracks fetched/upserted `0/0`, requests `2`, 429 `1`; Spotify immediately rate-limited after cooldown. Worker state cooldown until `2026-05-06T21:29:40.234532Z`. Post-cooldown canary gate was added after this run to avoid full normal starts when Spotify is still throttling.
+- Run 57: one-shot worker, corrected 100-limit config, status `ok`, tracks fetched/upserted `100/100`, requests `101`, 429 `0`.
+- Run 58: one-shot worker, corrected 100-limit config, status `ok`, tracks fetched/upserted `100/100`, requests `101`, 429 `0`.
+- Run 59: one-shot worker, corrected 100-limit config, status `ok`, tracks fetched/upserted `100/100`, requests `101`, 429 `0`.
+- Run 60: one-shot worker, corrected 100-limit config, status `ok`, tracks fetched/upserted `100/100`, requests `101`, 429 `0`.
+- Run 61: one-shot worker, corrected 100-limit config, status `ok`, tracks fetched/upserted `100/100`, requests `101`, 429 `0`.
+- Run 62: one-shot worker, corrected 100-limit config, status `partial`, tracks fetched/upserted `99/99`, requests `101`, 429 `1`; Spotify provided no valid `Retry-After`, fallback cooldown used. Worker state cooldown was `2026-05-07T21:16:47.497747Z`.
+- Post-Run 62 canary: after cooldown, canary emitted `canary_attempt` then `canary_rate_limited`, requests `1`, 429 `1`, source_track_id `24646`, Spotify track `2HNKqls4pZWD6sIzyHFqFt`, no valid `Retry-After`. Worker stopped before normal backfill with `skipped_canary_rate_limited`, `stop_reason=post_cooldown_canary_429`, `consecutive_post_cooldown_canary_429s=1`, fallback cooldown `21600` seconds, cooldown until `2026-05-08T03:16:48.708996Z`.
 
 Operational guidance:
-- For track metadata, use `target=tracks`, `run_mode=metadata_only`, `reason=identity_metadata`, `album_tracklist_policy=none`, `request_delay_seconds=2.0`.
+- For track metadata, use `target=tracks`, `run_mode=metadata_only`, `reason=identity_metadata`, `album_tracklist_policy=none`, `request_delay_seconds=5.0` for the current slow diagnostic profile.
 - Prefer the worker CLI for local/dev background progress.
 - Current loop command used:
   `python3 -m backend.scripts.run_spotify_track_metadata_worker --loop --max-runtime-minutes 90 --between-runs-seconds 300 --jsonl-output backend/data/logs/track-metadata-worker-loop.jsonl`
-- Because runs 51 and 52 hit immediate 429, do not retry before current cooldown.
-- Recommended next change before more live runs: revert worker config from `limit=250`, `max_requests=275`, `max_runtime_seconds=900` back to safer `limit=100`, `max_requests=110`, `max_runtime_seconds=300` while keeping loop mode and rolling request budget.
+- Because the post-Run 62 canary hit 429, do not retry before current cooldown `2026-05-08T03:16:48.708996Z`.
+- A thread heartbeat is scheduled for `2026-05-07 20:18 America/Los_Angeles` to resume after cooldown and run only one canary-gated worker attempt.
+- Current code imports as slow diagnostic `limit=50`, `max_requests=60`, `max_runtime_seconds=360`; verify terminal says `[run N] start: limit=50 delay=5.0s` or a lower dynamically budget-capped limit before letting any future loop continue.
+- After a rate-limit cooldown expires, expect canary JSONL/progress events before a normal `run N start...` line. If `canary_rate_limited` appears, the normal run was blocked and a new cooldown was set.
 - Do not shorten the real 429 fallback cooldown. The 5 minute manual test was too aggressive.
 - For album metadata, current source album/release-date gaps are cleared. Do not keep retrying the 3 UPC/EAN-only singles unless reporting is changed.
 - Do not fetch album tracklists unless explicitly working catalog expansion.
@@ -318,14 +428,30 @@ Deferred follow-up phases:
 - Phase 4: evaluate a real database migration from `analysis_track` / `analysis_track_map` to `track_family` / `track_family_map`
 
 ## Next Likely Task
-Pick one:
-- after cooldown, first revert worker config to safer `limit=100`, `max_requests=110`, `max_runtime_seconds=300`; keep loop mode and rolling request budget
-- then test/run worker loop with JSONL logging, e.g. `python3 -m backend.scripts.run_spotify_track_metadata_worker --loop --max-runtime-minutes 90 --between-runs-seconds 300 --jsonl-output backend/data/logs/track-metadata-worker-loop.jsonl`
-- inspect worker rows after a run in `spotify_catalog_worker_invocation` and `spotify_catalog_worker_state`
-- continue bounded `target=tracks` Priority Metadata passes to reduce the remaining track backlog, preferably through the one-shot worker
-- adjust coverage/reporting so album UPC/EAN gaps for `album_type=single` are separated/lower severity
-- update frontend Catalog Backfill controls to expose explicit target modes
-- return to Identity Audit/Albums duplicate review using improved source album metadata
+Recommended next task:
+- Build or inspect a read-only Identity Audit readiness report using the source catalog metadata already fetched. Do not call Spotify. Do not apply/merge/promote.
+- Start with track duplicate/split cases, then album duplicate cases if useful.
+- Useful readiness buckets:
+  - duplicate Spotify track ID groups now metadata-complete
+  - release-track source splits where duration/ISRC/album evidence now agrees
+  - suggested analysis/track-family groups that now have enough duration/ISRC/album evidence
+  - groups still blocked by missing catalog metadata
+  - safe candidates vs needs-review vs unsafe, read-only only
+
+Deferred Spotify backfill:
+- Do not keep pushing track backfill while Spotify 429 behavior is unclear.
+- If resuming after cooldown (`2026-05-08T03:16:48.708996Z`), first inspect worker state and only then run one canary-gated worker attempt with JSONL logging if appropriate.
+- If the next post-cooldown canary gets 429, confirm it returns `skipped_canary_rate_limited`, increments `consecutive_post_cooldown_canary_429s`, and sets at least a 12 hour cooldown before trying again.
+- Album metadata gaps are currently cleared except the acceptable UPC/EAN-only singles; album backfill probably shares Spotify quota risk, so defer unless there is a specific high-value read-only need.
+- Do not fetch album tracklists unless explicitly working catalog expansion.
+
+Future options, not next unless explicitly requested:
+- Evaluate alternate metadata sources for stubborn cases, but treat non-Spotify matching as lower confidence and read-only until there is a clear matching contract.
+- Use already-fetched Spotify metadata to try deterministic name + artist + album + duration matching where Spotify IDs are absent.
+- Revisit top-track/top-album/top-artist algorithms; this now matters because top-list relevance drives priority metadata eligibility.
+- Brush up Catalog Backfill and Identity Audit UI once the read-only readiness workflow is clearer.
+- Adjust coverage/reporting so album UPC/EAN gaps for `album_type=single` are separated/lower severity.
+- Update frontend Catalog Backfill controls to expose explicit target modes if live backfill work resumes.
 
 Manual verification checklist:
 - Catalog Backfill page has tabs: Overview, Priority Metadata, Full Backfill, Queue, Recent Runs.
@@ -356,6 +482,13 @@ cd frontend && npm run build
 ```
 
 Most recent verification:
+- `python3 -m unittest backend.tests.test_spotify_catalog_backfill` passed: 145 tests after priority-scope selector and coverage split.
+- `python3 -m unittest backend.tests.test_spotify_catalog_worker` passed: 34 tests after priority canary/config and terminal output changes.
+- `python3 -m py_compile backend/app/spotify_catalog_backfill.py backend/app/spotify_catalog_worker.py backend/app/main.py backend/scripts/run_spotify_track_metadata_worker.py` passed after priority-scope wiring.
+- `cd frontend && npm run build` passed after Catalog Backfill coverage UI fields.
+- `python3 -m unittest backend.tests.test_spotify_catalog_worker` passed: 33 tests after post-cooldown canary and canary-429 exponential backoff.
+- `python3 -m unittest backend.tests.test_spotify_catalog_backfill` passed: 142 tests after adding single-track canary helper.
+- `python3 -m py_compile backend/app/db.py backend/app/spotify_catalog_worker.py backend/app/spotify_catalog_backfill.py backend/scripts/run_spotify_track_metadata_worker.py` passed after canary-backoff migration/worker changes.
 - `python3 -m py_compile backend/app/spotify_catalog_backfill.py backend/app/main.py backend/app/spotify_catalog_worker.py backend/scripts/run_spotify_track_metadata_worker.py` passed after worker implementation.
 - `python3 -m unittest backend.tests.test_spotify_catalog_backfill` passed: 142 tests after priority/progress changes.
 - `python3 -m unittest backend.tests.test_spotify_catalog_worker` passed: 21 tests after loop mode, JSONL output, rolling request budget, and current worker config changes.

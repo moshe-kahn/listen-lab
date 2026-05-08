@@ -58,6 +58,15 @@ def _human_sleep(seconds: float) -> str:
     return f"{rounded}s"
 
 
+def _local_time_text(value: object) -> str | None:
+    parsed = _parse_iso_utc(value)
+    if parsed is None:
+        return None
+    local = parsed.astimezone()
+    hour = local.strftime("%I").lstrip("0") or "0"
+    return f"{local.strftime('%b')} {local.day}, {local.year} {hour}:{local.strftime('%M %p %Z')}"
+
+
 def _final_result_with_message(result: dict[str, object]) -> dict[str, object]:
     enriched = dict(result)
     run_id = enriched.get("backfill_run_id")
@@ -78,24 +87,63 @@ def _final_result_with_message(result: dict[str, object]) -> dict[str, object]:
 
 def _terminal_summary(payload: dict[str, object]) -> str | None:
     event = str(payload.get("event") or "")
+    cooldown_until = _local_time_text(payload.get("cooldown_until"))
     if event == "start":
         run_id = payload.get("run_id")
         worker_config = payload.get("worker_config") if isinstance(payload.get("worker_config"), dict) else {}
         limit = worker_config.get("limit") if isinstance(worker_config, dict) else None
-        return f"run {run_id} start limit={limit}"
+        delay = worker_config.get("request_delay_seconds") if isinstance(worker_config, dict) else None
+        suffix = f"limit={limit}"
+        if delay is not None:
+            suffix = f"{suffix} delay={delay}s"
+        return f"[run {run_id}] start: {suffix}"
     if event == "progress":
         run_id = payload.get("run_id")
         return (
-            f"run {run_id} progress fetched={int(payload.get('tracks_fetched') or 0)} "
+            f"[run {run_id}] progress: fetched={int(payload.get('tracks_fetched') or 0)} "
             f"req={int(payload.get('requests_total') or 0)} 429={int(payload.get('requests_429') or 0)}"
         )
+    if event == "canary_attempt":
+        return "[init] canary: checking Spotify with 1 request"
+    if event == "canary_success":
+        return "[init] ok: Spotify responded, starting run"
+    if event == "canary_rate_limited":
+        if cooldown_until:
+            return f"[init] rate limited: cooldown until {cooldown_until}"
+        return "[init] rate limited: cooldown set"
+    if event == "canary_failed_non_429":
+        status_code = payload.get("status_code")
+        if status_code is not None:
+            return f"[init] failed: Spotify returned status {status_code}"
+        return "[init] failed: Spotify canary failed"
+    if event == "canary_skipped_no_candidate":
+        return "[init] canary skipped: no candidate"
     status = str(payload.get("status") or "")
     if status:
         run_id = payload.get("backfill_run_id") or payload.get("run_id")
-        return (
-            f"run {run_id} {status} fetched={int(payload.get('tracks_fetched') or 0)} "
-            f"req={int(payload.get('requests_total') or 0)} 429={int(payload.get('requests_429') or 0)}"
-        )
+        if run_id is not None:
+            return (
+                f"[run {run_id}] {status}: fetched={int(payload.get('tracks_fetched') or 0)} "
+                f"req={int(payload.get('requests_total') or 0)} 429={int(payload.get('requests_429') or 0)}"
+            )
+        if status == "skipped_cooldown":
+            if cooldown_until:
+                return f"[init] skipped: cooldown active until {cooldown_until}"
+            return "[init] skipped: cooldown active"
+        if status == "skipped_request_budget":
+            recent_requests = payload.get("recent_requests_60m")
+            suffix = f" (recent requests: {recent_requests})" if recent_requests is not None else ""
+            if cooldown_until:
+                return f"[init] skipped: request budget cooldown until {cooldown_until}{suffix}"
+            return f"[init] skipped: request budget cooldown{suffix}"
+        if status == "skipped_canary_rate_limited":
+            if cooldown_until:
+                return f"[init] rate limited: cooldown until {cooldown_until}"
+            return "[init] rate limited: cooldown set"
+        if status == "skipped_canary_failed":
+            error = str(payload.get("error") or payload.get("last_error") or "").strip()
+            return f"[init] failed: {error}" if error else "[init] failed: Spotify canary failed"
+        return f"[init] {status}"
     return None
 
 
@@ -239,7 +287,7 @@ def main(
                     return
                 continue
 
-            if status in {"skipped_request_budget", "skipped_cooldown"} or (
+            if status in {"skipped_request_budget", "skipped_cooldown", "skipped_canary_rate_limited"} or (
                 status == "partial" and stop_reason == "rate_limited"
             ):
                 cooldown_seconds = _seconds_until(result.get("cooldown_until"), now=now)

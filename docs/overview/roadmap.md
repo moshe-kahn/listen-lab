@@ -235,7 +235,7 @@ Improve quality until the MVP feels obviously trustworthy on real accounts.
 ## Immediate Follow-Ups
 These are active issues discovered during current dashboard work and should be treated as near-term tasks before more product expansion.
 
-- After the current Spotify 429 cooldown, revert the local track metadata worker bounds from `limit=250`, `max_requests=275`, `max_runtime_seconds=900` back to safer `limit=100`, `max_requests=110`, `max_runtime_seconds=300`, while keeping loop mode, JSONL output, and rolling request-budget protection.
+- After the current Spotify 429 cooldown, continue the local track metadata worker with safer bounds `limit=100`, `max_requests=110`, `max_runtime_seconds=300`, while keeping loop mode, JSONL output, and rolling request-budget protection.
 - Continue identity-critical Spotify track metadata enrichment through the worker after cooldown, respecting the 60-minute fallback cooldown when Spotify returns 429 without `Retry-After`.
 - Use improved source catalog metadata as evidence for Identity Audit duplicate/split review; do not add merge/apply behavior until preview/dry-run evidence is reviewed.
 - Fix album ranking so recent 4-week and 6-month album lists do not collapse to a single entry when broader listening exists.

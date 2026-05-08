@@ -66,6 +66,7 @@ from backend.app.spotify_token_store import (
     validate_token_encryption_key,
 )
 from backend.app.track_identity_audit import (
+    build_track_identity_readiness_report,
     build_track_identity_audit,
     query_ambiguous_review_queue,
     query_suggested_analysis_groups,
@@ -4353,6 +4354,7 @@ async def debug_spotify_catalog_backfill(
     max_429 = int(body.get("max_429", 3))
     album_tracklist_policy = str(body.get("album_tracklist_policy", "all") or "all")
     target = str(body.get("target", "") or "") or None
+    priority_scope = str(body.get("priority_scope", "") or "") or None
 
     try:
         token_row = refresh_access_token_if_needed(user_id)
@@ -4399,6 +4401,7 @@ async def debug_spotify_catalog_backfill(
         max_429=max_429,
         album_tracklist_policy=album_tracklist_policy,
         target=target,
+        priority_scope=priority_scope,
     )
     if result.get("status") == "failed" and "status 401" in str(result.get("last_error") or ""):
         try:
@@ -4425,6 +4428,7 @@ async def debug_spotify_catalog_backfill(
             max_429=max_429,
             album_tracklist_policy=album_tracklist_policy,
             target=target,
+            priority_scope=priority_scope,
         )
     return {"ok": result.get("status") == "ok", **result}
 
@@ -4548,6 +4552,16 @@ async def debug_search_track_duplicates(
 ) -> dict[str, Any]:
     _require_local_data_session(request)
     return search_track_catalog_duplicate_spotify_identities(limit=limit, offset=offset)
+
+
+@app.get("/debug/tracks/identity-audit/readiness")
+async def debug_track_identity_readiness(
+    request: Request,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return build_track_identity_readiness_report(limit=limit, offset=offset)
 
 
 @app.post("/debug/identity/release-albums/merge-preview")

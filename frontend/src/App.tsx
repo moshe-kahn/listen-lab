@@ -739,6 +739,9 @@ type CatalogBackfillCoverageResponse = {
   recent_errors_count: number;
   identity_critical?: {
     missing_source_track_metadata: number;
+    missing_priority_track_metadata?: number;
+    missing_identity_ambiguous_track_metadata?: number;
+    missing_top_track_metadata?: number;
     missing_source_album_metadata: number;
     missing_track_isrc: number;
     missing_track_duration_ms: number;
@@ -746,9 +749,21 @@ type CatalogBackfillCoverageResponse = {
     missing_album_external_ids: number;
   };
   catalog_expansion?: {
+    missing_deferred_track_metadata?: number;
     missing_album_tracklists: number;
     relevant_album_tracklist_backlog: number;
     unlistened_tracklist_rows: number;
+  };
+  track_metadata_priority?: {
+    priority_scope: string;
+    counts: {
+      total_missing_accepted_source_track_metadata: number;
+      missing_priority_track_metadata: number;
+      missing_identity_ambiguous_track_metadata: number;
+      missing_top_track_metadata: number;
+      identity_top_overlap: number;
+      missing_deferred_track_metadata: number;
+    };
   };
 };
 
@@ -7832,7 +7847,8 @@ export function App() {
     const coveragePercent = typeof catalogBackfillCoverage?.track_duration_coverage_percent === "number"
       ? `${catalogBackfillCoverage.track_duration_coverage_percent.toFixed(2)}%`
       : "0.00%";
-    const missingIdentityCritical = (identityCritical?.missing_source_track_metadata ?? 0) + (identityCritical?.missing_source_album_metadata ?? 0);
+    const missingPriorityTrackMetadata = identityCritical?.missing_priority_track_metadata ?? 0;
+    const missingIdentityCritical = missingPriorityTrackMetadata + (identityCritical?.missing_source_album_metadata ?? 0);
     const latestWarnings = Array.isArray((latestDisplayRun as { warnings?: unknown[] } | null)?.warnings)
       ? ((latestDisplayRun as { warnings?: string[] }).warnings ?? [])
       : [];
@@ -7903,7 +7919,8 @@ export function App() {
               <span>Known release albums: {catalogBackfillCoverage?.known_release_albums ?? 0}</span>
               <span>Album catalog rows: {catalogBackfillCoverage?.album_catalog_rows ?? 0}</span>
               <span>Album track rows: {catalogBackfillCoverage?.album_track_rows ?? 0}</span>
-              <span>Identity-critical missing: {missingIdentityCritical}</span>
+              <span>Priority track metadata: {missingPriorityTrackMetadata}</span>
+              <span>Deferred track metadata: {catalogExpansion?.missing_deferred_track_metadata ?? 0}</span>
               <span>Missing tracklists: {catalogExpansion?.missing_album_tracklists ?? 0}</span>
               <span>Recent run errors: {catalogBackfillCoverage?.recent_errors_count ?? 0}</span>
               {catalogBackfillCoverageLastLoadedAt ? <span>Coverage loaded {new Date(catalogBackfillCoverageLastLoadedAt).toLocaleTimeString()}</span> : null}
@@ -7924,7 +7941,11 @@ export function App() {
             <h3>Priority Metadata</h3>
             <p className="empty-copy">Fetches source-layer Spotify track and album metadata for identity decisions. It does not expand unlistened album tracklists.</p>
             <div className="tracks-only-summary">
-              <span>Missing source track metadata: {identityCritical?.missing_source_track_metadata ?? 0}</span>
+              <span>Total missing source track metadata: {identityCritical?.missing_source_track_metadata ?? 0}</span>
+              <span>Priority track metadata: {missingPriorityTrackMetadata}</span>
+              <span>Identity-ambiguous track metadata: {identityCritical?.missing_identity_ambiguous_track_metadata ?? 0}</span>
+              <span>Top-listened track metadata: {identityCritical?.missing_top_track_metadata ?? 0}</span>
+              <span>Deferred track metadata: {catalogExpansion?.missing_deferred_track_metadata ?? 0}</span>
               <span>Missing source album metadata: {identityCritical?.missing_source_album_metadata ?? 0}</span>
               <span>Missing identity-critical metadata: {missingIdentityCritical}</span>
               <span>Missing ISRC: {identityCritical?.missing_track_isrc ?? 0}</span>
@@ -9926,6 +9947,7 @@ export function App() {
         max_album_tracks_pages_per_album: Math.min(50, Math.max(1, Math.round(catalogBackfillMaxAlbumTracksPagesPerAlbum))),
         max_429: Math.min(20, Math.max(1, Math.round(catalogBackfillMax429))),
         album_tracklist_policy: effectiveAlbumTracklistPolicy,
+        priority_scope: isPriorityMetadata ? "identity_and_top_listened" : "all",
       }),
     });
     const payload = (await response.json()) as

@@ -10,7 +10,11 @@ import sqlite3
 from contextlib import closing
 
 from backend.app.db import apply_pending_migrations, ensure_sqlite_db
-from backend.app.track_identity_audit import query_ambiguous_review_queue, query_suggested_analysis_groups
+from backend.app.track_identity_audit import (
+    build_track_identity_readiness_report,
+    query_ambiguous_review_queue,
+    query_suggested_analysis_groups,
+)
 from backend.app.track_identity_audit_submission import (
     dry_run_identity_audit_submission,
     get_identity_audit_submission,
@@ -39,6 +43,100 @@ class TrackIdentityAuditReadModelTests(unittest.TestCase):
         ).fetchall()
         encoded = json.dumps([tuple(row) for row in rows], ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         return len(rows), hashlib.sha256(encoded).hexdigest()
+
+    def _prepare_tmp_db(self, name: str) -> tempfile.TemporaryDirectory[str]:
+        tmp_dir: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory()
+        db_path = os.path.join(tmp_dir.name, name)
+        os.environ["SQLITE_DB_PATH"] = db_path
+        ensure_sqlite_db()
+        apply_pending_migrations()
+        return tmp_dir
+
+    @staticmethod
+    def _seed_track_identity_case(
+        connection: sqlite3.Connection,
+        *,
+        release_track_name: str,
+        spotify_track_id: str,
+        artist_name: str = "Artist A",
+        duration_ms: int | None = 181000,
+        catalog_name: str | None = None,
+        catalog_artist_name: str | None = None,
+        isrc: str | None = "USRC17607839",
+        album_id: str | None = "album-a",
+        album_release_date: str | None = "2024-01-01",
+        include_track_catalog: bool = True,
+        include_album_catalog: bool = True,
+    ) -> int:
+        artist_id = int(
+            connection.execute(
+                "INSERT INTO artist (canonical_name, sort_name) VALUES (?, ?)",
+                (artist_name, artist_name.lower()),
+            ).lastrowid
+        )
+        release_track_id = int(
+            connection.execute(
+                "INSERT INTO release_track (primary_name, normalized_name, duration_ms) VALUES (?, ?, ?)",
+                (release_track_name, release_track_name.lower(), duration_ms),
+            ).lastrowid
+        )
+        connection.execute(
+            "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+            (release_track_id, artist_id),
+        )
+        source_track_id = int(
+            connection.execute(
+                """
+                INSERT INTO source_track (source_name, external_id, external_uri, isrc, source_name_raw, raw_payload_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("spotify", spotify_track_id, f"spotify:track:{spotify_track_id}", isrc, release_track_name, "{}"),
+            ).lastrowid
+        )
+        connection.execute(
+            """
+            INSERT INTO source_track_map (
+              source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+            ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+            """,
+            (source_track_id, release_track_id),
+        )
+        if include_track_catalog:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, album_id, artists_json, raw_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    spotify_track_id,
+                    catalog_name or release_track_name,
+                    duration_ms,
+                    album_id,
+                    json.dumps([{"id": "artist-a", "name": catalog_artist_name or artist_name}]),
+                    json.dumps({"external_ids": {"isrc": isrc}}),
+                    "2026-05-01T12:00:00Z",
+                    "ok",
+                ),
+            )
+        if include_album_catalog and album_id:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO spotify_album_catalog (
+                  spotify_album_id, name, release_date, total_tracks, artists_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    album_id,
+                    "Album A",
+                    album_release_date,
+                    1,
+                    json.dumps([{"id": "artist-a", "name": artist_name}]),
+                    "2026-05-01T12:00:00Z",
+                    "ok",
+                ),
+            )
+        return release_track_id
 
     def test_ambiguous_review_parser_handles_messy_file_with_partial_results(self) -> None:
         messy_content = """Ambiguous Analysis Review Queue
@@ -78,6 +176,232 @@ Ungrouped Review Entries
         self.assertIsInstance(payload["parse_warning"], str)
         self.assertTrue(payload["parse_warning"])
         self.assertEqual([], [item for item in payload["items"] if not isinstance(item.get("components"), list)])
+
+    def test_track_identity_readiness_duplicate_spotify_id_safe_candidate(self) -> None:
+        tmp_dir = self._prepare_tmp_db("track_readiness_duplicate.sqlite3")
+        self.addCleanup(tmp_dir.cleanup)
+        with closing(sqlite3.connect(os.environ["SQLITE_DB_PATH"])) as connection:
+            artist_id = int(
+                connection.execute(
+                    "INSERT INTO artist (canonical_name, sort_name) VALUES (?, ?)",
+                    ("Artist A", "artist a"),
+                ).lastrowid
+            )
+            release_track_ids: list[int] = []
+            for _ in range(2):
+                release_track_id = int(
+                    connection.execute(
+                        "INSERT INTO release_track (primary_name, normalized_name, duration_ms) VALUES (?, ?, ?)",
+                        ("Song A", "song a", 181000),
+                    ).lastrowid
+                )
+                release_track_ids.append(release_track_id)
+                connection.execute(
+                    "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                    (release_track_id, artist_id),
+                )
+            source_track_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (source_name, external_id, external_uri, isrc, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "spotify-dup", "spotify:track:spotify-dup", "ISRC1", "Song A", "{}"),
+                ).lastrowid
+            )
+            for release_track_id in release_track_ids:
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_track_id, release_track_id),
+                )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, album_id, artists_json, raw_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "spotify-dup",
+                    "Song A",
+                    181000,
+                    "album-a",
+                    json.dumps([{"name": "Artist A"}]),
+                    json.dumps({"external_ids": {"isrc": "ISRC1"}}),
+                    "2026-05-01T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, release_date, total_tracks, artists_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album-a", "Album A", "2024-01-01", 1, json.dumps([{"name": "Artist A"}]), "2026-05-01T12:00:00Z", "ok"),
+            )
+            connection.commit()
+
+        payload = build_track_identity_readiness_report(limit=20)
+
+        self.assertEqual(1, payload["summary"]["total_groups"])
+        item = payload["items"][0]
+        self.assertEqual("duplicate_spotify_track_id", item["case_type"])
+        self.assertEqual("safe-candidate", item["readiness"])
+        self.assertEqual(["metadata-complete", "evidence-agrees", "safe-candidate"], item["buckets"])
+        self.assertEqual(2, len(item["tracks"]))
+
+    def test_track_identity_readiness_split_blocks_on_missing_catalog_metadata(self) -> None:
+        tmp_dir = self._prepare_tmp_db("track_readiness_missing.sqlite3")
+        self.addCleanup(tmp_dir.cleanup)
+        with closing(sqlite3.connect(os.environ["SQLITE_DB_PATH"])) as connection:
+            release_track_id = self._seed_track_identity_case(
+                connection,
+                release_track_name="Song A",
+                spotify_track_id="spotify-a",
+            )
+            source_track_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (source_name, external_id, external_uri, isrc, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "spotify-missing", "spotify:track:spotify-missing", "ISRC2", "Song A", "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_map (
+                  source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                """,
+                (source_track_id, release_track_id),
+            )
+            connection.commit()
+
+        payload = build_track_identity_readiness_report(limit=20)
+
+        self.assertEqual(1, payload["summary"]["total_groups"])
+        item = payload["items"][0]
+        self.assertEqual("release_track_source_split", item["case_type"])
+        self.assertEqual("blocked-by-missing-metadata", item["readiness"])
+        self.assertIn("blocked-by-missing-metadata", item["buckets"])
+        self.assertTrue(any("spotify-missing" in value for value in item["missing_metadata"]))
+
+    def test_track_identity_readiness_split_marks_conflicting_catalog_evidence_unsafe(self) -> None:
+        tmp_dir = self._prepare_tmp_db("track_readiness_unsafe.sqlite3")
+        self.addCleanup(tmp_dir.cleanup)
+        with closing(sqlite3.connect(os.environ["SQLITE_DB_PATH"])) as connection:
+            release_track_id = self._seed_track_identity_case(
+                connection,
+                release_track_name="Song A",
+                spotify_track_id="spotify-a",
+                duration_ms=181000,
+                catalog_name="Song A",
+                isrc="ISRC1",
+                album_id="album-a",
+            )
+            source_track_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (source_name, external_id, external_uri, isrc, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "spotify-b", "spotify:track:spotify-b", "ISRC2", "Different Song", "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_map (
+                  source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                """,
+                (source_track_id, release_track_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, album_id, artists_json, raw_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "spotify-b",
+                    "Different Song",
+                    240000,
+                    "album-b",
+                    json.dumps([{"name": "Artist A"}]),
+                    json.dumps({"external_ids": {"isrc": "ISRC2"}}),
+                    "2026-05-01T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, release_date, total_tracks, artists_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album-b", "Album B", "2024-02-01", 1, json.dumps([{"name": "Artist A"}]), "2026-05-01T12:00:00Z", "ok"),
+            )
+            connection.commit()
+
+        payload = build_track_identity_readiness_report(limit=20)
+
+        item = payload["items"][0]
+        self.assertEqual("release_track_source_split", item["case_type"])
+        self.assertEqual("unsafe", item["readiness"])
+        self.assertIn("metadata-complete", item["buckets"])
+        self.assertIn("unsafe", item["buckets"])
+
+    def test_track_identity_readiness_report_does_not_mutate_analysis_maps(self) -> None:
+        tmp_dir = self._prepare_tmp_db("track_readiness_readonly.sqlite3")
+        self.addCleanup(tmp_dir.cleanup)
+        with closing(sqlite3.connect(os.environ["SQLITE_DB_PATH"])) as connection:
+            release_track_id = self._seed_track_identity_case(
+                connection,
+                release_track_name="Song A",
+                spotify_track_id="spotify-a",
+            )
+            source_track_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (source_name, external_id, external_uri, isrc, source_name_raw, raw_payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "spotify-b", "spotify:track:spotify-b", "ISRC1", "Song A", "{}"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_map (
+                  source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                """,
+                (source_track_id, release_track_id),
+            )
+            analysis_track_id = int(
+                connection.execute("INSERT INTO analysis_track (primary_name) VALUES (?)", ("Song A",)).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO analysis_track_map (
+                  release_track_id, analysis_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                ) VALUES (?, ?, 'seed', 0.5, 'suggested', 0, 'seed')
+                """,
+                (release_track_id, analysis_track_id),
+            )
+            connection.commit()
+            before_count, before_digest = self._analysis_track_map_digest(connection)
+
+        _ = build_track_identity_readiness_report(limit=20)
+
+        with closing(sqlite3.connect(os.environ["SQLITE_DB_PATH"])) as connection:
+            after_count, after_digest = self._analysis_track_map_digest(connection)
+        self.assertEqual(before_count, after_count)
+        self.assertEqual(before_digest, after_digest)
 
     def test_ambiguous_review_parser_returns_empty_payload_when_file_missing(self) -> None:
         payload = query_ambiguous_review_queue(
