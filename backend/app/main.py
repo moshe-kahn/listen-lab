@@ -20,7 +20,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from backend.app.auth.session import _require_user_id, _session_user_id
+from backend.app.auth.session import (
+    _require_user_id,
+    _restore_session_user_from_token_store,
+    _session_user_id,
+)
 from backend.app.cache.file_cache import _cache_dir, _read_json_file, _write_json_file
 from backend.app.config import get_settings
 from backend.app.db import (
@@ -29,7 +33,6 @@ from backend.app.db import (
     ensure_sqlite_db,
     insert_ingest_run,
     insert_listenlab_player_play,
-    list_spotify_auth_users,
     recover_stale_ingest_runs,
     update_listenlab_player_play_progress,
 )
@@ -199,41 +202,6 @@ def _is_configured() -> bool:
         and settings.spotify_redirect_uri
         and settings.session_secret
     )
-
-
-def _restore_session_user_from_token_store(request: Request) -> str | None:
-    existing_user_id = _session_user_id(request)
-    if existing_user_id:
-        return existing_user_id
-
-    active_users = list_spotify_auth_users(active_only=True, limit=2)
-    if len(active_users) != 1:
-        return None
-
-    candidate_user_id = str(active_users[0].get("user_id") or "").strip()
-    if not candidate_user_id:
-        return None
-
-    try:
-        token_row = refresh_access_token_if_needed(candidate_user_id)
-    except SpotifyTokenStoreError:
-        return None
-
-    request.session["user_id"] = candidate_user_id
-    request.session["token_type"] = "Bearer"
-    expires_at = str(token_row.get("expires_at") or "")
-    if expires_at:
-        try:
-            remaining = int((_parse_iso_utc(expires_at) - datetime.now(UTC)).total_seconds())
-            request.session["expires_in"] = max(0, remaining)
-        except ValueError:
-            request.session["expires_in"] = None
-    request.session["spotify_user"] = {
-        "id": str(token_row.get("spotify_user_id") or candidate_user_id),
-        "display_name": None,
-        "email": None,
-    }
-    return candidate_user_id
 
 
 def _normalize_recent_track_item_for_route(item: dict[str, Any]) -> dict[str, Any]:
