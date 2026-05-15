@@ -110,6 +110,111 @@ def _primary_artist_key(artist_name: Any) -> str:
         return ""
     return normalized_parts[0]
 
+_TRACK_VERSION_REVIEW_PATTERN = re.compile(
+    r"\b("
+    r"live|remaster(?:ed)?|remix|mix|edit|demo|acoustic|instrumental|karaoke|"
+    r"clean|explicit|version|alternate|bonus|deluxe|anniversary|mono|stereo|"
+    r"session|rework|radio|video"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _source_release_confirmation_preview(group: dict[str, Any]) -> dict[str, Any]:
+    sources = list(group.get("sources") or [])
+    reasons: list[str] = []
+    evidence: dict[str, Any] = {"source_count": len(sources)}
+
+    incomplete_sources = [
+        source.get("external_id") or source.get("source_track_id")
+        for source in sources
+        if not bool(source.get("metadata_complete"))
+    ]
+    if len(sources) < 2:
+        reasons.append("At least two source rows are required for source-to-release confirmation.")
+    if incomplete_sources:
+        reasons.append("One or more source rows are missing required source-track metadata.")
+        evidence["incomplete_sources"] = incomplete_sources
+
+    normalized_album_names = sorted({
+        _normalize_identity_text(source.get("album_name_display") or source.get("album_name"))
+        for source in sources
+        if _normalize_identity_text(source.get("album_name_display") or source.get("album_name"))
+    })
+    positions = sorted({
+        f"{source.get('disc_number')}.{source.get('track_number')}"
+        for source in sources
+        if source.get("disc_number") is not None and source.get("track_number") is not None
+    })
+    normalized_track_names = sorted({
+        _normalize_identity_text(source.get("spotify_track_name") or source.get("source_name_raw"))
+        for source in sources
+        if _normalize_identity_text(source.get("spotify_track_name") or source.get("source_name_raw"))
+    })
+    durations = [
+        int(source["duration_ms"])
+        for source in sources
+        if source.get("duration_ms") is not None
+    ]
+    isrc_values = sorted({
+        str(source.get("isrc") or "").strip().upper()
+        for source in sources
+        if str(source.get("isrc") or "").strip()
+    })
+    version_flag_sources = [
+        {
+            "spotify_track_id": source.get("external_id"),
+            "track_name": source.get("spotify_track_name") or source.get("source_name_raw"),
+        }
+        for source in sources
+        if _TRACK_VERSION_REVIEW_PATTERN.search(str(source.get("spotify_track_name") or source.get("source_name_raw") or ""))
+    ]
+
+    evidence.update(
+        {
+            "normalized_album_names": normalized_album_names,
+            "positions": positions,
+            "normalized_track_names": normalized_track_names,
+            "duration_delta_ms": (max(durations) - min(durations)) if len(durations) >= 2 else 0,
+            "isrc_values": isrc_values,
+            "version_flag_sources": version_flag_sources,
+        }
+    )
+
+    if len(normalized_album_names) != 1:
+        reasons.append("Source rows do not all share the same normalized album name.")
+    if len(positions) != 1:
+        reasons.append("Source rows do not all share the same disc and track position.")
+    if len(normalized_track_names) != 1:
+        reasons.append("Source rows do not all share the same normalized track name.")
+    if evidence["duration_delta_ms"] > 2_000:
+        reasons.append("Source row durations differ by more than two seconds.")
+    if len(isrc_values) > 1:
+        reasons.append("Source rows have conflicting ISRC values.")
+    if version_flag_sources:
+        reasons.append("One or more source track names contain version-like wording that needs review.")
+
+    unsafe_reasons = {
+        "At least two source rows are required for source-to-release confirmation.",
+        "One or more source rows are missing required source-track metadata.",
+        "Source rows do not all share the same normalized album name.",
+        "Source rows do not all share the same disc and track position.",
+    }
+    if any(reason in unsafe_reasons for reason in reasons):
+        readiness = "unsafe"
+    elif reasons:
+        readiness = "needs_review"
+    else:
+        readiness = "safe_candidate"
+
+    return {
+        "readiness": readiness,
+        "action": "read_only_preview",
+        "reasons": reasons or ["All complete source rows share album name, track position, title, duration, and ISRC evidence."],
+        "evidence": evidence,
+    }
+
+
 
 def _duration_display(duration_ms: Any) -> str | None:
     if duration_ms is None:
@@ -2161,6 +2266,586 @@ def search_album_catalog_lookup(
         for row in rows
     ]
     return {"ok": True, "items": items, "total": total}
+
+def search_track_mapping_lineage(
+    *,
+    q: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    source_metadata: str = "all",
+    confirmation_certainty: str = "all",
+    mapping_kind: str = "source_release",
+) -> dict[str, Any]:
+    bounded_limit = max(1, min(int(limit), 100))
+    bounded_offset = max(0, int(offset))
+    normalized_q = str(q or "").strip()
+    normalized_source_metadata = str(source_metadata or "all").strip().lower()
+    if normalized_source_metadata not in {"all", "complete", "incomplete"}:
+        normalized_source_metadata = "all"
+    normalized_confirmation_certainty = str(confirmation_certainty or "all").strip().lower()
+    if normalized_confirmation_certainty not in {"all", "certain", "uncertain"}:
+        normalized_confirmation_certainty = "all"
+    normalized_mapping_kind = str(mapping_kind or "all").strip().lower()
+    if normalized_mapping_kind not in {"all", "source_release", "release_family"}:
+        normalized_mapping_kind = "all"
+    like_q = f"%{normalized_q.lower()}%"
+    source_search_clause = ""
+    source_q_params: tuple[Any, ...] = ()
+    if normalized_q:
+        source_search_clause = """
+          WHERE (
+            lower(COALESCE(rt.primary_name, '')) LIKE ?
+            OR EXISTS (
+              SELECT 1
+              FROM track_artist q_ta
+              JOIN artist q_a
+                ON q_a.id = q_ta.artist_id
+              WHERE q_ta.release_track_id = g.release_track_id
+                AND q_ta.role = 'primary'
+                AND lower(COALESCE(q_a.canonical_name, '')) LIKE ?
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM album_track q_alt
+              JOIN release_album q_ra
+                ON q_ra.id = q_alt.release_album_id
+              WHERE q_alt.release_track_id = g.release_track_id
+                AND lower(COALESCE(q_ra.primary_name, '')) LIKE ?
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM source_track_map detail_stm
+              JOIN source_track detail_st
+                ON detail_st.id = detail_stm.source_track_id
+              LEFT JOIN spotify_track_catalog detail_stc
+                ON detail_stc.spotify_track_id = detail_st.external_id
+              WHERE detail_stm.release_track_id = g.release_track_id
+                AND detail_stm.status = 'accepted'
+                AND (
+                  lower(COALESCE(detail_st.external_id, '')) LIKE ?
+                  OR lower(COALESCE(detail_st.source_name_raw, '')) LIKE ?
+                  OR lower(COALESCE(detail_stc.name, '')) LIKE ?
+                )
+            )
+          )
+        """
+        source_q_params = (like_q, like_q, like_q, like_q, like_q, like_q)
+    release_search_clause = ""
+    release_q_params: tuple[Any, ...] = ()
+    if normalized_q:
+        release_search_clause = """
+          WHERE (
+            lower(COALESCE(at.primary_name, '')) LIKE ?
+            OR lower(COALESCE(at.grouping_note, '')) LIKE ?
+            OR EXISTS (
+              SELECT 1
+              FROM analysis_track_map detail_atm
+              JOIN release_track detail_rt
+                ON detail_rt.id = detail_atm.release_track_id
+              WHERE detail_atm.analysis_track_id = g.analysis_track_id
+                AND detail_atm.status IN ('accepted', 'suggested')
+                AND lower(COALESCE(detail_rt.primary_name, '')) LIKE ?
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM analysis_track_map detail_atm
+              JOIN track_artist detail_ta
+                ON detail_ta.release_track_id = detail_atm.release_track_id
+              JOIN artist detail_a
+                ON detail_a.id = detail_ta.artist_id
+              WHERE detail_atm.analysis_track_id = g.analysis_track_id
+                AND detail_atm.status IN ('accepted', 'suggested')
+                AND detail_ta.role = 'primary'
+                AND lower(COALESCE(detail_a.canonical_name, '')) LIKE ?
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM analysis_track_map detail_atm
+              JOIN album_track detail_alt
+                ON detail_alt.release_track_id = detail_atm.release_track_id
+              JOIN release_album detail_ra
+                ON detail_ra.id = detail_alt.release_album_id
+              WHERE detail_atm.analysis_track_id = g.analysis_track_id
+                AND detail_atm.status IN ('accepted', 'suggested')
+                AND lower(COALESCE(detail_ra.primary_name, '')) LIKE ?
+            )
+          )
+        """
+        release_q_params = (like_q, like_q, like_q, like_q, like_q)
+
+    source_release_base_sql = f"""
+        WITH grouped AS (
+          SELECT
+            stm.release_track_id,
+            count(DISTINCT stm.source_track_id) AS source_count
+          FROM source_track_map stm
+          JOIN source_track st
+            ON st.id = stm.source_track_id
+          WHERE stm.status = 'accepted'
+          GROUP BY stm.release_track_id
+          HAVING source_count > 1
+        ),
+        filtered AS (
+          SELECT
+            g.release_track_id,
+            rt.primary_name AS release_track_name,
+            COALESCE(
+              (
+                SELECT group_concat(artist_rows.artist_name, ', ')
+                FROM (
+                  SELECT a.canonical_name AS artist_name
+                  FROM track_artist ta
+                  JOIN artist a
+                    ON a.id = ta.artist_id
+                  WHERE ta.release_track_id = g.release_track_id
+                    AND ta.role = 'primary'
+                  ORDER BY COALESCE(ta.billing_index, 999999), ta.id, a.canonical_name
+                ) artist_rows
+              ),
+              'Unknown artist'
+            ) AS artist_name,
+            COALESCE(
+              (
+                SELECT ra.primary_name
+                FROM album_track alt
+                JOIN release_album ra
+                  ON ra.id = alt.release_album_id
+                WHERE alt.release_track_id = g.release_track_id
+                ORDER BY alt.id ASC, ra.primary_name ASC, ra.id ASC
+                LIMIT 1
+              ),
+              'Unknown album'
+            ) AS release_album_name,
+            g.source_count
+          FROM grouped g
+          JOIN release_track rt
+            ON rt.id = g.release_track_id
+          {source_search_clause}
+        )
+    """
+    source_group_query = f"""
+        {source_release_base_sql}
+        SELECT
+          release_track_id,
+          release_track_name,
+          artist_name,
+          release_album_name,
+          source_count
+        FROM filtered
+        ORDER BY source_count DESC, release_track_name ASC, release_track_id ASC
+        LIMIT ?
+        OFFSET ?
+    """
+    source_detail_query = """
+        SELECT
+          st.id AS source_track_id,
+          st.source_name,
+          st.external_id,
+          st.source_name_raw,
+          stc.name AS spotify_track_name,
+          stc.duration_ms,
+          COALESCE(
+            NULLIF(TRIM(stc.album_id), ''),
+            NULLIF(TRIM(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.id')), '')
+          ) AS album_id,
+          sac.name AS album_name,
+          json_extract(COALESCE(stc.raw_json, '{}'), '$.album.name') AS embedded_album_name,
+          salb.source_name_raw AS source_album_name,
+          COALESCE(
+            NULLIF(TRIM(sac.name), ''),
+            NULLIF(TRIM(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.name')), ''),
+            NULLIF(TRIM(salb.source_name_raw), '')
+          ) AS album_name_display,
+          CASE
+            WHEN NULLIF(TRIM(sac.name), '') IS NOT NULL THEN 'spotify_album_catalog'
+            WHEN NULLIF(TRIM(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.name')), '') IS NOT NULL THEN 'embedded_track_album'
+            WHEN NULLIF(TRIM(salb.source_name_raw), '') IS NOT NULL THEN 'source_album'
+            ELSE NULL
+          END AS album_name_display_source,
+          COALESCE(
+            NULLIF(TRIM(sac.release_date), ''),
+            NULLIF(TRIM(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.release_date')), '')
+          ) AS album_release_date,
+          COALESCE(sac.total_tracks, json_extract(COALESCE(stc.raw_json, '{}'), '$.album.total_tracks')) AS album_total_tracks,
+          json_extract(COALESCE(sac.raw_json, '{}'), '$.copyrights[0].text') AS album_copyright,
+          stc.disc_number,
+          stc.track_number,
+          stc.fetched_at,
+          stc.last_status,
+          CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM json_each(CASE WHEN json_valid(COALESCE(stc.artists_json, '[]')) THEN COALESCE(stc.artists_json, '[]') ELSE '[]' END)
+              WHERE NULLIF(TRIM(json_extract(value, '$.name')), '') IS NOT NULL
+            ) THEN 1 ELSE 0
+          END AS has_artist_name,
+          NULLIF(TRIM(json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc')), '') AS isrc,
+          (
+            SELECT count(*)
+            FROM raw_play_event rpe
+            WHERE rpe.spotify_track_id = st.external_id
+          ) AS play_count,
+          stm.match_method,
+          stm.confidence,
+          stm.status,
+          stm.is_user_confirmed
+        FROM source_track_map stm
+        JOIN source_track st
+          ON st.id = stm.source_track_id
+        LEFT JOIN spotify_track_catalog stc
+          ON stc.spotify_track_id = st.external_id
+        LEFT JOIN spotify_album_catalog sac
+          ON sac.spotify_album_id = COALESCE(
+            NULLIF(TRIM(stc.album_id), ''),
+            NULLIF(TRIM(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.id')), '')
+          )
+        LEFT JOIN source_album salb
+          ON salb.source_name = 'spotify'
+         AND salb.external_id = COALESCE(
+            NULLIF(TRIM(stc.album_id), ''),
+            NULLIF(TRIM(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.id')), '')
+          )
+        WHERE stm.release_track_id = ?
+          AND stm.status = 'accepted'
+        ORDER BY st.source_name ASC, st.external_id ASC, st.id ASC
+    """
+
+    release_family_base_sql = f"""
+        WITH grouped AS (
+          SELECT
+            atm.analysis_track_id,
+            count(DISTINCT atm.release_track_id) AS release_count
+          FROM analysis_track_map atm
+          WHERE atm.status IN ('accepted', 'suggested')
+          GROUP BY atm.analysis_track_id
+          HAVING release_count > 1
+        ),
+        filtered AS (
+          SELECT
+            g.analysis_track_id,
+            at.primary_name AS track_family_name,
+            at.grouping_note,
+            g.release_count
+          FROM grouped g
+          JOIN analysis_track at
+            ON at.id = g.analysis_track_id
+          {release_search_clause}
+        )
+    """
+    release_group_query = f"""
+        {release_family_base_sql}
+        SELECT analysis_track_id, track_family_name, grouping_note, release_count
+        FROM filtered
+        ORDER BY release_count DESC, track_family_name ASC, analysis_track_id ASC
+        LIMIT ?
+        OFFSET ?
+    """
+    release_detail_query = """
+        SELECT
+          rt.id AS release_track_id,
+          rt.primary_name AS release_track_name,
+          COALESCE(
+            (
+              SELECT group_concat(artist_rows.artist_name, ', ')
+              FROM (
+                SELECT a.canonical_name AS artist_name
+                FROM track_artist ta
+                JOIN artist a
+                  ON a.id = ta.artist_id
+                WHERE ta.release_track_id = rt.id
+                  AND ta.role = 'primary'
+                ORDER BY COALESCE(ta.billing_index, 999999), ta.id, a.canonical_name
+              ) artist_rows
+            ),
+            'Unknown artist'
+          ) AS artist_name,
+          COALESCE(
+            (
+              SELECT ra.primary_name
+              FROM album_track alt
+              JOIN release_album ra
+                ON ra.id = alt.release_album_id
+              WHERE alt.release_track_id = rt.id
+              ORDER BY alt.id ASC, ra.primary_name ASC, ra.id ASC
+              LIMIT 1
+            ),
+            'Unknown album'
+          ) AS release_album_name,
+          (
+            SELECT count(DISTINCT sc_stm.source_track_id)
+            FROM source_track_map sc_stm
+            WHERE sc_stm.release_track_id = rt.id
+              AND sc_stm.status = 'accepted'
+          ) AS source_count,
+          (
+            SELECT count(rpe.id)
+            FROM source_track_map rl_stm
+            JOIN source_track rl_st
+              ON rl_st.id = rl_stm.source_track_id
+            JOIN raw_play_event rpe
+              ON rpe.spotify_track_id = rl_st.external_id
+            WHERE rl_stm.release_track_id = rt.id
+              AND rl_stm.status = 'accepted'
+              AND rl_st.source_name = 'spotify'
+          ) AS play_count,
+          atm.match_method,
+          atm.confidence,
+          atm.status,
+          atm.is_user_confirmed
+        FROM analysis_track_map atm
+        JOIN release_track rt
+          ON rt.id = atm.release_track_id
+        WHERE atm.analysis_track_id = ?
+          AND atm.status IN ('accepted', 'suggested')
+        ORDER BY rt.primary_name ASC, rt.id ASC
+    """
+
+    with sqlite_connection() as connection:
+        can_use_fast_source_page = (
+            normalized_source_metadata == "all"
+            and normalized_confirmation_certainty == "all"
+        )
+        source_total = 0
+        source_status_rows = connection.execute(
+            """
+            SELECT status, is_user_confirmed, count(*) AS row_count
+            FROM source_track_map
+            GROUP BY status, is_user_confirmed
+            ORDER BY status ASC, is_user_confirmed ASC
+            """
+        ).fetchall()
+        release_status_rows = connection.execute(
+            """
+            SELECT status, is_user_confirmed, count(*) AS row_count
+            FROM analysis_track_map
+            GROUP BY status, is_user_confirmed
+            ORDER BY status ASC, is_user_confirmed ASC
+            """
+        ).fetchall()
+        def build_source_group(row: Any) -> dict[str, Any]:
+            release_track_id = int(row[0])
+            detail_rows = connection.execute(source_detail_query, (release_track_id,)).fetchall()
+            source_items = []
+            source_metadata_complete_count = 0
+            source_metadata_incomplete_count = 0
+            for detail in detail_rows:
+                source_name = str(detail[1] or "")
+                external_id = str(detail[2] or "").strip() if detail[2] is not None else ""
+                metadata_gaps: list[str] = []
+                if source_name != "spotify":
+                    metadata_gaps.append("non_spotify_source")
+                if not external_id:
+                    metadata_gaps.append("spotify_track_id")
+                if not str(detail[4] or "").strip():
+                    metadata_gaps.append("track_name")
+                if detail[5] is None:
+                    metadata_gaps.append("duration_ms")
+                if not str(detail[6] or "").strip():
+                    metadata_gaps.append("album_id")
+                if detail[15] is None:
+                    metadata_gaps.append("disc_number")
+                if detail[16] is None:
+                    metadata_gaps.append("track_number")
+                if str(detail[18] or "").strip().lower() == "error":
+                    metadata_gaps.append("last_status")
+                if not bool(detail[19]):
+                    metadata_gaps.append("artists")
+                if not str(detail[20] or "").strip():
+                    metadata_gaps.append("isrc")
+                if not str(detail[10] or "").strip():
+                    metadata_gaps.append("album_display_name")
+                metadata_complete = not metadata_gaps
+                if metadata_complete:
+                    source_metadata_complete_count += 1
+                else:
+                    source_metadata_incomplete_count += 1
+                source_items.append(
+                    {
+                        "source_track_id": int(detail[0]),
+                        "source_name": source_name,
+                        "external_id": detail[2],
+                        "source_name_raw": detail[3],
+                        "spotify_track_name": detail[4],
+                        "duration_ms": int(detail[5]) if detail[5] is not None else None,
+                        "duration_display": _duration_display(detail[5]),
+                        "album_id": detail[6],
+                        "album_name": detail[7],
+                        "embedded_album_name": detail[8],
+                        "source_album_name": detail[9],
+                        "album_name_display": detail[10],
+                        "album_name_display_source": detail[11],
+                        "album_release_date": detail[12],
+                        "album_total_tracks": int(detail[13]) if detail[13] is not None else None,
+                        "album_copyright": detail[14],
+                        "disc_number": int(detail[15]) if detail[15] is not None else None,
+                        "track_number": int(detail[16]) if detail[16] is not None else None,
+                        "catalog_fetched_at": detail[17],
+                        "metadata_complete": metadata_complete,
+                        "metadata_gaps": metadata_gaps,
+                        "play_count": int(detail[21] or 0),
+                        "match_method": str(detail[22] or ""),
+                        "confidence": float(detail[23]) if detail[23] is not None else None,
+                        "status": str(detail[24] or ""),
+                        "is_user_confirmed": bool(detail[25]),
+                        "isrc": detail[20],
+                    }
+                )
+            source_group = {
+                "release_track_id": release_track_id,
+                "release_track_name": str(row[1] or ""),
+                "artist_name": str(row[2] or "Unknown artist"),
+                "release_album_name": str(row[3] or "Unknown album"),
+                "source_count": int(row[4]),
+                "source_metadata_complete_count": source_metadata_complete_count,
+                "source_metadata_incomplete_count": source_metadata_incomplete_count,
+                "all_source_metadata_complete": source_metadata_incomplete_count == 0,
+                "sources": source_items,
+            }
+            source_group["confirmation_preview"] = _source_release_confirmation_preview(source_group)
+            return source_group
+
+        def source_group_matches_active_filters(source_group: dict[str, Any]) -> bool:
+            metadata_filter = (
+                "complete"
+                if normalized_confirmation_certainty == "certain"
+                else normalized_source_metadata
+            )
+            if metadata_filter == "complete" and not source_group["all_source_metadata_complete"]:
+                return False
+            if metadata_filter == "incomplete" and source_group["all_source_metadata_complete"]:
+                return False
+            readiness = source_group["confirmation_preview"]["readiness"]
+            if normalized_confirmation_certainty == "certain":
+                return readiness == "safe_candidate"
+            if normalized_confirmation_certainty == "uncertain":
+                return readiness != "safe_candidate"
+            return True
+
+        source_groups: list[dict[str, Any]] = []
+        if normalized_mapping_kind == "release_family":
+            source_has_more = False
+            source_total_is_exact = True
+        elif can_use_fast_source_page:
+            source_group_rows = connection.execute(
+                source_group_query,
+                source_q_params + (bounded_limit + 1, bounded_offset),
+            ).fetchall()
+            source_has_more = len(source_group_rows) > bounded_limit
+            source_groups = [build_source_group(row) for row in source_group_rows[:bounded_limit]]
+            source_total = bounded_offset + len(source_groups) + (1 if source_has_more else 0)
+            source_total_is_exact = False
+        else:
+            scan_offset = 0
+            matched_count = 0
+            source_has_more = False
+            scanned_count = 0
+            max_scan_count = max(500, bounded_offset + bounded_limit + 100)
+            while len(source_groups) <= bounded_limit and scanned_count < max_scan_count:
+                source_group_rows = connection.execute(
+                    source_group_query,
+                    source_q_params + (100, scan_offset),
+                ).fetchall()
+                if not source_group_rows:
+                    break
+                for row in source_group_rows:
+                    scanned_count += 1
+                    source_group = build_source_group(row)
+                    if not source_group_matches_active_filters(source_group):
+                        continue
+                    if matched_count >= bounded_offset:
+                        source_groups.append(source_group)
+                    matched_count += 1
+                    if len(source_groups) > bounded_limit:
+                        source_has_more = True
+                        break
+                if source_has_more:
+                    break
+                scan_offset += 100
+            if source_has_more:
+                source_groups = source_groups[:bounded_limit]
+            source_total = bounded_offset + len(source_groups) + (1 if source_has_more else 0)
+            source_total_is_exact = (
+                not source_has_more
+                and scanned_count < max_scan_count
+            )
+
+        release_groups = []
+        release_total = 0
+        release_has_more = False
+        release_total_is_exact = True
+        if normalized_mapping_kind in {"all", "release_family"}:
+            release_group_rows = connection.execute(
+                release_group_query,
+                release_q_params + (bounded_limit + 1, bounded_offset),
+            ).fetchall()
+            release_has_more = len(release_group_rows) > bounded_limit
+            release_total = bounded_offset + min(len(release_group_rows), bounded_limit) + (1 if release_has_more else 0)
+            release_total_is_exact = False
+            for row in release_group_rows[:bounded_limit]:
+                analysis_track_id = int(row[0])
+                detail_rows = connection.execute(release_detail_query, (analysis_track_id,)).fetchall()
+                release_groups.append(
+                    {
+                        "analysis_track_id": analysis_track_id,
+                        "track_family_name": str(row[1] or ""),
+                        "grouping_note": row[2],
+                        "release_count": int(row[3]),
+                        "release_tracks": [
+                            {
+                                "release_track_id": int(detail[0]),
+                                "release_track_name": str(detail[1] or ""),
+                                "artist_name": str(detail[2] or "Unknown artist"),
+                                "release_album_name": str(detail[3] or "Unknown album"),
+                                "source_count": int(detail[4] or 0),
+                                "play_count": int(detail[5] or 0),
+                                "match_method": str(detail[6] or ""),
+                                "confidence": float(detail[7]) if detail[7] is not None else None,
+                                "status": str(detail[8] or ""),
+                                "is_user_confirmed": bool(detail[9]),
+                            }
+                            for detail in detail_rows
+                        ],
+                    }
+                )
+
+    return {
+        "ok": True,
+        "source_release": {
+            "total": source_total,
+            "groups": source_groups,
+            "included_statuses": ["accepted"],
+            "source_metadata_filter": normalized_source_metadata,
+            "confirmation_certainty_filter": normalized_confirmation_certainty,
+            "has_more": source_has_more,
+            "total_is_exact": source_total_is_exact,
+            "map_counts": [
+                {
+                    "status": str(row[0] or ""),
+                    "is_user_confirmed": bool(row[1]),
+                    "count": int(row[2] or 0),
+                }
+                for row in source_status_rows
+            ],
+        },
+        "release_family": {
+            "total": release_total,
+            "groups": release_groups,
+            "included_statuses": ["accepted", "suggested"],
+            "has_more": release_has_more,
+            "total_is_exact": release_total_is_exact,
+            "map_counts": [
+                {
+                    "status": str(row[0] or ""),
+                    "is_user_confirmed": bool(row[1]),
+                    "count": int(row[2] or 0),
+                }
+                for row in release_status_rows
+            ],
+        },
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+        "mapping_kind_filter": normalized_mapping_kind,
+    }
 
 
 def search_album_catalog_duplicate_spotify_identities(

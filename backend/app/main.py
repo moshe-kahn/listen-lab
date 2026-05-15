@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import secrets
+import sqlite3
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -57,6 +58,7 @@ from backend.app.spotify_catalog_backfill import (
     search_album_catalog_lookup,
     search_track_catalog_duplicate_spotify_identities,
     search_track_catalog_lookup,
+    search_track_mapping_lineage,
 )
 from backend.app.spotify_token_store import (
     SpotifyTokenStoreError,
@@ -147,8 +149,22 @@ app.add_middleware(
 async def _ensure_sqlite_db_on_startup() -> None:
     log_file_path = configure_logging()
     validate_token_encryption_key()
-    ensure_sqlite_db()
-    apply_pending_migrations()
+    try:
+        ensure_sqlite_db()
+        apply_pending_migrations()
+    except sqlite3.OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            db_path = get_settings().sqlite_db_path
+            logger.error(
+                "event=sqlite_startup_locked db_path=%s hint=%s",
+                db_path,
+                "another ListenLab process is holding the database; stop stale uvicorn/worker processes and restart",
+            )
+            raise RuntimeError(
+                f"SQLite database is locked at startup: {db_path}. "
+                "Stop stale ListenLab uvicorn/worker processes that are holding the DB, then restart."
+            ) from exc
+        raise
     stale_recovery = recover_stale_ingest_runs(stale_after_minutes=60)
     if int(stale_recovery["recovered_count"]) > 0:
         logger.warning(
@@ -4483,7 +4499,7 @@ async def debug_spotify_catalog_backfill_queue_repair(
 
 
 @app.get("/debug/search/albums")
-async def debug_search_albums(
+def debug_search_albums(
     request: Request,
     q: str | None = None,
     catalog_status: str = "all",
@@ -4504,7 +4520,7 @@ async def debug_search_albums(
 
 
 @app.get("/debug/search/albums/duplicates")
-async def debug_search_album_duplicates(
+def debug_search_album_duplicates(
     request: Request,
     limit: int = 200,
     offset: int = 0,
@@ -4514,7 +4530,7 @@ async def debug_search_album_duplicates(
 
 
 @app.get("/debug/search/albums/duplicates-by-name")
-async def debug_search_album_duplicates_by_name(
+def debug_search_album_duplicates_by_name(
     request: Request,
     limit: int = 200,
     offset: int = 0,
@@ -4524,7 +4540,7 @@ async def debug_search_album_duplicates_by_name(
 
 
 @app.get("/debug/search/tracks")
-async def debug_search_tracks(
+def debug_search_tracks(
     request: Request,
     q: str | None = None,
     catalog_status: str = "all",
@@ -4545,13 +4561,33 @@ async def debug_search_tracks(
 
 
 @app.get("/debug/search/tracks/duplicates")
-async def debug_search_track_duplicates(
+def debug_search_track_duplicates(
     request: Request,
     limit: int = 200,
     offset: int = 0,
 ) -> dict[str, Any]:
     _require_local_data_session(request)
     return search_track_catalog_duplicate_spotify_identities(limit=limit, offset=offset)
+
+@app.get("/debug/search/tracks/lineage")
+def debug_search_track_lineage(
+    request: Request,
+    q: str | None = None,
+    mapping_kind: str = "source_release",
+    source_metadata: str = "all",
+    confirmation_certainty: str = "all",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return search_track_mapping_lineage(
+        q=q,
+        mapping_kind=mapping_kind,
+        source_metadata=source_metadata,
+        confirmation_certainty=confirmation_certainty,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.get("/debug/tracks/identity-audit/readiness")

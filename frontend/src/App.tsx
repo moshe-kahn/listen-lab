@@ -248,8 +248,8 @@ type TrackIdentityAuditResponse = {
   analysis_track_groups: TrackIdentityAuditExample[];
 };
 
-type TrackIdentityAuditTab = "overview" | "canonical" | "composition" | "family" | "release";
-type AlbumIdentityAuditTab = "overview" | "spotify_duplicates" | "name_duplicates" | "merge_review";
+type TrackIdentityAuditTab = "overview" | "canonical" | "composition" | "family" | "release" | "track_mapping";
+type AlbumIdentityAuditTab = "overview" | "duplicate_albums" | "name_duplicates" | "merge_review";
 type IdentityAuditEntityTab = "tracks" | "albums" | "artists";
 
 type AmbiguousReviewComponent = {
@@ -726,6 +726,108 @@ type TrackCatalogLookupResponse = {
   total: number;
 };
 
+type TrackMappingSourceItem = {
+  source_track_id: number;
+  source_name: string;
+  external_id: string | null;
+  source_name_raw: string | null;
+  spotify_track_name: string | null;
+  duration_ms: number | null;
+  duration_display: string | null;
+  album_id: string | null;
+  album_name: string | null;
+  embedded_album_name: string | null;
+  source_album_name: string | null;
+  album_name_display: string | null;
+  album_name_display_source: string | null;
+  album_release_date: string | null;
+  album_total_tracks: number | null;
+  album_copyright: string | null;
+  disc_number: number | null;
+  track_number: number | null;
+  catalog_fetched_at: string | null;
+  metadata_complete: boolean;
+  metadata_gaps: string[];
+  play_count: number;
+  match_method: string;
+  confidence: number | null;
+  status: string;
+  is_user_confirmed: boolean;
+  isrc?: string | null;
+};
+
+type TrackMappingConfirmationPreview = {
+  readiness: "safe_candidate" | "needs_review" | "unsafe" | string;
+  action: "read_only_preview" | string;
+  reasons: string[];
+  evidence: {
+    source_count: number;
+    normalized_album_names: string[];
+    positions: string[];
+    normalized_track_names: string[];
+    duration_delta_ms: number;
+    isrc_values: string[];
+    version_flag_sources: Array<{ spotify_track_id: string | null; track_name: string | null }>;
+    incomplete_sources?: Array<string | number | null>;
+  };
+};
+
+type TrackMappingSourceReleaseGroup = {
+  release_track_id: number;
+  release_track_name: string;
+  artist_name: string;
+  release_album_name: string;
+  source_count: number;
+  source_metadata_complete_count: number;
+  source_metadata_incomplete_count: number;
+  all_source_metadata_complete: boolean;
+  confirmation_preview: TrackMappingConfirmationPreview;
+  sources: TrackMappingSourceItem[];
+};
+
+type TrackMappingReleaseItem = {
+  release_track_id: number;
+  release_track_name: string;
+  artist_name: string;
+  release_album_name: string;
+  source_count: number;
+  play_count: number;
+  match_method: string;
+  confidence: number | null;
+  status: string;
+  is_user_confirmed: boolean;
+};
+
+type TrackMappingReleaseFamilyGroup = {
+  analysis_track_id: number;
+  track_family_name: string;
+  grouping_note: string | null;
+  release_count: number;
+  release_tracks: TrackMappingReleaseItem[];
+};
+
+type TrackMappingLineageResponse = {
+  ok: boolean;
+  source_release: {
+    total: number;
+    groups: TrackMappingSourceReleaseGroup[];
+    included_statuses: string[];
+    source_metadata_filter: "all" | "complete" | "incomplete";
+    confirmation_certainty_filter?: "all" | "certain" | "uncertain" | string;
+    has_more?: boolean;
+    total_is_exact?: boolean;
+    map_counts: Array<{ status: string; is_user_confirmed: boolean; count: number }>;
+  };
+  release_family: {
+    total: number;
+    groups: TrackMappingReleaseFamilyGroup[];
+    included_statuses: string[];
+    map_counts: Array<{ status: string; is_user_confirmed: boolean; count: number }>;
+  };
+  limit: number;
+  offset: number;
+};
+
 type CatalogBackfillCoverageResponse = {
   ok: boolean;
   known_release_tracks: number;
@@ -834,6 +936,7 @@ type UnifiedReviewItem = {
 };
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
+const TRACK_MAPPING_FETCH_TIMEOUT_MS = 20000;
 const githubRepoUrl = "https://github.com/moshe-kahn/listen-labs";
 const EXPERIENCE_MODE_STORAGE_KEY = "listenlab-experience-mode";
 const LIVE_PLAYBACK_POLL_INTERVAL_MS = 10_000;
@@ -1225,7 +1328,7 @@ export function App() {
   const [catalogBackfillMax429, setCatalogBackfillMax429] = useState(3);
   const [catalogBackfillAlbumTracklistPolicy, setCatalogBackfillAlbumTracklistPolicy] = useState<"all" | "priority_only" | "relevant_albums" | "none">("relevant_albums");
   const [catalogBackfillFullRunMode, setCatalogBackfillFullRunMode] = useState<"tracklists_relevant" | "full_catalog">("tracklists_relevant");
-  const [searchLookupEntityType, setSearchLookupEntityType] = useState<"albums" | "tracks" | "duplicate_albums">("albums");
+  const [searchLookupEntityType, setSearchLookupEntityType] = useState<"albums" | "tracks">("albums");
   const [searchLookupQueueStatus, setSearchLookupQueueStatus] = useState<"all" | "not_queued" | "pending" | "done" | "error">("all");
   const [searchLookupSort, setSearchLookupSort] = useState<"default" | "recently_backfilled" | "name" | "incomplete_first">("default");
   const [albumCatalogLookupQ, setAlbumCatalogLookupQ] = useState("");
@@ -1241,6 +1344,15 @@ export function App() {
   const [trackCatalogLookupLoaded, setTrackCatalogLookupLoaded] = useState(false);
   const [trackCatalogLookupError, setTrackCatalogLookupError] = useState("");
   const [trackCatalogLookupLastLoadedAt, setTrackCatalogLookupLastLoadedAt] = useState<number | null>(null);
+  const [trackMappingLineageResult, setTrackMappingLineageResult] = useState<TrackMappingLineageResponse | null>(null);
+  const [trackMappingLineageLoading, setTrackMappingLineageLoading] = useState(false);
+  const [trackMappingLineageLoaded, setTrackMappingLineageLoaded] = useState(false);
+  const [trackMappingLineageError, setTrackMappingLineageError] = useState("");
+  const [trackMappingLineageLastLoadedAt, setTrackMappingLineageLastLoadedAt] = useState<number | null>(null);
+  const [trackMappingKindFilter, setTrackMappingKindFilter] = useState<"all" | "source_release" | "release_family">("source_release");
+  const [trackMappingConfirmationFilter, setTrackMappingConfirmationFilter] = useState<"all" | "confirmed" | "unconfirmed">("all");
+  const [trackMappingSourceMetadataFilter, setTrackMappingSourceMetadataFilter] = useState<"all" | "complete" | "incomplete">("all");
+  const [trackMappingCertaintyFilter, setTrackMappingCertaintyFilter] = useState<"all" | "certain" | "uncertain">("all");
   const [albumDuplicateLookupResult, setAlbumDuplicateLookupResult] = useState<AlbumDuplicateLookupResponse | null>(null);
   const [albumDuplicateLookupLoading, setAlbumDuplicateLookupLoading] = useState(false);
   const [albumDuplicateLookupLoaded, setAlbumDuplicateLookupLoaded] = useState(false);
@@ -1343,6 +1455,7 @@ export function App() {
   const previewingTrackUriRef = useRef<string | null>(null);
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
+  const trackMappingLineageRequestIdRef = useRef(0);
   const liveProgressAnchorRef = useRef<{ baseProgressMs: number; receivedAtMs: number; durationMs: number } | null>(null);
   const liveEndRefreshRequestedRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
@@ -1617,10 +1730,6 @@ export function App() {
     if (appPage !== "searchLookup" || !profile) {
       return;
     }
-    if (searchLookupEntityType === "duplicate_albums" && !albumDuplicateLookupLoaded && !albumDuplicateLookupLoading) {
-      void loadAlbumDuplicateLookup(true);
-      return;
-    }
     if (searchLookupEntityType === "tracks" && !trackCatalogLookupLoaded && !trackCatalogLookupLoading) {
       void loadTrackCatalogLookup(true);
       return;
@@ -1636,8 +1745,6 @@ export function App() {
     albumCatalogLookupLoading,
     trackCatalogLookupLoaded,
     trackCatalogLookupLoading,
-    albumDuplicateLookupLoaded,
-    albumDuplicateLookupLoading,
   ]);
 
   useEffect(() => {
@@ -1862,6 +1969,9 @@ export function App() {
     if (identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "release" && !trackDuplicateLookupLoaded && !trackDuplicateLookupLoading) {
       void loadTrackDuplicateLookup(true);
     }
+    if (identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "track_mapping" && !trackMappingLineageLoaded && !trackMappingLineageLoading) {
+      void loadTrackMappingLineage(true);
+    }
     if (identityAuditEntityTab !== "albums") {
       return;
     }
@@ -1881,6 +1991,8 @@ export function App() {
     albumNameDuplicateLookupLoading,
     trackDuplicateLookupLoaded,
     trackDuplicateLookupLoading,
+    trackMappingLineageLoaded,
+    trackMappingLineageLoading,
   ]);
 
   useEffect(() => {
@@ -4005,6 +4117,134 @@ export function App() {
       albumId: spotifyAlbumId,
       artistName: item.artist_name ?? null,
       sourceTrack: null,
+    });
+  }
+
+  function openTrackLookupPreview(item: TrackCatalogLookupItem) {
+    const spotifyTrackId = item.spotify_track_id ?? null;
+    const spotifyAlbumId = item.album_id ?? null;
+    const sourceTrack: RecentTrack = {
+      track_id: spotifyTrackId,
+      track_name: item.spotify_track_name ?? item.release_track_name,
+      artist_name: item.artist_name,
+      album_name: item.release_album_name,
+      duration_ms: item.duration_ms,
+      uri: spotifyTrackId ? `spotify:track:${spotifyTrackId}` : null,
+      url: spotifyEntityUrl("track", spotifyTrackId),
+      album_id: spotifyAlbumId,
+      album_url: spotifyEntityUrl("album", spotifyAlbumId),
+    };
+    setSelectedPreview({
+      image: null,
+      fallbackLabel: "T",
+      label: item.spotify_track_name ?? item.release_track_name,
+      meta: item.artist_name ?? null,
+      detail: item.release_album_name ?? null,
+      kind: "track",
+      entityId: spotifyTrackId,
+      trackUri: trackUriWithFallback(sourceTrack.uri, spotifyTrackId),
+      url: sourceTrack.url ?? "",
+      trackId: spotifyTrackId,
+      albumId: spotifyAlbumId,
+      artistName: item.artist_name ?? null,
+      sourceTrack,
+    });
+  }
+
+  function openTrackMappingSourcePreview(group: TrackMappingSourceReleaseGroup, source: TrackMappingSourceItem) {
+    const spotifyTrackId = source.source_name === "spotify" ? source.external_id : null;
+    const spotifyAlbumId = source.album_id ?? null;
+    const trackName = source.spotify_track_name ?? source.source_name_raw ?? group.release_track_name;
+    const albumName = source.album_name_display ?? source.album_name ?? group.release_album_name;
+    const sourceTrack: RecentTrack = {
+      track_id: spotifyTrackId,
+      track_name: trackName,
+      artist_name: group.artist_name,
+      album_name: albumName,
+      duration_ms: source.duration_ms,
+      uri: spotifyTrackId ? `spotify:track:${spotifyTrackId}` : null,
+      url: spotifyEntityUrl("track", spotifyTrackId),
+      album_id: spotifyAlbumId,
+      album_url: spotifyEntityUrl("album", spotifyAlbumId),
+      spotify_track_number: source.track_number,
+      spotify_disc_number: source.disc_number,
+      spotify_album_total_tracks: source.album_total_tracks,
+      play_count: source.play_count,
+    };
+    setSelectedPreview({
+      image: null,
+      fallbackLabel: "T",
+      label: trackName,
+      meta: group.artist_name ?? null,
+      detail: albumName ?? null,
+      kind: "track",
+      entityId: spotifyTrackId,
+      trackUri: trackUriWithFallback(sourceTrack.uri, spotifyTrackId),
+      url: sourceTrack.url ?? "",
+      trackId: spotifyTrackId,
+      albumId: spotifyAlbumId,
+      artistName: group.artist_name ?? null,
+      sourceTrack,
+    });
+  }
+
+  function openTrackMappingSourceReleasePreview(group: TrackMappingSourceReleaseGroup) {
+    const sourceTrack: RecentTrack = {
+      track_id: null,
+      track_name: group.release_track_name,
+      artist_name: group.artist_name,
+      album_name: group.release_album_name,
+      duration_ms: null,
+      uri: null,
+      url: null,
+      album_id: null,
+      album_url: null,
+      play_count: group.sources.reduce((sum, source) => sum + source.play_count, 0),
+    };
+    setSelectedPreview({
+      image: null,
+      fallbackLabel: "T",
+      label: group.release_track_name,
+      meta: group.artist_name ?? null,
+      detail: group.release_album_name ?? null,
+      kind: "track",
+      entityId: null,
+      trackUri: null,
+      url: "",
+      trackId: null,
+      albumId: null,
+      artistName: group.artist_name ?? null,
+      sourceTrack,
+    });
+  }
+
+  function openTrackMappingReleasePreview(track: TrackMappingReleaseItem) {
+    const sourceTrack: RecentTrack = {
+      track_id: null,
+      track_name: track.release_track_name,
+      artist_name: track.artist_name,
+      album_name: track.release_album_name,
+      duration_ms: null,
+      uri: null,
+      url: null,
+      album_id: null,
+      album_url: null,
+      play_count: track.play_count,
+    };
+    setSelectedPreview({
+      image: null,
+      fallbackLabel: "T",
+      label: track.release_track_name,
+      meta: track.artist_name ?? null,
+      detail: track.release_album_name ?? null,
+      kind: "track",
+      entityId: null,
+      trackUri: null,
+      url: "",
+      trackId: null,
+      albumId: null,
+      artistName: track.artist_name ?? null,
+      sourceTrack,
     });
   }
 
@@ -6393,6 +6633,260 @@ export function App() {
     );
   }
 
+  function renderTrackIdentityAuditMappingTab() {
+    const sourceMapCounts = trackMappingLineageResult?.source_release.map_counts ?? [];
+    const familyMapCounts = trackMappingLineageResult?.release_family.map_counts ?? [];
+    const sourceReleaseGroups = (trackMappingLineageResult?.source_release.groups ?? [])
+      .map((group) => ({
+        ...group,
+        sources: group.sources.filter((source) => (
+          trackMappingConfirmationFilter === "all"
+            || (trackMappingConfirmationFilter === "confirmed" && source.is_user_confirmed)
+            || (trackMappingConfirmationFilter === "unconfirmed" && !source.is_user_confirmed)
+        )),
+      }))
+      .filter((group) => group.sources.length > 0);
+    const releaseFamilyGroups = (trackMappingLineageResult?.release_family.groups ?? [])
+      .map((group) => ({
+        ...group,
+        release_tracks: group.release_tracks.filter((track) => (
+          trackMappingConfirmationFilter === "all"
+            || (trackMappingConfirmationFilter === "confirmed" && track.is_user_confirmed)
+            || (trackMappingConfirmationFilter === "unconfirmed" && !track.is_user_confirmed)
+        )),
+      }))
+      .filter((group) => group.release_tracks.length > 0);
+    const showSourceReleaseGroups = trackMappingKindFilter === "all" || trackMappingKindFilter === "source_release";
+    const showReleaseFamilyGroups = trackMappingKindFilter === "all" || trackMappingKindFilter === "release_family";
+    const formatMappingCounts = (items: Array<{ status: string; is_user_confirmed: boolean; count: number }>) => (
+      items.length > 0
+        ? items.map((item) => `${item.status || "unknown"} ${item.is_user_confirmed ? "confirmed" : "unconfirmed"}: ${item.count}`).join(" · ")
+        : "No map rows"
+    );
+    const confirmationPreviewLabel = (preview: TrackMappingConfirmationPreview) => {
+      if (preview.readiness === "safe_candidate") {
+        return "confirm candidate";
+      }
+      if (preview.readiness === "needs_review") {
+        return "needs review";
+      }
+      if (preview.readiness === "unsafe") {
+        return "not confirmable";
+      }
+      return preview.readiness;
+    };
+
+    return (
+      <div className="identity-audit-grid">
+        <p className="identity-audit-tab-copy">
+          Review source-track to release-track and release-track to family mappings. This is read-only.
+        </p>
+        <div className="identity-audit-ambiguous-toolbar">
+          <label>
+            Query
+            <input
+              onChange={(event) => setAlbumCatalogLookupQ(event.target.value)}
+              placeholder="Track, artist, album, family, or Spotify track id"
+              type="text"
+              value={albumCatalogLookupQ}
+            />
+          </label>
+          <label>
+            Mapping type
+            <select
+              onChange={(event) => {
+                const nextValue = event.target.value as "all" | "source_release" | "release_family";
+                setTrackMappingKindFilter(nextValue);
+                void loadTrackMappingLineage(true, nextValue, trackMappingSourceMetadataFilter, trackMappingCertaintyFilter);
+              }}
+              value={trackMappingKindFilter}
+            >
+              <option value="all">All mapping types</option>
+              <option value="source_release">Source to release</option>
+              <option value="release_family">Release to family</option>
+            </select>
+          </label>
+          <label>
+            Confirmation
+            <select
+              onChange={(event) => setTrackMappingConfirmationFilter(event.target.value as "all" | "confirmed" | "unconfirmed")}
+              value={trackMappingConfirmationFilter}
+            >
+              <option value="all">All confirmations</option>
+              <option value="confirmed">Confirmed only</option>
+              <option value="unconfirmed">Unconfirmed only</option>
+            </select>
+          </label>
+          <label>
+            Source metadata
+            <select
+              onChange={(event) => {
+                const nextValue = event.target.value as "all" | "complete" | "incomplete";
+                setTrackMappingSourceMetadataFilter(nextValue);
+                void loadTrackMappingLineage(true, trackMappingKindFilter, nextValue, trackMappingCertaintyFilter);
+              }}
+              value={trackMappingSourceMetadataFilter}
+            >
+              <option value="all">All source rows</option>
+              <option value="complete">All complete</option>
+              <option value="incomplete">Needs metadata</option>
+            </select>
+          </label>
+          <label>
+            Certainty
+            <select
+              onChange={(event) => {
+                const nextValue = event.target.value as "all" | "certain" | "uncertain";
+                setTrackMappingCertaintyFilter(nextValue);
+                void loadTrackMappingLineage(true, trackMappingKindFilter, trackMappingSourceMetadataFilter, nextValue);
+              }}
+              value={trackMappingCertaintyFilter}
+            >
+              <option value="all">All certainty</option>
+              <option value="certain">Certain</option>
+              <option value="uncertain">Uncertain</option>
+            </select>
+          </label>
+          <button
+            className="primary-button"
+            disabled={trackMappingLineageLoading}
+            onClick={() => void loadTrackMappingLineage(true)}
+            type="button"
+          >
+            {trackMappingLineageLoading ? "Loading..." : "Search"}
+          </button>
+        </div>
+        {trackMappingLineageError ? <p className="empty-copy">{trackMappingLineageError}</p> : null}
+        {!trackMappingLineageResult && trackMappingLineageLoading ? <p className="empty-copy">Loading track mapping...</p> : null}
+        {trackMappingLineageResult ? (
+          <div className="tracks-only-summary">
+            <span>Source to release groups: {trackMappingLineageResult.source_release.total_is_exact === false ? `${trackMappingLineageResult.source_release.groups.length}${trackMappingLineageResult.source_release.has_more ? "+" : ""} loaded` : trackMappingLineageResult.source_release.total}</span>
+            <span>Release to family groups: {trackMappingLineageResult.release_family.total}</span>
+            <span>Source map counts: {formatMappingCounts(sourceMapCounts)}</span>
+            <span>Family map counts: {formatMappingCounts(familyMapCounts)}</span>
+            {trackMappingLineageLastLoadedAt ? <span>Loaded {new Date(trackMappingLineageLastLoadedAt).toLocaleTimeString()}</span> : null}
+          </div>
+        ) : null}
+        {trackMappingLineageResult && showSourceReleaseGroups && sourceReleaseGroups.length > 0 ? (
+          <div className="identity-audit-group">
+            <div className="tracks-formula-heading">
+              <h3>Source Tracks Into One Release Track</h3>
+              <span>{sourceReleaseGroups.length}</span>
+            </div>
+            <div className="identity-audit-review-list">
+              {sourceReleaseGroups.map((group) => (
+                <article className="source-release-track-group" key={`identity-source-release-${group.release_track_id}`}>
+                  <div className="source-release-track-header">
+                    <div>
+                      <h4>
+                        <button
+                          className="detail-modal-inline-link"
+                          onClick={() => openTrackMappingSourceReleasePreview(group)}
+                          type="button"
+                        >
+                          {group.release_track_name}
+                        </button>
+                      </h4>
+                      <p className="empty-copy">{group.artist_name} · {group.release_album_name}</p>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <span className="track-ranking-chip">{group.source_count} sources</span>
+                      <span className="track-ranking-chip">
+                        {group.all_source_metadata_complete ? "metadata complete" : `${group.source_metadata_incomplete_count} need metadata`}
+                      </span>
+                      <span className={`track-ranking-chip source-release-confirmation-chip source-release-confirmation-${group.confirmation_preview.readiness}`}>
+                        {confirmationPreviewLabel(group.confirmation_preview)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="source-release-source-list">
+                    {group.sources.map((source) => (
+                      <div className="source-release-source-row" key={`identity-source-release-${group.release_track_id}-${source.source_track_id}`}>
+                        <div className="source-release-source-main">
+                          <span className="source-release-source-kind">{source.source_name}</span>
+                          <button
+                            className="detail-modal-inline-link source-release-track-name-button"
+                            onClick={() => openTrackMappingSourcePreview(group, source)}
+                            type="button"
+                          >
+                            <strong>{source.spotify_track_name ?? source.source_name_raw ?? "Unknown track"}</strong>
+                          </button>
+                          <span className="source-release-id">{source.external_id ?? "No external ID"}</span>
+                        </div>
+                        <div className="source-release-source-album">
+                          <strong>{source.album_name_display ?? source.album_name ?? "Unknown album"}</strong>
+                          <span>{source.album_release_date ?? "No date"} · {source.album_id ?? "No album ID"}</span>
+                        </div>
+                        <div className="source-release-source-stats">
+                          <span>pos {source.disc_number ?? "?"}.{source.track_number ?? "?"}</span>
+                          <span>{source.duration_display ?? "Unknown"}</span>
+                          <span>{source.play_count} plays</span>
+                          <span>{source.metadata_complete ? "metadata complete" : `missing ${source.metadata_gaps.join(", ") || "metadata"}`}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {trackMappingLineageResult && showReleaseFamilyGroups && releaseFamilyGroups.length > 0 ? (
+          <div className="identity-audit-group">
+            <div className="tracks-formula-heading">
+              <h3>Release Tracks Into One Track Family</h3>
+              <span>{releaseFamilyGroups.length}</span>
+            </div>
+            <div className="identity-audit-review-list">
+              {releaseFamilyGroups.map((group) => (
+                <article className="identity-audit-review-card" key={`identity-release-family-${group.analysis_track_id}`}>
+                  <div className="identity-audit-review-card-header">
+                    <div>
+                      <h4>{group.track_family_name}</h4>
+                      {group.grouping_note ? <p className="empty-copy">{group.grouping_note}</p> : null}
+                    </div>
+                    <span className="track-ranking-chip">{group.release_count} releases</span>
+                  </div>
+                  <div className="source-release-source-list">
+                    {group.release_tracks.map((track) => (
+                      <div className="source-release-source-row" key={`identity-release-family-${group.analysis_track_id}-${track.release_track_id}`}>
+                        <div className="source-release-source-main">
+                          <button
+                            className="detail-modal-inline-link source-release-track-name-button"
+                            onClick={() => openTrackMappingReleasePreview(track)}
+                            type="button"
+                          >
+                            <strong>{track.release_track_name}</strong>
+                          </button>
+                          <span>{track.artist_name}</span>
+                        </div>
+                        <div className="source-release-source-album">
+                          <strong>{track.release_album_name}</strong>
+                          <span>{track.source_count} sources · {track.play_count} plays</span>
+                        </div>
+                        <div className="source-release-source-map">
+                          <span>{track.match_method}</span>
+                          <span>{track.confidence !== null ? track.confidence.toFixed(2) : "no confidence"}</span>
+                          <span>{track.is_user_confirmed ? "confirmed" : "unconfirmed"}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {trackMappingLineageResult && (
+          (!showSourceReleaseGroups || sourceReleaseGroups.length === 0)
+          && (!showReleaseFamilyGroups || releaseFamilyGroups.length === 0)
+        ) ? (
+          <p className="empty-copy">No track mapping groups match the active filters.</p>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderAlbumIdentityAuditOverviewTab() {
     const mergeTargets = collectAlbumMergeReviewTargets();
     const previewedCount = mergeTargets.filter((target) => releaseAlbumMergePreviewByKey[target.key]).length;
@@ -6400,7 +6894,7 @@ export function App() {
     return (
       <div className="identity-audit-overview-grid">
         <article className="identity-audit-overview-card">
-          <h3>Duplicate Spotify IDs</h3>
+          <h3>Duplicate Albums</h3>
           <p>Strongest album duplicate signal using one resolved Spotify album.</p>
           <strong>{albumDuplicateLookupResult?.total ?? 0}</strong>
         </article>
@@ -6446,7 +6940,7 @@ export function App() {
     return (
       <div className="identity-audit-grid">
         <p className="identity-audit-tab-copy">
-          Review album duplicates that already resolve to the same Spotify album ID.
+          Review duplicate albums that already resolve to the same Spotify album ID.
         </p>
         <div style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: "8px" }}>
           {[
@@ -7724,12 +8218,13 @@ export function App() {
       { value: "overview", label: "Overview" },
       { value: "canonical", label: "Canonical Splits" },
       { value: "release", label: "Release" },
+      { value: "track_mapping", label: "Track Mapping" },
       { value: "composition", label: "Composition Groups" },
       { value: "family", label: "Family" },
     ];
     const albumTabs: Array<{ value: AlbumIdentityAuditTab; label: string }> = [
       { value: "overview", label: "Overview" },
-      { value: "spotify_duplicates", label: "Duplicate Spotify IDs" },
+      { value: "duplicate_albums", label: "Duplicate Albums" },
       { value: "name_duplicates", label: "Duplicate Name + Artist" },
       { value: "merge_review", label: "Merge Review" },
     ];
@@ -7825,10 +8320,11 @@ export function App() {
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "overview" ? renderTrackIdentityAuditOverviewTab() : null}
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "canonical" ? renderTrackIdentityAuditCanonicalTab() : null}
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "release" ? renderTrackIdentityAuditReleaseTab() : null}
+        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "track_mapping" ? renderTrackIdentityAuditMappingTab() : null}
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "composition" ? renderTrackIdentityAuditCompositionTab() : null}
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "family" ? renderTrackIdentityAuditAmbiguousTab() : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "overview" ? renderAlbumIdentityAuditOverviewTab() : null}
-        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "spotify_duplicates" ? renderAlbumIdentityAuditSpotifyDuplicatesTab() : null}
+        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "duplicate_albums" ? renderAlbumIdentityAuditSpotifyDuplicatesTab() : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "name_duplicates" ? renderAlbumIdentityAuditNameDuplicatesTab() : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "merge_review" ? renderAlbumIdentityAuditMergeReviewTab() : null}
         {identityAuditEntityTab === "artists" ? renderArtistIdentityAuditPlaceholder() : null}
@@ -8172,7 +8668,6 @@ export function App() {
     }
 
     const isAlbumsLookup = searchLookupEntityType === "albums";
-    const isDuplicateAlbumsLookup = searchLookupEntityType === "duplicate_albums";
     const visibleAlbumItems = albumCatalogLookupResult?.items ?? [];
     const visibleTrackItems = trackCatalogLookupResult?.items ?? [];
     const visibleIncompleteAlbumIds = Array.from(
@@ -8237,7 +8732,7 @@ export function App() {
         </div>
 
         <div className="info-card-body">
-          <h3>{searchLookupEntityType === "albums" ? "Album Catalog Lookup" : searchLookupEntityType === "tracks" ? "Track Catalog Lookup" : "Duplicate Albums"}</h3>
+          <h3>{searchLookupEntityType === "albums" ? "Album Catalog Lookup" : "Track Catalog Lookup"}</h3>
           <div className="identity-audit-ambiguous-toolbar">
             <div className="track-ranking-toggle" role="group" aria-label="Lookup type">
               <button
@@ -8262,35 +8757,19 @@ export function App() {
               >
                 Tracks
               </button>
-              <button
-                className={`track-ranking-chip${isDuplicateAlbumsLookup ? " track-ranking-chip-active" : ""}`}
-                onClick={() => {
-                  setSearchLookupEntityType("duplicate_albums");
-                  setAlbumCatalogLookupEnqueueError("");
-                  setAlbumCatalogLookupEnqueueResult(null);
-                }}
-                type="button"
-              >
-                Duplicate Albums
-              </button>
             </div>
             <label>
               Query
               <input
                 onChange={(event) => setAlbumCatalogLookupQ(event.target.value)}
-                placeholder={isAlbumsLookup ? "Album, artist, or Spotify album id" : isDuplicateAlbumsLookup ? "Not used for duplicate view" : "Track, artist, album, or Spotify track id"}
+                placeholder={isAlbumsLookup ? "Album, artist, or Spotify album id" : "Track, artist, album, or Spotify track id"}
                 type="text"
                 value={albumCatalogLookupQ}
-                disabled={isDuplicateAlbumsLookup}
               />
             </label>
             <label>
               Catalog status
-              {isDuplicateAlbumsLookup ? (
-                <select disabled value="all">
-                  <option value="all">all</option>
-                </select>
-              ) : isAlbumsLookup ? (
+              {isAlbumsLookup ? (
                 <select
                   onChange={(event) => setAlbumCatalogLookupStatus(event.target.value as "all" | "backfilled" | "not_backfilled" | "tracklist_complete" | "tracklist_incomplete" | "error")}
                   value={albumCatalogLookupStatus}
@@ -8320,7 +8799,6 @@ export function App() {
               <select
                 onChange={(event) => setSearchLookupQueueStatus(event.target.value as "all" | "not_queued" | "pending" | "done" | "error")}
                 value={searchLookupQueueStatus}
-                disabled={isDuplicateAlbumsLookup}
               >
                 <option value="all">All queue states</option>
                 <option value="not_queued">Not queued</option>
@@ -8334,7 +8812,6 @@ export function App() {
               <select
                 onChange={(event) => setSearchLookupSort(event.target.value as "default" | "recently_backfilled" | "name" | "incomplete_first")}
                 value={searchLookupSort}
-                disabled={isDuplicateAlbumsLookup}
               >
                 <option value="default">Default</option>
                 <option value="recently_backfilled">Recently backfilled</option>
@@ -8344,17 +8821,17 @@ export function App() {
             </label>
             <button
               className="primary-button"
-              disabled={isDuplicateAlbumsLookup ? albumDuplicateLookupLoading : isAlbumsLookup ? albumCatalogLookupLoading : trackCatalogLookupLoading}
+              disabled={isAlbumsLookup ? albumCatalogLookupLoading : trackCatalogLookupLoading}
               onClick={() => {
                 void loadActiveSearchLookup(true);
               }}
               type="button"
             >
-              {isDuplicateAlbumsLookup ? (albumDuplicateLookupLoading ? "Loading..." : "Refresh") : isAlbumsLookup ? (albumCatalogLookupLoading ? "Searching..." : "Search") : (trackCatalogLookupLoading ? "Searching..." : "Search")}
+              {isAlbumsLookup ? (albumCatalogLookupLoading ? "Searching..." : "Search") : (trackCatalogLookupLoading ? "Searching..." : "Search")}
             </button>
             <button
               className="secondary-button"
-              disabled={isDuplicateAlbumsLookup || albumCatalogLookupEnqueueLoading || (isAlbumsLookup ? visibleIncompleteAlbumIds.length === 0 : visibleIncompleteTrackIds.length === 0)}
+              disabled={albumCatalogLookupEnqueueLoading || (isAlbumsLookup ? visibleIncompleteAlbumIds.length === 0 : visibleIncompleteTrackIds.length === 0)}
               onClick={() => {
                 if (isAlbumsLookup) {
                   void enqueueVisibleIncompleteLookupAlbums();
@@ -8374,9 +8851,6 @@ export function App() {
           {isAlbumsLookup && albumCatalogLookupResult ? (
             <p className="empty-copy">Visible incomplete albums with Spotify IDs: {visibleIncompleteAlbumIds.length}</p>
           ) : null}
-          {isDuplicateAlbumsLookup && albumDuplicateLookupResult ? (
-            <p className="empty-copy">Duplicate Spotify album groups: {albumDuplicateLookupResult.total}</p>
-          ) : null}
           {searchLookupEntityType === "tracks" && trackCatalogLookupResult ? (
             <p className="empty-copy">Visible incomplete tracks with Spotify IDs: {visibleIncompleteTrackIds.length}</p>
           ) : null}
@@ -8384,7 +8858,6 @@ export function App() {
           <p className="empty-copy">Prioritized items are added to the catalog backfill queue. Run and monitor them from Catalog Backfill.</p>
           {albumCatalogLookupError ? <p className="empty-copy">{albumCatalogLookupError}</p> : null}
           {trackCatalogLookupError ? <p className="empty-copy">{trackCatalogLookupError}</p> : null}
-          {albumDuplicateLookupError ? <p className="empty-copy">{albumDuplicateLookupError}</p> : null}
           {albumCatalogLookupEnqueueError ? <p className="empty-copy">{albumCatalogLookupEnqueueError}</p> : null}
           {albumCatalogLookupEnqueueResult ? (
             <p className="empty-copy">
@@ -8393,15 +8866,11 @@ export function App() {
           ) : null}
           {isAlbumsLookup && !albumCatalogLookupResult && albumCatalogLookupLoading ? <p className="empty-copy">Loading albums...</p> : null}
           {searchLookupEntityType === "tracks" && !trackCatalogLookupResult && trackCatalogLookupLoading ? <p className="empty-copy">Loading tracks...</p> : null}
-          {isDuplicateAlbumsLookup && !albumDuplicateLookupResult && albumDuplicateLookupLoading ? <p className="empty-copy">Loading duplicate album groups...</p> : null}
           {isAlbumsLookup && albumCatalogLookupLastLoadedAt ? (
             <p className="empty-copy">Albums loaded {new Date(albumCatalogLookupLastLoadedAt).toLocaleTimeString()}</p>
           ) : null}
           {searchLookupEntityType === "tracks" && trackCatalogLookupLastLoadedAt ? (
             <p className="empty-copy">Tracks loaded {new Date(trackCatalogLookupLastLoadedAt).toLocaleTimeString()}</p>
-          ) : null}
-          {isDuplicateAlbumsLookup && albumDuplicateLookupLastLoadedAt ? (
-            <p className="empty-copy">Duplicate groups loaded {new Date(albumDuplicateLookupLastLoadedAt).toLocaleTimeString()}</p>
           ) : null}
           {isAlbumsLookup && (!albumCatalogLookupResult || albumCatalogLookupResult.items.length === 0) ? (
             <p className="empty-copy">No matching albums.</p>
@@ -8483,9 +8952,6 @@ export function App() {
           {searchLookupEntityType === "tracks" && (!trackCatalogLookupResult || trackCatalogLookupResult.items.length === 0) ? (
             <p className="empty-copy">No matching tracks.</p>
           ) : null}
-          {isDuplicateAlbumsLookup && (!albumDuplicateLookupResult || albumDuplicateLookupResult.items.length === 0) ? (
-            <p className="empty-copy">No duplicate albums found.</p>
-          ) : null}
           {searchLookupEntityType === "tracks" && trackCatalogLookupResult && trackCatalogLookupResult.items.length > 0 ? (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -8510,9 +8976,17 @@ export function App() {
                     const isPendingQueue = rowIsPendingQueue(item.queue_status);
                     const actionLabel = isPendingQueue ? "Prioritized" : (String(item.queue_status).toLowerCase() === "error" ? "Retry priority" : "Prioritize");
                     return (
-                      <>
+                      <Fragment key={`track-lookup-fragment-${item.release_track_id}`}>
                         <tr key={`track-lookup-${item.release_track_id}`}>
-                          <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_track_name}</td>
+                          <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>
+                            <button
+                              className="detail-modal-inline-link"
+                              onClick={() => openTrackLookupPreview(item)}
+                              type="button"
+                            >
+                              {item.release_track_name}
+                            </button>
+                          </td>
                           <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
                           <td style={{ padding: "8px", verticalAlign: "top" }}>{item.release_album_name}</td>
                           <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{item.spotify_track_id ?? "None"}</td>
@@ -8542,43 +9016,9 @@ export function App() {
                             </td>
                           </tr>
                         ) : null}
-                      </>
+                      </Fragment>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-          {isDuplicateAlbumsLookup && albumDuplicateLookupResult && albumDuplicateLookupResult.items.length > 0 ? (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Album</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Spotify Name</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Duplicate Count</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Release Album</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Artist</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Tracklist</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Catalog</th>
-                    <th style={{ textAlign: "left", padding: "8px", fontSize: "12px" }}>Queue</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {albumDuplicateLookupResult.items.map((group) =>
-                    group.release_albums.map((item, index) => (
-                      <tr key={`duplicate-album-${group.spotify_album_id}-${item.release_album_id}`}>
-                        <td style={{ padding: "8px", verticalAlign: "top", wordBreak: "break-word" }}>{index === 0 ? group.spotify_album_id : ""}</td>
-                        <td style={{ padding: "8px", verticalAlign: "top" }}>{index === 0 ? (group.spotify_album_name ?? "Unknown") : ""}</td>
-                        <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{index === 0 ? group.duplicate_count : ""}</td>
-                        <td style={{ padding: "8px", verticalAlign: "top", fontWeight: 600 }}>{item.release_album_name}</td>
-                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.artist_name}</td>
-                        <td style={{ padding: "8px", verticalAlign: "top", whiteSpace: "nowrap" }}>{item.album_track_rows} / {item.total_tracks ?? "?"} tracks</td>
-                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.catalog_status ?? "unknown"}</td>
-                        <td style={{ padding: "8px", verticalAlign: "top" }}>{item.queue_status}</td>
-                      </tr>
-                    )),
-                  )}
                 </tbody>
               </table>
             </div>
@@ -9849,6 +10289,52 @@ export function App() {
     return (await response.json()) as TrackDuplicateLookupResponse;
   }
 
+  async function fetchTrackMappingLineage(
+    q: string,
+    mappingKind: "all" | "source_release" | "release_family" = "source_release",
+    sourceMetadata: "all" | "complete" | "incomplete" = "all",
+    confirmationCertainty: "all" | "certain" | "uncertain" = "all",
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<TrackMappingLineageResponse> {
+    const qQuery = q.trim() ? `&q=${encodeURIComponent(q.trim())}` : "";
+    const mappingKindQuery = `&mapping_kind=${encodeURIComponent(mappingKind)}`;
+    const sourceMetadataQuery = `&source_metadata=${encodeURIComponent(sourceMetadata)}`;
+    const confirmationCertaintyQuery = `&confirmation_certainty=${encodeURIComponent(confirmationCertainty)}`;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), TRACK_MAPPING_FETCH_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(
+        `${apiBaseUrl}/debug/search/tracks/lineage?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${mappingKindQuery}${sourceMetadataQuery}${confirmationCertaintyQuery}${qQuery}`,
+        { credentials: "include", signal: controller.signal },
+      );
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error("Track Mapping Lookup timed out after 20 seconds.");
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+    if (!response.ok) {
+      let detail = "Failed to load track mapping.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Track Mapping Lookup (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as TrackMappingLineageResponse;
+  }
+
   async function fetchAlbumNameDuplicateLookup(
     limit: number = 200,
     offset: number = 0
@@ -10555,6 +11041,42 @@ export function App() {
     }
   }
 
+  async function loadTrackMappingLineage(
+    reset: boolean = false,
+    mappingKind: "all" | "source_release" | "release_family" = trackMappingKindFilter,
+    sourceMetadata: "all" | "complete" | "incomplete" = trackMappingSourceMetadataFilter,
+    confirmationCertainty: "all" | "certain" | "uncertain" = trackMappingCertaintyFilter,
+  ) {
+    const requestId = trackMappingLineageRequestIdRef.current + 1;
+    trackMappingLineageRequestIdRef.current = requestId;
+    if (reset) {
+      setTrackMappingLineageResult(null);
+      setTrackMappingLineageLoaded(false);
+      setTrackMappingLineageLastLoadedAt(null);
+    }
+    setTrackMappingLineageLoading(true);
+    setTrackMappingLineageError("");
+    try {
+      const payload = await fetchTrackMappingLineage(albumCatalogLookupQ, mappingKind, sourceMetadata, confirmationCertainty, 10, 0);
+      if (trackMappingLineageRequestIdRef.current !== requestId) {
+        return;
+      }
+      setTrackMappingLineageResult(payload);
+      setTrackMappingLineageLoaded(true);
+      setTrackMappingLineageLastLoadedAt(Date.now());
+    } catch (error) {
+      if (trackMappingLineageRequestIdRef.current !== requestId) {
+        return;
+      }
+      setTrackMappingLineageLoaded(true);
+      setTrackMappingLineageError(formatUiErrorMessage(error, "Failed to load track mapping."));
+    } finally {
+      if (trackMappingLineageRequestIdRef.current === requestId) {
+        setTrackMappingLineageLoading(false);
+      }
+    }
+  }
+
   async function loadAlbumNameDuplicateLookup(reset: boolean = false) {
     if (albumNameDuplicateLookupLoading) {
       return;
@@ -10579,10 +11101,6 @@ export function App() {
   }
 
   async function loadActiveSearchLookup(reset: boolean = false) {
-    if (searchLookupEntityType === "duplicate_albums") {
-      await loadAlbumDuplicateLookup(reset);
-      return;
-    }
     if (searchLookupEntityType === "tracks") {
       await loadTrackCatalogLookup(reset);
       return;

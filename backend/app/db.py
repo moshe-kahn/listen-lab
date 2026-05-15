@@ -1278,12 +1278,32 @@ CREATE INDEX IF NOT EXISTS idx_spotify_catalog_worker_invocation_worker_started
 ALTER TABLE spotify_catalog_worker_state
 ADD COLUMN consecutive_post_cooldown_canary_429s INTEGER NOT NULL DEFAULT 0;
 """,
+    25: """
+CREATE INDEX IF NOT EXISTS idx_source_track_map_status_release_source
+  ON source_track_map(status, release_track_id, source_track_id);
+
+CREATE INDEX IF NOT EXISTS idx_source_track_map_status_source_release
+  ON source_track_map(status, source_track_id, release_track_id);
+
+CREATE INDEX IF NOT EXISTS idx_raw_play_event_spotify_track_id
+  ON raw_play_event(spotify_track_id)
+  WHERE spotify_track_id IS NOT NULL AND spotify_track_id != '';
+""",
 }
 
 
 def get_sqlite_db_path() -> Path:
     settings = get_settings()
     return Path(settings.sqlite_db_path)
+
+
+def configure_sqlite_runtime() -> None:
+    connection = sqlite3.connect(get_sqlite_db_path(), timeout=5)
+    try:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+    finally:
+        connection.close()
 
 
 @contextmanager
@@ -1309,10 +1329,26 @@ def ensure_sqlite_db() -> Path:
     db_path = get_sqlite_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if db_path.exists():
+        configure_sqlite_runtime()
+        with sqlite_connection() as connection:
+            schema_version_table = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'schema_version'
+                LIMIT 1
+                """
+            ).fetchone()
+        if schema_version_table is not None:
+            return db_path
+
     with sqlite_connection(write=True) as connection:
         connection.execute(SCHEMA_VERSION_SQL)
         connection.execute(INITIALIZE_SCHEMA_VERSION_SQL)
 
+    configure_sqlite_runtime()
     return db_path
 
 
