@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import logging
 import secrets
@@ -12,7 +10,6 @@ from datetime import UTC, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlencode
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Request, status
@@ -20,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
+from backend.app.auth.oauth_helpers import _callback_redirect_url, _is_configured, _pkce_code_challenge
 from backend.app.auth.session import (
     _require_user_id,
     _restore_session_user_from_token_store,
@@ -196,15 +194,6 @@ async def _ensure_sqlite_db_on_startup() -> None:
     logger.info("event=backend_ready sqlite_initialized=true debug_log=%s", log_file_path)
 
 
-def _is_configured() -> bool:
-    return bool(
-        settings.spotify_client_id
-        and settings.listenlab_token_encryption_key
-        and settings.spotify_redirect_uri
-        and settings.session_secret
-    )
-
-
 def _normalize_recent_track_item_for_route(item: dict[str, Any]) -> dict[str, Any]:
     normalized = {key: value for key, value in item.items() if key != "debug"}
     normalized["spotify_played_at"] = _format_recent_track_played_at_for_route(item.get("spotify_played_at"))
@@ -223,24 +212,6 @@ def _normalize_recent_track_item_for_route(item: dict[str, Any]) -> dict[str, An
 
 def _normalize_recent_tracks_payload_for_route(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_normalize_recent_track_item_for_route(item) for item in items]
-
-
-def _callback_redirect_url(
-    reason: str,
-    detail: str | None = None,
-    extra: dict[str, str] | None = None,
-) -> str:
-    query = {"status": reason}
-    if detail:
-        query["detail"] = detail
-    if extra:
-        query.update(extra)
-    return f"{settings.frontend_url}/auth/callback?{urlencode(query)}"
-
-
-def _pkce_code_challenge(verifier: str) -> str:
-    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
 
 def _persistent_history_cache_path() -> Path:
