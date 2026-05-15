@@ -20,6 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
+from backend.app.auth.session import _require_user_id, _session_user_id
+from backend.app.cache.file_cache import _cache_dir, _read_json_file, _write_json_file
 from backend.app.config import get_settings
 from backend.app.db import (
     apply_pending_migrations,
@@ -194,26 +196,6 @@ def _is_configured() -> bool:
     )
 
 
-def _session_user_id(request: Request) -> str | None:
-    user_id = request.session.get("user_id")
-    if user_id:
-        return str(user_id)
-    spotify_user = request.session.get("spotify_user") or {}
-    if spotify_user.get("id"):
-        return str(spotify_user["id"])
-    return None
-
-
-def _require_user_id(request: Request) -> str:
-    user_id = _session_user_id(request)
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated with Spotify.",
-        )
-    return user_id
-
-
 def _restore_session_user_from_token_store(request: Request) -> str | None:
     existing_user_id = _session_user_id(request)
     if existing_user_id:
@@ -335,12 +317,6 @@ def _pkce_code_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
 
-def _cache_dir() -> Path:
-    path = Path(settings.cache_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _persistent_history_cache_path() -> Path:
     return _cache_dir() / PERSISTENT_HISTORY_CACHE_FILE
 
@@ -359,23 +335,6 @@ def _user_recent_cache_path() -> Path:
 
 def _user_profile_snapshot_cache_path() -> Path:
     return _cache_dir() / USER_PROFILE_SNAPSHOT_CACHE_FILE
-
-
-def _read_json_file(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
-    try:
-        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-    except OSError:
-        logger.exception("Failed to write cache file: %s", path)
 
 
 def _cache_key(section: str, user_id: str | None, limit: int) -> str:
