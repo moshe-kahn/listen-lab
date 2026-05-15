@@ -53,6 +53,14 @@ from backend.app.recent_tracks_db import (
     query_recent_track_rows,
 )
 from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get, _spotify_get_many
+from backend.app.spotify_lookup_helpers import (
+    _album_enrichment_lookup,
+    _artist_enrichment_lookup,
+    _merge_history_albums,
+    _merge_history_artists,
+    _merge_history_tracks,
+    _track_enrichment_lookup,
+)
 from backend.app.spotify_normalization import (
     _album_lookup_key,
     _artist_lookup_key,
@@ -1010,61 +1018,6 @@ async def _fetch_followed_artists_total(access_token: str) -> tuple[int | None, 
     return artists.get("total"), True
 
 
-def _artist_enrichment_lookup(artists: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return {
-        (artist.get("name") or "").strip().lower(): artist
-        for artist in artists
-        if artist.get("name")
-    }
-
-
-def _album_enrichment_lookup(tracks: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
-    lookup: dict[tuple[str, str], dict[str, Any]] = {}
-    for track in tracks:
-        album_name = (track.get("album_name") or "").strip()
-        artist_name = (track.get("artist_name") or "").strip()
-        if not album_name or not artist_name:
-            continue
-        lookup[(album_name.lower(), artist_name.lower())] = {
-            "album_id": track.get("album_id"),
-            "url": track.get("album_url") or track.get("url"),
-            "image_url": track.get("image_url"),
-            "release_year": track.get("album_release_year"),
-        }
-    return lookup
-
-
-def _track_enrichment_lookup(tracks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    lookup: dict[str, dict[str, Any]] = {}
-    for track in tracks:
-        key = _track_identity_key(track.get("track_name"), track.get("artist_name"))
-        if not key:
-            continue
-        lookup[key] = track
-    return lookup
-
-
-def _merge_history_tracks(
-    history_tracks: list[dict[str, Any]],
-    enrichment_lookup: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for track in history_tracks:
-        key = _track_identity_key(track.get("track_name"), track.get("artist_name"))
-        enriched = enrichment_lookup.get(key, {}) if key else {}
-        results.append(
-            {
-                **track,
-                "track_id": track.get("track_id") or enriched.get("track_id"),
-                "album_release_year": track.get("album_release_year") or enriched.get("album_release_year"),
-                "url": track.get("url") or enriched.get("url"),
-                "album_url": track.get("album_url") or enriched.get("album_url"),
-                "image_url": track.get("image_url") or enriched.get("image_url"),
-            }
-        )
-    return results
-
-
 async def _enrich_tracks_from_spotify(
     access_token: str,
     tracks: list[dict[str, Any]],
@@ -1260,50 +1213,6 @@ def _normalized_max(value: float, max_value: float) -> float:
     if max_value <= 0:
         return 0.0
     return value / max_value
-
-
-def _merge_history_artists(
-    history_artists: list[dict[str, Any]],
-    enrichment_lookup: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for artist in history_artists:
-        enriched = enrichment_lookup.get((artist.get("name") or "").strip().lower(), {})
-        results.append(
-            {
-                **artist,
-                "artist_id": enriched.get("artist_id", artist.get("artist_id")),
-                "followers_total": enriched.get("followers_total", artist.get("followers_total")),
-                "genres": enriched.get("genres", artist.get("genres") or []),
-                "popularity": enriched.get("popularity", artist.get("popularity")),
-                "url": enriched.get("url", artist.get("url")),
-                "image_url": enriched.get("image_url", artist.get("image_url")),
-            }
-        )
-    return results
-
-
-def _merge_history_albums(
-    history_albums: list[dict[str, Any]],
-    enrichment_lookup: dict[tuple[str, str], dict[str, Any]],
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for album in history_albums:
-        key = (
-            (album.get("name") or "").strip().lower(),
-            (album.get("artist_name") or "").strip().lower(),
-        )
-        enriched = enrichment_lookup.get(key, {})
-        results.append(
-            {
-                **album,
-                "album_id": enriched.get("album_id", album.get("album_id")),
-                "url": enriched.get("url", album.get("url")),
-                "image_url": enriched.get("image_url", album.get("image_url")),
-                "release_year": enriched.get("release_year", album.get("release_year")),
-            }
-        )
-    return results
 
 
 def _hydrate_artists_from_static_cache(artists: list[dict[str, Any]]) -> list[dict[str, Any]]:
