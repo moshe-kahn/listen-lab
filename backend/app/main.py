@@ -25,6 +25,7 @@ from backend.app.auth.session import (
     _restore_session_user_from_token_store,
     _session_user_id,
 )
+from backend.app.auth.token import _refresh_spotify_access_token, _require_token
 from backend.app.cache.file_cache import _cache_dir, _read_json_file, _write_json_file
 from backend.app.config import get_settings
 from backend.app.db import (
@@ -222,32 +223,6 @@ def _normalize_recent_track_item_for_route(item: dict[str, Any]) -> dict[str, An
 
 def _normalize_recent_tracks_payload_for_route(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_normalize_recent_track_item_for_route(item) for item in items]
-
-
-def _require_token(request: Request) -> str:
-    user_id = _require_user_id(request)
-    try:
-        token_row = refresh_access_token_if_needed(user_id)
-    except SpotifyTokenStoreError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Spotify session expired. Please reconnect Spotify. ({exc})",
-        ) from exc
-
-    request.session["user_id"] = user_id
-    request.session["token_type"] = "Bearer"
-    expires_at = str(token_row.get("expires_at") or "")
-    if expires_at:
-        try:
-            remaining = int((_parse_iso_utc(expires_at) - datetime.now(UTC)).total_seconds())
-            request.session["expires_in"] = max(0, remaining)
-        except ValueError:
-            request.session["expires_in"] = None
-    return str(token_row["access_token"])
-
-
-async def _refresh_spotify_access_token(request: Request) -> str:
-    return _require_token(request)
 
 
 def _callback_redirect_url(
