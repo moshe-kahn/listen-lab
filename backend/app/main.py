@@ -52,7 +52,7 @@ from backend.app.recent_tracks_db import (
     map_recent_track_row_to_canonical_item,
     query_recent_track_rows,
 )
-from backend.app.spotify_http import _spotify_get, _spotify_get_many
+from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get, _spotify_get_many
 from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
 from backend.app.spotify_rate_limit import (
     _enforce_spotify_cooldown,
@@ -773,58 +773,6 @@ def _playlist_cache_needs_refresh(playlists: list[dict[str, Any]]) -> bool:
         return False
     image_count = sum(1 for playlist in playlists if playlist.get("image_url"))
     return image_count == 0
-
-
-async def _fetch_spotify_profile(access_token: str) -> dict[str, Any]:
-    _enforce_spotify_cooldown()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            settings.spotify_me_url,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-
-    if response.status_code == status.HTTP_401_UNAUTHORIZED:
-        raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
-    if response.status_code == status.HTTP_403_FORBIDDEN:
-        detail = ""
-        try:
-            payload = response.json()
-            detail = payload.get("error", {}).get("message") or payload.get("error_description") or ""
-        except ValueError:
-            detail = response.text[:160]
-        raise HTTPException(
-            status_code=403,
-            detail=f"Spotify profile access was denied{f': {detail}' if detail else ''}.",
-        )
-    if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
-        retry_after_header = response.headers.get("Retry-After")
-        retry_after_seconds = _parse_retry_after_seconds(retry_after_header)
-        _note_spotify_rate_limit(retry_after_seconds)
-        detail = ""
-        try:
-            payload = response.json()
-            detail = payload.get("error", {}).get("message") or payload.get("error_description") or ""
-        except ValueError:
-            detail = response.text[:160]
-        raise HTTPException(
-            status_code=429,
-            detail=_spotify_rate_limit_detail(
-                f"Spotify rate limit reached while fetching your profile{f': {detail}' if detail else ''}.",
-            ),
-        )
-    if response.status_code >= 400:
-        detail = ""
-        try:
-            payload = response.json()
-            detail = payload.get("error", {}).get("message") or payload.get("error_description") or ""
-        except ValueError:
-            detail = response.text[:160]
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to fetch Spotify profile (status {response.status_code}){f': {detail}' if detail else ''}.",
-        )
-
-    return response.json()
 
 
 async def _fetch_recent_tracks(access_token: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
