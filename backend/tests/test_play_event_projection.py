@@ -11,6 +11,7 @@ from backend.app.db import (
     apply_pending_migrations,
     ensure_sqlite_db,
     insert_ingest_run,
+    insert_listenlab_player_play,
     insert_raw_spotify_history_observation,
     insert_raw_spotify_recent_observation,
 )
@@ -141,6 +142,96 @@ class PlayEventProjectionTests(unittest.TestCase):
         self.assertEqual("logout", row[4])
         self.assertEqual("playlist", row[5])
         self.assertEqual("spotify:playlist:abc", row[6])
+
+    def test_reconcile_merges_recent_with_listenlab_player_fact(self) -> None:
+        run_player = "run-player-1"
+        run_recent = "run-recent-1"
+        insert_ingest_run(
+            run_id=run_player,
+            source_type="listenlab_player",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        insert_ingest_run(
+            run_id=run_recent,
+            source_type="spotify_recent",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+
+        insert_listenlab_player_play(
+            ingest_run_id=run_player,
+            source_row_key="player-row-1",
+            source_event_id="player-event-1",
+            user_id="user-1",
+            played_at="2026-04-17T19:52:00Z",
+            ms_played=62000,
+            ms_played_confidence="paused",
+            spotify_track_uri="spotify:track:track-1",
+            spotify_track_id="track-1",
+            track_name_raw="Song A",
+            artist_name_raw="Artist A",
+            album_name_raw="Album A",
+            spotify_album_id="album-1",
+            spotify_artist_ids_json=json.dumps(["artist-1"]),
+            track_duration_ms=240000,
+            raw_payload_json="{}",
+        )
+        summary_player = reconcile_fact_play_events_for_ingest_run(
+            source_type="listenlab_player",
+            run_id=run_player,
+        )
+        insert_raw_spotify_recent_observation(
+            ingest_run_id=run_recent,
+            source_row_key="recent-row-1",
+            source_event_id=None,
+            played_at="2026-04-17T19:52:08Z",
+            ms_played_estimate=240000,
+            ms_played_method="default_guess",
+            ms_played_confidence="low",
+            ms_played_fallback_class="fallback_likely_complete",
+            spotify_track_uri="spotify:track:track-1",
+            spotify_track_id="track-1",
+            track_name_raw="Song A",
+            artist_name_raw="Artist A",
+            album_name_raw="Album A",
+            spotify_album_id="album-1",
+            spotify_artist_ids_json=json.dumps(["artist-1"]),
+            track_duration_ms=240000,
+            context_type=None,
+            context_uri=None,
+            raw_payload_json="{}",
+        )
+        summary_recent = reconcile_fact_play_events_for_ingest_run(
+            source_type="spotify_recent",
+            run_id=run_recent,
+        )
+
+        self.assertGreaterEqual(summary_player["facts_touched_count"], 1)
+        self.assertGreaterEqual(summary_recent["matched_player_pairs_count"], 1)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                  f.timing_source,
+                  f.matched_state,
+                  f.spotify_track_id,
+                  f.canonical_ms_played
+                FROM fact_play_event f
+                JOIN fact_play_event_recent_link rl
+                  ON rl.fact_play_event_id = f.id
+                JOIN fact_play_event_player_link pl
+                  ON pl.fact_play_event_id = f.id
+                LIMIT 1
+                """
+            ).fetchone()
+
+        assert row is not None
+        self.assertEqual("recent_fallback", row[0])
+        self.assertEqual("matched", row[1])
+        self.assertEqual("track-1", row[2])
+        self.assertEqual(240000, row[3])
 
 
 if __name__ == "__main__":

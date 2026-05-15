@@ -36,6 +36,14 @@ def _fact_id_for_history(connection: sqlite3.Connection, history_id: int) -> int
     return int(row[0]) if row is not None else None
 
 
+def _fact_id_for_player(connection: sqlite3.Connection, player_id: int) -> int | None:
+    row = connection.execute(
+        "SELECT fact_play_event_id FROM fact_play_event_player_link WHERE raw_listenlab_player_play_id = ?",
+        (player_id,),
+    ).fetchone()
+    return int(row[0]) if row is not None else None
+
+
 def _merge_fact_rows(connection: sqlite3.Connection, *, winner_fact_id: int, loser_fact_id: int) -> None:
     if winner_fact_id == loser_fact_id:
         return
@@ -45,6 +53,10 @@ def _merge_fact_rows(connection: sqlite3.Connection, *, winner_fact_id: int, los
     )
     connection.execute(
         "UPDATE fact_play_event_history_link SET fact_play_event_id = ? WHERE fact_play_event_id = ?",
+        (winner_fact_id, loser_fact_id),
+    )
+    connection.execute(
+        "UPDATE fact_play_event_player_link SET fact_play_event_id = ? WHERE fact_play_event_id = ?",
         (winner_fact_id, loser_fact_id),
     )
     connection.execute("DELETE FROM fact_play_event WHERE id = ?", (loser_fact_id,))
@@ -120,6 +132,41 @@ def _upsert_history_link(
     )
 
 
+def _upsert_player_link(
+    connection: sqlite3.Connection,
+    *,
+    fact_play_event_id: int,
+    player_id: int,
+    delta_ms: int | None,
+    match_tier: str | None,
+) -> None:
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO fact_play_event_player_link (
+          fact_play_event_id,
+          raw_listenlab_player_play_id,
+          match_delta_ms,
+          match_tier,
+          is_primary
+        )
+        VALUES (?, ?, ?, ?, 1)
+        """,
+        (fact_play_event_id, player_id, delta_ms, match_tier),
+    )
+    connection.execute(
+        """
+        UPDATE fact_play_event_player_link
+        SET
+          fact_play_event_id = ?,
+          match_delta_ms = ?,
+          match_tier = ?,
+          is_primary = 1
+        WHERE raw_listenlab_player_play_id = ?
+        """,
+        (fact_play_event_id, delta_ms, match_tier, player_id),
+    )
+
+
 def _create_fact_placeholder(connection: sqlite3.Connection, *, canonical_ended_at: str) -> int:
     cursor = connection.execute(
         """
@@ -186,6 +233,18 @@ def _reload_fact_from_sources(connection: sqlite3.Connection, *, fact_id: int) -
         """,
         (fact_id,),
     ).fetchone()
+    player_row = connection.execute(
+        """
+        SELECT p.*
+        FROM fact_play_event_player_link l
+        JOIN raw_listenlab_player_play p
+          ON p.id = l.raw_listenlab_player_play_id
+        WHERE l.fact_play_event_id = ?
+        ORDER BY l.is_primary DESC, p.id ASC
+        LIMIT 1
+        """,
+        (fact_id,),
+    ).fetchone()
 
     if history_row is not None:
         canonical_ended_at = str(history_row["played_at"])
@@ -202,31 +261,66 @@ def _reload_fact_from_sources(connection: sqlite3.Connection, *, fact_id: int) -
         else:
             timing_source = "recent_fallback"
         ms_played_confidence = str(recent_row["ms_played_confidence"])
+    elif player_row is not None:
+        canonical_started_at_from_player = str(player_row["played_at"])
+        canonical_ms_played = int(player_row["ms_played"]) if player_row["ms_played"] is not None else None
+        canonical_ended_at = _iso_z(_parse_iso_z(canonical_started_at_from_player) + timedelta(milliseconds=max(0, int(canonical_ms_played or 0))))
+        timing_source = "listenlab_player"
+        ms_played_confidence = str(player_row["ms_played_confidence"])
     else:
         return
 
-    if history_row is not None and recent_row is not None:
+    if sum(1 for row in (history_row, recent_row, player_row) if row is not None) >= 2:
         matched_state = "matched"
     elif history_row is not None:
         matched_state = "history_only"
-    else:
+    elif recent_row is not None:
         matched_state = "recent_only"
+    else:
+        matched_state = "player_only"
 
-    canonical_started_at = _compute_started_at(canonical_ended_at, canonical_ms_played)
+    if history_row is None and recent_row is None and player_row is not None:
+        canonical_started_at = str(player_row["played_at"])
+    else:
+        canonical_started_at = _compute_started_at(canonical_ended_at, canonical_ms_played)
     spotify_track_id = (
         str(recent_row["spotify_track_id"])
         if recent_row is not None and recent_row["spotify_track_id"] is not None
-        else (str(history_row["spotify_track_id"]) if history_row is not None and history_row["spotify_track_id"] is not None else None)
+        else (
+            str(history_row["spotify_track_id"])
+            if history_row is not None and history_row["spotify_track_id"] is not None
+            else (
+                str(player_row["spotify_track_id"])
+                if player_row is not None and player_row["spotify_track_id"] is not None
+                else None
+            )
+        )
     )
     spotify_track_uri = (
         str(recent_row["spotify_track_uri"])
         if recent_row is not None and recent_row["spotify_track_uri"] is not None
-        else (str(history_row["spotify_track_uri"]) if history_row is not None and history_row["spotify_track_uri"] is not None else None)
+        else (
+            str(history_row["spotify_track_uri"])
+            if history_row is not None and history_row["spotify_track_uri"] is not None
+            else (
+                str(player_row["spotify_track_uri"])
+                if player_row is not None and player_row["spotify_track_uri"] is not None
+                else None
+            )
+        )
     )
     spotify_album_id = (
         str(recent_row["spotify_album_id"])
         if recent_row is not None and recent_row["spotify_album_id"] is not None
-        else (str(history_row["spotify_album_id"]) if history_row is not None and history_row["spotify_album_id"] is not None else None)
+        else (
+            str(history_row["spotify_album_id"])
+            if history_row is not None and history_row["spotify_album_id"] is not None
+            else (
+                str(player_row["spotify_album_id"])
+                if player_row is not None and player_row["spotify_album_id"] is not None
+                else None
+            )
+        )
     )
     spotify_artist_ids_json = (
         str(recent_row["spotify_artist_ids_json"])
@@ -234,23 +328,39 @@ def _reload_fact_from_sources(connection: sqlite3.Connection, *, fact_id: int) -
         else (
             str(history_row["spotify_artist_ids_json"])
             if history_row is not None and history_row["spotify_artist_ids_json"] is not None
-            else None
+            else (
+                str(player_row["spotify_artist_ids_json"])
+                if player_row is not None and player_row["spotify_artist_ids_json"] is not None
+                else None
+            )
         )
     )
     track_name_canonical = (
         str(recent_row["track_name_raw"])
         if recent_row is not None and recent_row["track_name_raw"] is not None
-        else (str(history_row["track_name_raw"]) if history_row is not None and history_row["track_name_raw"] is not None else None)
+        else (
+            str(history_row["track_name_raw"])
+            if history_row is not None and history_row["track_name_raw"] is not None
+            else (str(player_row["track_name_raw"]) if player_row is not None and player_row["track_name_raw"] is not None else None)
+        )
     )
     artist_name_canonical = (
         str(recent_row["artist_name_raw"])
         if recent_row is not None and recent_row["artist_name_raw"] is not None
-        else (str(history_row["artist_name_raw"]) if history_row is not None and history_row["artist_name_raw"] is not None else None)
+        else (
+            str(history_row["artist_name_raw"])
+            if history_row is not None and history_row["artist_name_raw"] is not None
+            else (str(player_row["artist_name_raw"]) if player_row is not None and player_row["artist_name_raw"] is not None else None)
+        )
     )
     album_name_canonical = (
         str(recent_row["album_name_raw"])
         if recent_row is not None and recent_row["album_name_raw"] is not None
-        else (str(history_row["album_name_raw"]) if history_row is not None and history_row["album_name_raw"] is not None else None)
+        else (
+            str(history_row["album_name_raw"])
+            if history_row is not None and history_row["album_name_raw"] is not None
+            else (str(player_row["album_name_raw"]) if player_row is not None and player_row["album_name_raw"] is not None else None)
+        )
     )
 
     connection.execute(
@@ -350,6 +460,27 @@ def _pending_history_candidates_for_run(connection: sqlite3.Connection, run_id: 
     return [dict(row) for row in rows]
 
 
+def _pending_player_candidates_for_run(connection: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        """
+        SELECT
+          p.*,
+          l.fact_play_event_id AS existing_fact_id
+        FROM raw_listenlab_player_play p
+        LEFT JOIN fact_play_event_player_link l
+          ON l.raw_listenlab_player_play_id = p.id
+        LEFT JOIN fact_play_event_recent_link r
+          ON r.fact_play_event_id = l.fact_play_event_id
+        WHERE p.ingest_run_id = ?
+          AND (l.fact_play_event_id IS NULL OR r.fact_play_event_id IS NULL)
+        ORDER BY p.played_at ASC, p.id ASC
+        """,
+        (run_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _recent_counterparts_for_history_rows(
     connection: sqlite3.Connection, *, history_rows: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -410,6 +541,66 @@ def _history_counterparts_for_recent_rows(
     return [dict(row) for row in rows]
 
 
+def _player_counterparts_for_recent_rows(
+    connection: sqlite3.Connection, *, recent_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not recent_rows:
+        return []
+    min_played_at = str(recent_rows[0]["played_at"])
+    max_played_at = str(recent_rows[-1]["played_at"])
+    min_dt = _parse_iso_z(min_played_at) - timedelta(seconds=90)
+    max_dt = _parse_iso_z(max_played_at) + timedelta(seconds=90)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        """
+        SELECT
+          p.*,
+          l.fact_play_event_id AS existing_fact_id
+        FROM raw_listenlab_player_play p
+        LEFT JOIN fact_play_event_player_link l
+          ON l.raw_listenlab_player_play_id = p.id
+        LEFT JOIN fact_play_event_recent_link r
+          ON r.fact_play_event_id = l.fact_play_event_id
+        WHERE p.played_at >= ?
+          AND p.played_at <= ?
+          AND (l.fact_play_event_id IS NULL OR r.fact_play_event_id IS NULL)
+        ORDER BY p.played_at ASC, p.id ASC
+        """,
+        (_iso_z(min_dt), _iso_z(max_dt)),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _recent_counterparts_for_player_rows(
+    connection: sqlite3.Connection, *, player_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not player_rows:
+        return []
+    min_played_at = str(player_rows[0]["played_at"])
+    max_played_at = str(player_rows[-1]["played_at"])
+    min_dt = _parse_iso_z(min_played_at) - timedelta(seconds=90)
+    max_dt = _parse_iso_z(max_played_at) + timedelta(seconds=90)
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        """
+        SELECT
+          r.*,
+          l.fact_play_event_id AS existing_fact_id
+        FROM raw_spotify_recent r
+        LEFT JOIN fact_play_event_recent_link l
+          ON l.raw_spotify_recent_id = r.id
+        LEFT JOIN fact_play_event_player_link p
+          ON p.fact_play_event_id = l.fact_play_event_id
+        WHERE r.played_at >= ?
+          AND r.played_at <= ?
+          AND (l.fact_play_event_id IS NULL OR p.fact_play_event_id IS NULL)
+        ORDER BY r.played_at ASC, r.id ASC
+        """,
+        (_iso_z(min_dt), _iso_z(max_dt)),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _apply_match_pairs(connection: sqlite3.Connection, *, pairs: list[MatchPair]) -> list[int]:
     touched_fact_ids: list[int] = []
     for pair in pairs:
@@ -445,6 +636,48 @@ def _apply_match_pairs(connection: sqlite3.Connection, *, pairs: list[MatchPair]
             connection,
             fact_play_event_id=winner_fact_id,
             history_id=pair.history_id,
+            delta_ms=pair.delta_ms,
+            match_tier=pair.match_tier,
+        )
+        touched_fact_ids.append(winner_fact_id)
+    return touched_fact_ids
+
+
+def _apply_recent_player_match_pairs(connection: sqlite3.Connection, *, pairs: list[MatchPair]) -> list[int]:
+    touched_fact_ids: list[int] = []
+    for pair in pairs:
+        recent_fact_id = _fact_id_for_recent(connection, pair.recent_id)
+        player_fact_id = _fact_id_for_player(connection, pair.history_id)
+
+        if recent_fact_id is None and player_fact_id is None:
+            started_at_row = connection.execute(
+                "SELECT played_at FROM raw_listenlab_player_play WHERE id = ?",
+                (pair.history_id,),
+            ).fetchone()
+            canonical_ended_at = str(started_at_row[0]) if started_at_row is not None else _utc_now_iso()
+            winner_fact_id = _create_fact_placeholder(connection, canonical_ended_at=canonical_ended_at)
+        elif recent_fact_id is not None and player_fact_id is None:
+            winner_fact_id = recent_fact_id
+        elif recent_fact_id is None and player_fact_id is not None:
+            winner_fact_id = player_fact_id
+        else:
+            assert recent_fact_id is not None
+            assert player_fact_id is not None
+            winner_fact_id = min(recent_fact_id, player_fact_id)
+            loser_fact_id = max(recent_fact_id, player_fact_id)
+            _merge_fact_rows(connection, winner_fact_id=winner_fact_id, loser_fact_id=loser_fact_id)
+
+        _upsert_recent_link(
+            connection,
+            fact_play_event_id=winner_fact_id,
+            recent_id=pair.recent_id,
+            delta_ms=pair.delta_ms,
+            match_tier=pair.match_tier,
+        )
+        _upsert_player_link(
+            connection,
+            fact_play_event_id=winner_fact_id,
+            player_id=pair.history_id,
             delta_ms=pair.delta_ms,
             match_tier=pair.match_tier,
         )
@@ -492,6 +725,26 @@ def _ensure_fact_for_unmatched_history(connection: sqlite3.Connection, *, histor
     return fact_id
 
 
+def _ensure_fact_for_unmatched_player(connection: sqlite3.Connection, *, player_id: int) -> int:
+    existing_fact_id = _fact_id_for_player(connection, player_id)
+    if existing_fact_id is not None:
+        return existing_fact_id
+    played_at_row = connection.execute(
+        "SELECT played_at FROM raw_listenlab_player_play WHERE id = ?",
+        (player_id,),
+    ).fetchone()
+    canonical_ended_at = str(played_at_row[0]) if played_at_row is not None else _utc_now_iso()
+    fact_id = _create_fact_placeholder(connection, canonical_ended_at=canonical_ended_at)
+    _upsert_player_link(
+        connection,
+        fact_play_event_id=fact_id,
+        player_id=player_id,
+        delta_ms=None,
+        match_tier=None,
+    )
+    return fact_id
+
+
 def reconcile_fact_play_events_for_ingest_run(
     *,
     source_type: str,
@@ -507,9 +760,13 @@ def reconcile_fact_play_events_for_ingest_run(
         connection.execute("PRAGMA foreign_keys = ON")
 
         candidate_started = datetime.now(UTC)
+        player_candidates: list[dict[str, Any]] = []
         if source_type == "spotify_recent":
             recent_candidates = _pending_recent_candidates_for_run(connection, run_id)
             history_candidates = _history_counterparts_for_recent_rows(
+                connection, recent_rows=recent_candidates
+            )
+            player_candidates = _player_counterparts_for_recent_rows(
                 connection, recent_rows=recent_candidates
             )
         elif source_type == "export":
@@ -517,6 +774,12 @@ def reconcile_fact_play_events_for_ingest_run(
             recent_candidates = _recent_counterparts_for_history_rows(
                 connection, history_rows=history_candidates
             )
+        elif source_type == "listenlab_player":
+            player_candidates = _pending_player_candidates_for_run(connection, run_id)
+            recent_candidates = _recent_counterparts_for_player_rows(
+                connection, player_rows=player_candidates
+            )
+            history_candidates = []
         else:
             return {
                 "source_type": source_type,
@@ -541,25 +804,45 @@ def reconcile_fact_play_events_for_ingest_run(
             tight_seconds=tight_seconds,
             wide_seconds=wide_seconds,
         )
+        player_match_result = match_recent_history_rows(
+            recent_rows=recent_candidates,
+            history_rows=player_candidates,
+            tight_seconds=30,
+            wide_seconds=90,
+        )
         matcher_ms = (datetime.now(UTC) - matcher_started).total_seconds() * 1000
 
         projector_started = datetime.now(UTC)
         touched_fact_ids = _apply_match_pairs(connection, pairs=match_result.pairs)
+        touched_fact_ids.extend(
+            _apply_recent_player_match_pairs(connection, pairs=player_match_result.pairs)
+        )
 
         if source_type == "spotify_recent":
             run_recent_ids = {
                 int(row["id"]) for row in recent_candidates if str(row["ingest_run_id"] or "") == run_id
             }
-            unmatched_run_recent = sorted(run_recent_ids & set(match_result.unmatched_recent_ids))
+            unmatched_run_recent = sorted(
+                run_recent_ids
+                & set(match_result.unmatched_recent_ids)
+                & set(player_match_result.unmatched_recent_ids)
+            )
             for recent_id in unmatched_run_recent:
                 touched_fact_ids.append(_ensure_fact_for_unmatched_recent(connection, recent_id=recent_id))
-        else:
+        elif source_type == "export":
             run_history_ids = {
                 int(row["id"]) for row in history_candidates if str(row["ingest_run_id"] or "") == run_id
             }
             unmatched_run_history = sorted(run_history_ids & set(match_result.unmatched_history_ids))
             for history_id in unmatched_run_history:
                 touched_fact_ids.append(_ensure_fact_for_unmatched_history(connection, history_id=history_id))
+        else:
+            run_player_ids = {
+                int(row["id"]) for row in player_candidates if str(row["ingest_run_id"] or "") == run_id
+            }
+            unmatched_run_player = sorted(run_player_ids & set(player_match_result.unmatched_history_ids))
+            for player_id in unmatched_run_player:
+                touched_fact_ids.append(_ensure_fact_for_unmatched_player(connection, player_id=player_id))
 
         for fact_id in sorted(set(touched_fact_ids)):
             _reload_fact_from_sources(connection, fact_id=fact_id)
@@ -575,8 +858,10 @@ def reconcile_fact_play_events_for_ingest_run(
             "tight_10s_count": match_result.tight_10s_count,
             "wide_30s_count": match_result.wide_30s_count,
             "matched_pairs_count": len(match_result.pairs),
+            "matched_player_pairs_count": len(player_match_result.pairs),
             "unmatched_recent_count": len(match_result.unmatched_recent_ids),
             "unmatched_history_count": len(match_result.unmatched_history_ids),
+            "unmatched_player_count": len(player_match_result.unmatched_history_ids),
             "facts_touched_count": len(set(touched_fact_ids)),
             "candidate_collect_ms": candidate_collect_ms,
             "matcher_ms": matcher_ms,

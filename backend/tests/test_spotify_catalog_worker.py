@@ -18,6 +18,7 @@ from backend.app.spotify_catalog_worker import (
     TRACK_METADATA_WORKER_CONFIG,
     _iso_utc,
     _parse_iso_utc,
+    reset_spotify_track_metadata_worker_cooldown,
     run_spotify_track_metadata_worker,
 )
 from backend.app.spotify_catalog_backfill import run_spotify_track_metadata_canary
@@ -119,6 +120,44 @@ class SpotifyCatalogWorkerTests(unittest.TestCase):
         self.assertIsNotNone(invocation)
         self.assertEqual("skipped_cooldown", invocation["status"])
         self.assertEqual("cooldown_active", invocation["skip_reason"])
+
+    def test_reset_track_metadata_worker_cooldown_is_apply_gated(self) -> None:
+        cooldown_until = _iso_utc(self.now + timedelta(minutes=10))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_worker_state (worker_name, cooldown_until, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (SPOTIFY_TRACK_METADATA_WORKER, cooldown_until, _iso_utc(self.now)),
+            )
+            connection.commit()
+
+        dry_run = reset_spotify_track_metadata_worker_cooldown(apply=False, now=self.now)
+        self.assertEqual("dry_run", dry_run["mode"])
+        self.assertEqual("none", dry_run["performed_action"])
+        self.assertTrue(dry_run["active_cooldown"])
+        self.assertEqual(1, dry_run["would_reset_count"])
+        self.assertEqual(0, dry_run["reset_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            before_apply = connection.execute(
+                "SELECT cooldown_until FROM spotify_catalog_worker_state WHERE worker_name = ?",
+                (SPOTIFY_TRACK_METADATA_WORKER,),
+            ).fetchone()[0]
+        self.assertEqual(cooldown_until, before_apply)
+
+        applied = reset_spotify_track_metadata_worker_cooldown(apply=True, now=self.now)
+        self.assertEqual("apply", applied["mode"])
+        self.assertEqual("reset_cooldown", applied["performed_action"])
+        self.assertEqual(cooldown_until, applied["previous_cooldown_until"])
+        self.assertTrue(applied["active_cooldown"])
+        self.assertEqual(1, applied["reset_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after_apply = connection.execute(
+                "SELECT cooldown_until FROM spotify_catalog_worker_state WHERE worker_name = ?",
+                (SPOTIFY_TRACK_METADATA_WORKER,),
+            ).fetchone()[0]
+        self.assertIsNone(after_apply)
 
     def test_starts_when_cooldown_expired(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:

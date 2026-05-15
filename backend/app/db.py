@@ -1289,6 +1289,74 @@ CREATE INDEX IF NOT EXISTS idx_raw_play_event_spotify_track_id
   ON raw_play_event(spotify_track_id)
   WHERE spotify_track_id IS NOT NULL AND spotify_track_id != '';
 """,
+    26: """
+CREATE TABLE IF NOT EXISTS raw_listenlab_player_play (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ingest_run_id TEXT REFERENCES ingest_run(id),
+  source_row_key TEXT NOT NULL UNIQUE,
+  source_event_id TEXT UNIQUE,
+  user_id TEXT NOT NULL,
+  spotify_user_id TEXT,
+  played_at TEXT NOT NULL,
+  played_at_unix_ms INTEGER,
+  spotify_track_id TEXT,
+  spotify_track_uri TEXT,
+  spotify_album_id TEXT,
+  spotify_artist_ids_json TEXT,
+  track_name_raw TEXT,
+  artist_name_raw TEXT,
+  album_name_raw TEXT,
+  track_duration_ms INTEGER,
+  ms_played INTEGER NOT NULL DEFAULT 0,
+  ms_played_confidence TEXT NOT NULL DEFAULT 'in_progress',
+  raw_payload_json TEXT NOT NULL,
+  inserted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS fact_play_event_player_link (
+  fact_play_event_id INTEGER NOT NULL REFERENCES fact_play_event(id),
+  raw_listenlab_player_play_id INTEGER NOT NULL UNIQUE REFERENCES raw_listenlab_player_play(id),
+  match_delta_ms INTEGER,
+  match_tier TEXT,
+  is_primary INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(fact_play_event_id, raw_listenlab_player_play_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_listenlab_player_play_user_played_at
+  ON raw_listenlab_player_play(user_id, played_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_raw_listenlab_player_play_track_id_played_at
+  ON raw_listenlab_player_play(spotify_track_id, played_at);
+
+CREATE INDEX IF NOT EXISTS idx_raw_listenlab_player_play_track_uri_played_at
+  ON raw_listenlab_player_play(spotify_track_uri, played_at);
+
+CREATE INDEX IF NOT EXISTS idx_fact_play_event_player_link_fact
+  ON fact_play_event_player_link(fact_play_event_id);
+
+DROP VIEW IF EXISTS v_fact_play_event_with_sources;
+
+CREATE VIEW v_fact_play_event_with_sources AS
+SELECT
+  f.*,
+  fr.raw_spotify_recent_id,
+  fh.raw_spotify_history_id,
+  fp.raw_listenlab_player_play_id,
+  fr.match_delta_ms AS recent_match_delta_ms,
+  fr.match_tier AS recent_match_tier,
+  fh.match_delta_ms AS history_match_delta_ms,
+  fh.match_tier AS history_match_tier,
+  fp.match_delta_ms AS player_match_delta_ms,
+  fp.match_tier AS player_match_tier
+FROM fact_play_event f
+LEFT JOIN fact_play_event_recent_link fr
+  ON fr.fact_play_event_id = f.id
+LEFT JOIN fact_play_event_history_link fh
+  ON fh.fact_play_event_id = f.id
+LEFT JOIN fact_play_event_player_link fp
+  ON fp.fact_play_event_id = f.id;
+""",
 }
 
 
@@ -1839,6 +1907,156 @@ def insert_raw_spotify_history_observation(
             conn_country=conn_country,
             private_session=private_session,
         )
+
+
+def insert_listenlab_player_play(
+    *,
+    ingest_run_id: str | None,
+    source_row_key: str,
+    source_event_id: str,
+    user_id: str,
+    played_at: str,
+    raw_payload_json: str,
+    spotify_user_id: str | None = None,
+    spotify_track_id: str | None = None,
+    spotify_track_uri: str | None = None,
+    spotify_album_id: str | None = None,
+    spotify_artist_ids_json: str | None = None,
+    track_name_raw: str | None = None,
+    artist_name_raw: str | None = None,
+    album_name_raw: str | None = None,
+    track_duration_ms: int | None = None,
+    ms_played: int = 0,
+    ms_played_confidence: str = "in_progress",
+) -> dict[str, Any]:
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM raw_listenlab_player_play
+            WHERE source_row_key = ? OR source_event_id = ?
+            LIMIT 1
+            """,
+            (source_row_key, source_event_id),
+        ).fetchone()
+        if existing is not None:
+            return {"row_id": int(existing["id"]), "action": "unchanged"}
+
+        safe_ms_played = max(0, int(ms_played))
+        if track_duration_ms is not None:
+            safe_ms_played = min(safe_ms_played, max(0, int(track_duration_ms)))
+        cursor = connection.execute(
+            """
+            INSERT INTO raw_listenlab_player_play (
+              ingest_run_id,
+              source_row_key,
+              source_event_id,
+              user_id,
+              spotify_user_id,
+              played_at,
+              played_at_unix_ms,
+              spotify_track_id,
+              spotify_track_uri,
+              spotify_album_id,
+              spotify_artist_ids_json,
+              track_name_raw,
+              artist_name_raw,
+              album_name_raw,
+              track_duration_ms,
+              ms_played,
+              ms_played_confidence,
+              raw_payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ingest_run_id,
+                source_row_key,
+                source_event_id,
+                str(user_id),
+                str(spotify_user_id) if spotify_user_id else None,
+                played_at,
+                _to_unix_ms(played_at),
+                spotify_track_id,
+                spotify_track_uri,
+                spotify_album_id,
+                spotify_artist_ids_json,
+                track_name_raw,
+                artist_name_raw,
+                album_name_raw,
+                track_duration_ms,
+                safe_ms_played,
+                ms_played_confidence,
+                raw_payload_json,
+            ),
+        )
+        return {"row_id": int(cursor.lastrowid), "action": "inserted"}
+
+
+def update_listenlab_player_play_progress(
+    *,
+    row_id: int,
+    user_id: str,
+    ms_played: int,
+    ms_played_confidence: str,
+) -> bool:
+    with sqlite_connection(write=True) as connection:
+        row = connection.execute(
+            """
+            SELECT played_at, track_duration_ms
+            FROM raw_listenlab_player_play
+            WHERE id = ? AND user_id = ?
+            LIMIT 1
+            """,
+            (int(row_id), str(user_id)),
+        ).fetchone()
+        if row is None:
+            return False
+        played_at = str(row[0])
+        duration_ms = row[1]
+        safe_ms_played = max(0, int(ms_played))
+        if duration_ms is not None:
+            safe_ms_played = min(safe_ms_played, max(0, int(duration_ms)))
+        cursor = connection.execute(
+            """
+            UPDATE raw_listenlab_player_play
+            SET
+              ms_played = MAX(ms_played, ?),
+              ms_played_confidence = ?,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE id = ? AND user_id = ?
+            """,
+            (safe_ms_played, ms_played_confidence, int(row_id), str(user_id)),
+        )
+        try:
+            started_at_dt = datetime.fromisoformat(played_at.replace("Z", "+00:00")).astimezone(UTC)
+            ended_at = (started_at_dt + timedelta(milliseconds=safe_ms_played)).isoformat().replace("+00:00", "Z")
+            connection.execute(
+                """
+                UPDATE fact_play_event
+                SET
+                  canonical_started_at = ?,
+                  canonical_ended_at = ?,
+                  canonical_ms_played = ?,
+                  ms_played_confidence = ?,
+                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE id IN (
+                  SELECT pl.fact_play_event_id
+                  FROM fact_play_event_player_link pl
+                  LEFT JOIN fact_play_event_recent_link rl
+                    ON rl.fact_play_event_id = pl.fact_play_event_id
+                  LEFT JOIN fact_play_event_history_link hl
+                    ON hl.fact_play_event_id = pl.fact_play_event_id
+                  WHERE pl.raw_listenlab_player_play_id = ?
+                    AND rl.fact_play_event_id IS NULL
+                    AND hl.fact_play_event_id IS NULL
+                )
+                """,
+                (played_at, ended_at, safe_ms_played, ms_played_confidence, int(row_id)),
+            )
+        except ValueError:
+            pass
+        return cursor.rowcount == 1
 
 
 def _ms_played_method_rank(method: str | None) -> int:

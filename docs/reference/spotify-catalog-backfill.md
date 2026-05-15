@@ -19,6 +19,10 @@ It is enrichment-only. It must not create, merge, promote, or repair ListenLab i
 - Discovers known Spotify track and album IDs from source mappings and raw play rows.
 - Uses representative Spotify IDs for release-level lookup rows, preferring most-listened evidence where multiple candidates exist.
 - Fetches track metadata, album metadata, and album tracklists.
+- Persists basic nested metadata from Spotify track payloads:
+  - `track.album` populates basic `spotify_album_catalog` display fields such as album name, type, release date, total tracks, images, and album artists.
+  - `track.artists` and `track.album.artists` are retained as JSON evidence in the track and album catalog rows.
+  - Full album fetch is still required for label, copyrights, external IDs, UPC/EAN, and complete album-level provenance.
 - Skips complete non-error catalog rows unless `force_refresh=true`.
 - Retries error rows on later runs.
 - Resumes incomplete album tracklists by using the existing stored track count as the next offset.
@@ -78,6 +82,8 @@ Album tracklist policies:
 - Falls back from forbidden batch track/album endpoints to single-item requests.
 - Stores compact error diagnostics without token/header leakage.
 - Keeps run telemetry for request counts, warning counts, skip counts, and retry-after timing.
+- Includes local nested-metadata integrity summaries in worker output.
+- Emits a warning if a track metadata run increases local album-display gaps after marking rows done.
 
 ## One-Shot Track Metadata Worker
 `python3 -m backend.scripts.run_spotify_track_metadata_worker` runs one bounded local/dev enrichment job, then exits.

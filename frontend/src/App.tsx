@@ -948,6 +948,7 @@ const PREVIEW_RAMP_DURATION_MS = 4_200;
 const PREVIEW_RAMP_STEP_MS = 90;
 const PAGE_SIZE = 5;
 const RECENT_SECTION_FETCH_LIMIT = 10;
+const PLAYER_RECENT_FETCH_LIMIT = 50;
 const PLAYLISTS_PAGE_SIZE = 10;
 const TRACKS_FORMULA_FETCH_LIMIT = 100;
 const IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP = 100;
@@ -1172,6 +1173,11 @@ type PlayerTrackSummary = {
   durationMs: number;
 };
 
+type PlayerQueueTrack = PlayerTrackSummary & {
+  trackId: string | null;
+  albumId: string | null;
+};
+
 type SpotifyPlayerState = {
   paused: boolean;
   position: number;
@@ -1212,6 +1218,7 @@ type SpotifyPlayerInstance = {
 
 type PopupTrackPlaybackOptions = {
   optimisticTrack?: PlayerTrackSummary | null;
+  sourceTrack?: RecentTrack | null;
 };
 
 declare global {
@@ -1262,6 +1269,13 @@ export function App() {
   const [representativeReason, setRepresentativeReason] = useState<string | null>(null);
   const [playerReady, setPlayerReady] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const [playerRecentTracks, setPlayerRecentTracks] = useState<RecentTrack[]>([]);
+  const [playerRecentTracksLoading, setPlayerRecentTracksLoading] = useState(false);
+  const [playerRecentTracksError, setPlayerRecentTracksError] = useState<string | null>(null);
+  const [playerQueueTracks, setPlayerQueueTracks] = useState<PlayerQueueTrack[]>([]);
+  const [playerQueueLoading, setPlayerQueueLoading] = useState(false);
+  const [playerQueueError, setPlayerQueueError] = useState<string | null>(null);
+  const [activePlayerListenEventId, setActivePlayerListenEventId] = useState<number | null>(null);
   const [currentTrack, setCurrentTrack] = useState<PlayerTrackSummary | null>(null);
   const [playbackPaused, setPlaybackPaused] = useState(true);
   const [playbackPositionMs, setPlaybackPositionMs] = useState(0);
@@ -1456,6 +1470,7 @@ export function App() {
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const trackMappingLineageRequestIdRef = useRef(0);
+  const playbackPositionMsRef = useRef(0);
   const liveProgressAnchorRef = useRef<{ baseProgressMs: number; receivedAtMs: number; durationMs: number } | null>(null);
   const liveEndRefreshRequestedRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
@@ -2603,6 +2618,62 @@ export function App() {
     }
   }
 
+  async function saveListenLabPlayerEvent(track: PlayerTrackSummary, sourceTrack?: RecentTrack | null, progressMs = 0) {
+    if (experienceMode === "local" || !track.uri) {
+      return null;
+    }
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/player-listen-event`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          track_uri: track.uri,
+          track_id: spotifyTrackIdFromUri(track.uri) ?? sourceTrack?.track_id ?? null,
+          track_name: sourceTrack?.track_name ?? track.name,
+          artist_name: sourceTrack?.artist_name ?? track.artists,
+          album_name: sourceTrack?.album_name ?? track.album,
+          album_id: sourceTrack?.album_id ?? null,
+          duration_ms: track.durationMs || sourceTrack?.duration_ms || null,
+          progress_ms: Math.max(0, Math.floor(progressMs)),
+          ms_played_confidence: "in_progress",
+          played_at: new Date().toISOString(),
+        }),
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const data = (await response.json()) as { row_id?: number | null };
+      return typeof data.row_id === "number" ? data.row_id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function updateListenLabPlayerEventProgress(progressMs: number, confidence: "in_progress" | "paused" | "complete" = "in_progress") {
+    if (experienceMode === "local" || activePlayerListenEventId == null) {
+      return;
+    }
+    try {
+      await fetch(`${apiBaseUrl}/auth/player-listen-event`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          row_id: activePlayerListenEventId,
+          progress_ms: Math.max(0, Math.floor(progressMs)),
+          ms_played_confidence: confidence,
+        }),
+      });
+    } catch {
+      // Player progress persistence is best-effort and should not interrupt playback.
+    }
+  }
+
   function currentTrackFromState(state: SpotifyPlayerState): PlayerTrackSummary {
     const current = state.track_window.current_track;
     return {
@@ -2633,6 +2704,35 @@ export function App() {
     }
     const trackId = trackUri.split(":")[2];
     return trackId || null;
+  }
+
+  function playerRecentTrackKey(track: RecentTrack) {
+    const id = track.track_id?.trim();
+    if (id) {
+      return `id:${id}`;
+    }
+    const uri = track.uri?.trim();
+    if (uri) {
+      return `uri:${uri}`;
+    }
+    return `text:${(track.track_name ?? "").trim().toLocaleLowerCase()}::${(track.artist_name ?? "").trim().toLocaleLowerCase()}`;
+  }
+
+  function dedupeRecentTracksForPlayer(tracks: RecentTrack[], limit = PLAYER_RECENT_FETCH_LIMIT) {
+    const seen = new Set<string>();
+    const unique: RecentTrack[] = [];
+    for (const track of tracks) {
+      const key = playerRecentTrackKey(track);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      unique.push(track);
+      if (unique.length >= limit) {
+        break;
+      }
+    }
+    return unique;
   }
 
   function trackUriWithFallback(trackUri: string | null | undefined, trackId: string | null | undefined) {
@@ -2711,6 +2811,43 @@ export function App() {
       albumId: playerDisplayAlbumId,
       artistName: playerDisplayArtistName,
       sourceTrack: playerDisplayKnownTrack ?? null,
+    });
+  }
+
+  function openRecentPlayerTrackDetails(track: RecentTrack) {
+    const trackUri = trackUriWithFallback(track.uri, track.track_id);
+    setSelectedPreview({
+      image: track.image_url ?? null,
+      fallbackLabel: "T",
+      label: track.track_name ?? "Unknown track",
+      meta: track.artist_name ?? null,
+      detail: track.album_name ?? null,
+      kind: "track",
+      entityId: track.track_id ?? null,
+      trackUri,
+      url: track.url ?? spotifyTrackUrl(trackUri) ?? "",
+      trackId: track.track_id ?? null,
+      albumId: track.album_id ?? null,
+      artistName: track.artist_name ?? null,
+      sourceTrack: track,
+    });
+  }
+
+  function openQueuePlayerTrackDetails(track: PlayerQueueTrack) {
+    setSelectedPreview({
+      image: track.image,
+      fallbackLabel: "T",
+      label: track.name,
+      meta: track.artists,
+      detail: track.album,
+      kind: "track",
+      entityId: track.trackId,
+      trackUri: track.uri,
+      url: spotifyTrackUrl(track.uri) ?? "",
+      trackId: track.trackId,
+      albumId: track.albumId,
+      artistName: track.artists,
+      sourceTrack: null,
     });
   }
 
@@ -2929,6 +3066,48 @@ export function App() {
   }, [currentTrack, playbackDurationMs, playbackPaused]);
 
   useEffect(() => {
+    playbackPositionMsRef.current = playbackPositionMs;
+  }, [playbackPositionMs]);
+
+  useEffect(() => {
+    if (!currentTrack || playbackPaused || activePlayerListenEventId == null) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const durationMs = playbackDurationMs || currentTrack.durationMs || 0;
+      const currentPositionMs = playbackPositionMsRef.current;
+      const confidence = durationMs > 0 && currentPositionMs >= durationMs * 0.98 ? "complete" : "in_progress";
+      void updateListenLabPlayerEventProgress(currentPositionMs, confidence);
+    }, 5000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activePlayerListenEventId, currentTrack, playbackDurationMs, playbackPaused]);
+
+  useEffect(() => {
+    setPlayerRecentTracks(dedupeRecentTracksForPlayer(profile?.recent_tracks ?? []));
+    setPlayerRecentTracksError(null);
+  }, [profile?.recent_tracks]);
+
+  useEffect(() => {
+    if (!playerMenuOpen || !profile || playerRecentTracksLoading) {
+      return;
+    }
+
+    void loadPlayerRecentTracks();
+  }, [playerMenuOpen, profile, recentRange, experienceMode]);
+
+  useEffect(() => {
+    if (!playerMenuOpen || !profile || playerQueueLoading) {
+      return;
+    }
+
+    void loadPlayerQueueTracks();
+  }, [playerMenuOpen, profile, experienceMode]);
+
+  useEffect(() => {
     if (pendingSeekMs == null) {
       return;
     }
@@ -3028,6 +3207,7 @@ export function App() {
   }
 
   async function pausePlayback() {
+    void updateListenLabPlayerEventProgress(playbackPositionMs, "paused");
     const player = spotifyPlayerRef.current;
     if (player) {
       try {
@@ -3199,28 +3379,58 @@ export function App() {
         return false;
       }
       const optimisticTrack = options?.optimisticTrack ?? null;
+      let nextCurrentTrack: PlayerTrackSummary;
       if (optimisticTrack) {
-        setCurrentTrack({
+        nextCurrentTrack = {
           ...optimisticTrack,
           uri: trackUri,
-        });
+        };
+        setCurrentTrack(nextCurrentTrack);
       } else {
+        nextCurrentTrack = {
+          name: "Spotify Playback",
+          artists: "Unknown artist",
+          album: "Unknown album",
+          image: null,
+          uri: trackUri,
+          durationMs: 0,
+        };
         setCurrentTrack((current) => (
           current && current.uri === trackUri
             ? current
-            : {
-              name: "Spotify Playback",
-              artists: "Unknown artist",
-              album: "Unknown album",
-              image: null,
-              uri: trackUri,
-              durationMs: 0,
-            }
+            : nextCurrentTrack
         ));
       }
       setPlaybackPaused(false);
       setPlaybackPositionMs(0);
       setPlaybackDurationMs(Math.max(0, options?.optimisticTrack?.durationMs ?? 0));
+      const listenEventId = await saveListenLabPlayerEvent(nextCurrentTrack, options?.sourceTrack ?? null, 0);
+      setActivePlayerListenEventId(listenEventId);
+      setPlayerRecentTracks((current) => {
+        const sourceTrack = options?.sourceTrack ?? null;
+        const optimisticRecentTrack: RecentTrack = {
+          ...(sourceTrack ?? {
+            track_id: spotifyTrackIdFromUri(trackUri),
+            track_name: nextCurrentTrack.name,
+            artist_name: nextCurrentTrack.artists,
+            album_name: nextCurrentTrack.album,
+            duration_ms: nextCurrentTrack.durationMs,
+            uri: trackUri,
+            image_url: nextCurrentTrack.image,
+            album_id: null,
+            url: spotifyTrackUrl(trackUri),
+          }),
+          event_id: listenEventId,
+          spotify_played_at: new Date().toISOString(),
+          estimated_played_ms: 0,
+          estimated_completion_ratio: 0,
+          source_label: "api",
+        };
+        return dedupeRecentTracksForPlayer([
+          optimisticRecentTrack,
+          ...current.filter((track) => trackUriWithFallback(track.uri, track.track_id) !== trackUri),
+        ]);
+      });
       return true;
     } catch (error) {
       setPlayerError(error instanceof Error ? error.message : "Spotify playback could not be updated.");
@@ -3233,6 +3443,7 @@ export function App() {
     setOverlayTrackPlaybackExpanded(true);
     void handlePopupTrackPlayback(trackUri, {
       optimisticTrack: selectedPreviewTrackOptimisticSummary,
+      sourceTrack: selectedPreview?.sourceTrack ?? null,
     });
   }
 
@@ -3503,6 +3714,7 @@ export function App() {
     setOverlayTrackPlaybackExpanded(true);
     const playbackStarted = await handlePopupTrackPlayback(trackUri, {
       optimisticTrack: playerSummaryFromAlbumTrack(track),
+      sourceTrack: track.sourceTrack,
     });
     if (playbackStarted) {
       openAlbumTrackPreview(track);
@@ -10050,6 +10262,105 @@ export function App() {
     return (await response.json()) as RecentSectionResponse;
   }
 
+  async function loadPlayerRecentTracks() {
+    setPlayerRecentTracksLoading(true);
+    setPlayerRecentTracksError(null);
+    try {
+      const endpoint = experienceMode === "local" ? "/me/local/recent" : "/me/recent";
+      const response = await fetch(
+        `${apiBaseUrl}${endpoint}?recent_range=${encodeURIComponent(recentRange)}&limit=${encodeURIComponent(String(PLAYER_RECENT_FETCH_LIMIT))}`,
+        {
+          credentials: "include",
+        },
+      );
+      if (!response.ok) {
+        let detail = "Failed to load recently played songs.";
+        try {
+          const payload = (await response.json()) as { detail?: string };
+          if (payload.detail) {
+            detail = payload.detail;
+          }
+        } catch {
+          // Keep fallback detail.
+        }
+        throw new Error(detail);
+      }
+      const data = (await response.json()) as RecentSectionResponse;
+      let uniqueTracks = dedupeRecentTracksForPlayer(data.recent_tracks ?? []);
+      let offset = 0;
+      while (uniqueTracks.length < PLAYER_RECENT_FETCH_LIMIT && offset < 500) {
+        const archive = await fetchListeningLog(50, offset, "all");
+        if (archive.items.length === 0) {
+          break;
+        }
+        uniqueTracks = dedupeRecentTracksForPlayer([...uniqueTracks, ...archive.items]);
+        offset += archive.items.length;
+        if (!archive.has_more) {
+          break;
+        }
+      }
+      setPlayerRecentTracks(uniqueTracks);
+    } catch (error) {
+      setPlayerRecentTracksError(formatUiErrorMessage(error, "Failed to load recently played songs."));
+    } finally {
+      setPlayerRecentTracksLoading(false);
+    }
+  }
+
+  async function loadPlayerQueueTracks() {
+    if (experienceMode === "local") {
+      setPlayerQueueTracks([]);
+      setPlayerQueueError(null);
+      return;
+    }
+    setPlayerQueueLoading(true);
+    setPlayerQueueError(null);
+    try {
+      const token = await fetchPlaybackToken();
+      const response = await fetch("https://api.spotify.com/v1/me/player/queue", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Spotify queue request failed (${response.status}).`);
+      }
+      const payload = (await response.json()) as {
+        queue?: Array<{
+          type?: string | null;
+          id?: string | null;
+          name?: string | null;
+          uri?: string | null;
+          duration_ms?: number | null;
+          album?: {
+            id?: string | null;
+            name?: string | null;
+            images?: Array<{ url?: string | null }>;
+          } | null;
+          artists?: Array<{ name?: string | null }>;
+        }>;
+      };
+      setPlayerQueueTracks((payload.queue ?? [])
+        .filter((item) => item.type === "track" || item.uri?.startsWith("spotify:track:"))
+        .map((item) => ({
+          name: item.name ?? "Unknown track",
+          artists: (item.artists ?? []).map((artist) => artist.name ?? "").filter(Boolean).join(", ") || "Unknown artist",
+          album: item.album?.name ?? "Unknown album",
+          image: item.album?.images?.find((image) => image.url)?.url ?? null,
+          uri: item.uri ?? (item.id ? `spotify:track:${item.id}` : null),
+          durationMs: Math.max(0, Number(item.duration_ms ?? 0)),
+          trackId: item.id ?? spotifyTrackIdFromUri(item.uri ?? null),
+          albumId: item.album?.id ?? null,
+        }))
+        .slice(0, PLAYER_RECENT_FETCH_LIMIT));
+    } catch (error) {
+      setPlayerQueueTracks([]);
+      setPlayerQueueError(formatUiErrorMessage(error, "Failed to load Spotify queue."));
+    } finally {
+      setPlayerQueueLoading(false);
+    }
+  }
+
   async function fetchListeningLog(
     limit: number,
     offset: number,
@@ -11512,116 +11823,228 @@ export function App() {
 
                   {playerMenuOpen ? (
                     <section className="profile-card top-profile-card profile-menu-card player-menu-card">
-                      <div className="player-menu-summary">
-                        {playerDisplayTrack?.image ? (
-                          <img alt={`${playerDisplayTrack.album} cover`} className="player-menu-image" src={playerDisplayTrack.image} />
-                        ) : null}
-
-                        <div className="player-menu-copy">
-                          <div className="player-menu-copy-top">
-                            <h2>
-                              {usingLivePlaybackSnapshot && playerDisplayTrack ? (
+                      <div className="player-menu-layout">
+                        <aside className="player-recent-column" aria-label="Recently played songs">
+                          <div className="player-recent-header">
+                            <h3>Recently played</h3>
+                            {playerRecentTracksLoading ? <span>Loading</span> : null}
+                          </div>
+                          <div className="player-recent-list">
+                            {playerRecentTracks.map((track, index) => {
+                              const isDisplayedTrack = Boolean(
+                                playerDisplayTrack?.uri
+                                && trackUriWithFallback(track.uri, track.track_id) === playerDisplayTrack.uri,
+                              );
+                              const durationMs = track.duration_ms ?? (isDisplayedTrack ? playerDisplayDurationMs || playerDisplayTrack?.durationMs : null);
+                              const progressRatio = isDisplayedTrack && durationMs
+                                ? Math.max(0, Math.min(1, playerDisplayPositionMs / durationMs))
+                                : (
+                                  typeof track.estimated_completion_ratio === "number"
+                                    ? Math.max(0, Math.min(1, track.estimated_completion_ratio))
+                                    : null
+                                );
+                              return (
                                 <button
-                                  className="player-menu-title-button single-line-ellipsis"
-                                  onClick={() => openPlayerTrackDetails()}
+                                  className="player-recent-row"
+                                  key={`${track.spotify_played_at ?? "recent"}-${track.track_id ?? track.uri ?? index}`}
+                                  onClick={() => openRecentPlayerTrackDetails(track)}
                                   type="button"
                                 >
-                                  {playerDisplayTrack.name ?? "ListenLab Player"}
+                                  {track.image_url ? (
+                                    <img alt="" className="player-recent-cover" src={track.image_url} />
+                                  ) : (
+                                    <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">
+                                      {(track.track_name ?? "?").slice(0, 1).toUpperCase()}
+                                    </span>
+                                  )}
+                                  <span className="player-recent-copy">
+                                    <span className="player-recent-track single-line-ellipsis">
+                                      {track.track_name ?? "Unknown track"}
+                                    </span>
+                                    <span className="player-recent-artist single-line-ellipsis">
+                                      {track.artist_name ?? "Unknown artist"}
+                                    </span>
+                                    <span className="player-recent-completion" aria-hidden="true">
+                                      <span
+                                        className="player-recent-completion-fill"
+                                        style={{ width: `${Math.round((progressRatio ?? 0) * 100)}%` }}
+                                      />
+                                    </span>
+                                  </span>
                                 </button>
-                              ) : (
-                                <span className="single-line-ellipsis">{playerDisplayTrack?.name ?? "ListenLab Player"}</span>
-                              )}
-                            </h2>
-                            {playerDisplayTrack?.uri ? (
-                              <a
-                                aria-label="Open in Spotify"
-                                className="player-menu-external"
-                                href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
-                                rel="noreferrer"
-                                target="_blank"
-                              >
-                                {"\u2197"}
-                              </a>
+                              );
+                            })}
+                            {!playerRecentTracksLoading && playerRecentTracks.length === 0 ? (
+                              <p className="empty-copy player-recent-empty">No recently played songs yet.</p>
+                            ) : null}
+                            {playerRecentTracksError ? (
+                              <p className="empty-copy player-recent-empty">{playerRecentTracksError}</p>
                             ) : null}
                           </div>
-                          {playerDisplayArtistName ? (
-                            <button
-                              className="player-menu-meta-button player-menu-line single-line-ellipsis"
-                              onClick={() => openPlayerArtistDetails()}
-                              type="button"
-                            >
-                              {playerDisplayArtistName}
-                            </button>
-                          ) : (
-                            <p className="player-menu-line single-line-ellipsis">
-                              {playerDisplayTrack?.artists ?? "Spotify Premium playback"}
-                            </p>
-                          )}
-                          {playerDisplayAlbumName ? (
-                            <button
-                              className="player-menu-meta-button player-menu-line player-menu-line-muted single-line-ellipsis"
-                              onClick={() => openPlayerAlbumDetails()}
-                              type="button"
-                            >
-                              {playerDisplayAlbumLabel}
-                            </button>
-                          ) : (
-                            <p className="player-menu-line player-menu-line-muted single-line-ellipsis">
-                              {playerDisplayAlbumLabel}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
-                      {playerDisplayTrack ? (
-                        <div className="player-progress" aria-label="Playback progress">
-                          <input
-                            aria-label="Seek playback"
-                            className="player-progress-slider"
-                            disabled={!canControlPlayback}
-                            max={Math.max(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0, 1)}
-                            min={0}
-                            onChange={(event) => setPendingSeekMs(Number(event.currentTarget.value))}
-                            onMouseUp={() => {
-                              if (canControlPlayback && pendingSeekMs != null) {
-                                void seekPlayer(pendingSeekMs);
-                              }
-                            }}
-                            onTouchEnd={() => {
-                              if (canControlPlayback && pendingSeekMs != null) {
-                                void seekPlayer(pendingSeekMs);
-                              }
-                            }}
-                            step={1000}
-                            title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
-                            type="range"
-                            value={pendingSeekMs ?? playerDisplayPositionMs}
-                          />
-                          <div className="player-progress-times">
-                            <span>{formatPlaybackClock(pendingSeekMs ?? playerDisplayPositionMs)}</span>
-                            <span>{formatPlaybackClock(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0)}</span>
-                          </div>
-                        </div>
-                      ) : null}
-
-                      <div className="actions actions-centered actions-in-card">
-                        <span title={livePlaybackControlTooltip}>
                           <button
-                            className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
-                            disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
-                            onClick={() => handlePlayerPrimaryButtonClick()}
+                            className="secondary-button player-menu-footer-button"
+                            onClick={() => {
+                              setPlayerMenuOpen(false);
+                              openListeningLogPage();
+                            }}
                             type="button"
                           >
-                            {playerDisplayPaused ? "Play" : "Pause"}
+                            complete listen log
                           </button>
-                        </span>
-                      </div>
+                        </aside>
 
-                      {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? (
-                        <p className="empty-copy">Track ended. Checking for the next song...</p>
-                      ) : null}
-                      {playerError ? <p className="empty-copy">{playerError}</p> : null}
-                      {!usingLivePlaybackSnapshot && !playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
+                        <div className="player-current-column">
+                          <div className="player-menu-summary">
+                            {playerDisplayTrack?.image ? (
+                              <img alt={`${playerDisplayTrack.album} cover`} className="player-menu-image" src={playerDisplayTrack.image} />
+                            ) : null}
+
+                            <div className="player-menu-copy">
+                              <div className="player-menu-copy-top">
+                                <h2>
+                                  {usingLivePlaybackSnapshot && playerDisplayTrack ? (
+                                    <button
+                                      className="player-menu-title-button single-line-ellipsis"
+                                      onClick={() => openPlayerTrackDetails()}
+                                      type="button"
+                                    >
+                                      {playerDisplayTrack.name ?? "ListenLab Player"}
+                                    </button>
+                                  ) : (
+                                    <span className="single-line-ellipsis">{playerDisplayTrack?.name ?? "ListenLab Player"}</span>
+                                  )}
+                                </h2>
+                                {playerDisplayTrack?.uri ? (
+                                  <a
+                                    aria-label="Open in Spotify"
+                                    className="player-menu-external"
+                                    href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
+                                    rel="noreferrer"
+                                    target="_blank"
+                                  >
+                                    {"\u2197"}
+                                  </a>
+                                ) : null}
+                              </div>
+                              {playerDisplayArtistName ? (
+                                <button
+                                  className="player-menu-meta-button player-menu-line single-line-ellipsis"
+                                  onClick={() => openPlayerArtistDetails()}
+                                  type="button"
+                                >
+                                  {playerDisplayArtistName}
+                                </button>
+                              ) : (
+                                <p className="player-menu-line single-line-ellipsis">
+                                  {playerDisplayTrack?.artists ?? "Spotify Premium playback"}
+                                </p>
+                              )}
+                              {playerDisplayAlbumName ? (
+                                <button
+                                  className="player-menu-meta-button player-menu-line player-menu-line-muted single-line-ellipsis"
+                                  onClick={() => openPlayerAlbumDetails()}
+                                  type="button"
+                                >
+                                  {playerDisplayAlbumLabel}
+                                </button>
+                              ) : (
+                                <p className="player-menu-line player-menu-line-muted single-line-ellipsis">
+                                  {playerDisplayAlbumLabel}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          {playerDisplayTrack ? (
+                            <div className="player-progress" aria-label="Playback progress">
+                              <input
+                                aria-label="Seek playback"
+                                className="player-progress-slider"
+                                disabled={!canControlPlayback}
+                                max={Math.max(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0, 1)}
+                                min={0}
+                                onChange={(event) => setPendingSeekMs(Number(event.currentTarget.value))}
+                                onMouseUp={() => {
+                                  if (canControlPlayback && pendingSeekMs != null) {
+                                    void seekPlayer(pendingSeekMs);
+                                  }
+                                }}
+                                onTouchEnd={() => {
+                                  if (canControlPlayback && pendingSeekMs != null) {
+                                    void seekPlayer(pendingSeekMs);
+                                  }
+                                }}
+                                step={1000}
+                                title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
+                                type="range"
+                                value={pendingSeekMs ?? playerDisplayPositionMs}
+                              />
+                              <div className="player-progress-times">
+                                <span>{formatPlaybackClock(pendingSeekMs ?? playerDisplayPositionMs)}</span>
+                                <span>{formatPlaybackClock(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0)}</span>
+                              </div>
+                            </div>
+                          ) : null}
+
+                          <div className="actions actions-centered actions-in-card">
+                            <span title={livePlaybackControlTooltip}>
+                              <button
+                                className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
+                                disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
+                                onClick={() => handlePlayerPrimaryButtonClick()}
+                                type="button"
+                              >
+                                {playerDisplayPaused ? "Play" : "Pause"}
+                              </button>
+                            </span>
+                          </div>
+
+                          {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? (
+                            <p className="empty-copy">Track ended. Checking for the next song...</p>
+                          ) : null}
+                          {playerError ? <p className="empty-copy">{playerError}</p> : null}
+                          {!usingLivePlaybackSnapshot && !playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
+                        </div>
+
+                        <aside className="player-recent-column player-queue-column" aria-label="Spotify queue">
+                          <div className="player-recent-header">
+                            <h3>Queue</h3>
+                            {playerQueueLoading ? <span>Loading</span> : null}
+                          </div>
+                          <div className="player-recent-list">
+                            {playerQueueTracks.map((track, index) => (
+                              <button
+                                className="player-recent-row"
+                                key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
+                                onClick={() => openQueuePlayerTrackDetails(track)}
+                                type="button"
+                              >
+                                {track.image ? (
+                                  <img alt="" className="player-recent-cover" src={track.image} />
+                                ) : (
+                                  <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">
+                                    {track.name.slice(0, 1).toUpperCase()}
+                                  </span>
+                                )}
+                                <span className="player-recent-copy">
+                                  <span className="player-recent-track single-line-ellipsis">
+                                    {track.name}
+                                  </span>
+                                  <span className="player-recent-artist single-line-ellipsis">
+                                    {track.artists}
+                                  </span>
+                                </span>
+                              </button>
+                            ))}
+                            {!playerQueueLoading && playerQueueTracks.length === 0 ? (
+                              <p className="empty-copy player-recent-empty">No queued songs were returned.</p>
+                            ) : null}
+                            {playerQueueError ? (
+                              <p className="empty-copy player-recent-empty">{playerQueueError}</p>
+                            ) : null}
+                          </div>
+                        </aside>
+                      </div>
                     </section>
                   ) : null}
                 </div>

@@ -1189,6 +1189,169 @@ h1 {
   font-size: 0.72rem;
 }
 
+.source-release-album-section,
+.source-release-track-group {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  min-width: 0;
+}
+
+.source-release-track-group {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.source-release-album-header,
+.source-release-track-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.source-release-album-header h4,
+.source-release-track-header h4 {
+  margin: 0;
+}
+
+.source-release-source-list {
+  display: grid;
+  gap: 6px;
+}
+
+.source-release-source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.3fr) minmax(120px, 0.72fr) minmax(120px, 0.72fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  min-width: 0;
+}
+
+.source-release-source-main,
+.source-release-source-album,
+.source-release-source-stats,
+.source-release-source-map {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.source-release-source-main strong,
+.source-release-source-album strong,
+.source-release-source-main span,
+.source-release-source-album span,
+.source-release-id {
+  overflow-wrap: anywhere;
+}
+
+.source-release-track-name-button {
+  display: inline;
+}
+
+.source-release-track-name-button:hover strong {
+  color: #7dffac;
+}
+
+.source-release-confirmation-chip {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.source-release-confirmation-safe_candidate {
+  background: rgba(30, 215, 96, 0.14);
+  color: #aaf5c1;
+}
+
+.source-release-confirmation-needs_review {
+  background: rgba(244, 184, 79, 0.15);
+  color: #f8d494;
+}
+
+.source-release-confirmation-unsafe {
+  background: rgba(238, 99, 82, 0.16);
+  color: #ffb2a8;
+}
+
+.source-release-confirmation-preview {
+  color: #b7d2bf;
+  font-size: 0.78rem;
+}
+
+.source-release-confirmation-preview summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.source-release-confirmation-preview ul {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+
+.source-release-confirmation-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.source-release-confirmation-evidence span {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.source-release-source-row .jump-link {
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  justify-content: flex-start;
+}
+
+.source-release-id {
+  display: inline-flex;
+  width: 24ch;
+  max-width: 100%;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-release-source-kind,
+.source-release-source-main span,
+.source-release-source-album span,
+.source-release-source-stats span,
+.source-release-source-map span {
+  color: #9bc5a6;
+  font-size: 0.74rem;
+}
+
+.source-release-source-kind {
+  color: #dff8e8;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.source-release-source-stats,
+.source-release-source-map {
+  justify-items: end;
+  white-space: normal;
+}
+
+.source-release-source-stats span,
+.source-release-source-map span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .identity-audit-ambiguous-toolbar {
   display: grid;
   gap: 8px;
@@ -1811,8 +1974,141 @@ h1 {
 }
 
 .player-menu-card {
-  min-width: 420px;
-  width: min(420px, calc(100vw - 32px));
+  min-width: 920px;
+  width: min(920px, calc(100vw - 32px));
+}
+
+.player-menu-layout {
+  display: grid;
+  grid-template-columns: minmax(210px, 240px) minmax(260px, 1fr) minmax(210px, 240px);
+  gap: 18px;
+  align-items: start;
+}
+
+.player-recent-column,
+.player-current-column {
+  min-width: 0;
+}
+
+.player-recent-column {
+  display: grid;
+  gap: 10px;
+  align-self: stretch;
+}
+
+.player-recent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.player-recent-header h3 {
+  margin: 0;
+  color: #f7f8f2;
+  font-size: 0.86rem;
+  line-height: 1.2;
+}
+
+.player-recent-header span {
+  color: #9cb7a6;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.player-recent-list {
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.player-recent-row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.player-recent-row:hover,
+.player-recent-row:focus-visible {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.player-recent-cover {
+  width: 38px;
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.player-recent-cover-fallback {
+  display: inline-grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  color: #dff8e8;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.player-recent-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.player-recent-track {
+  color: #f7f8f2;
+  font-size: 0.84rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.player-recent-artist {
+  color: #b8d7c2;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.player-recent-completion {
+  display: block;
+  width: 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.player-recent-completion-fill {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: #1ed760;
+}
+
+.player-recent-empty {
+  margin: 6px 2px;
+}
+
+.player-menu-footer-button {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 0.8rem;
 }
 
 .player-menu-summary {
@@ -2997,6 +3293,18 @@ h1 {
     min-width: 0;
   }
 
+  .player-menu-card {
+    width: 100%;
+  }
+
+  .player-menu-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .player-recent-list {
+    max-height: 220px;
+  }
+
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
@@ -3076,6 +3384,16 @@ h1 {
   .identity-audit-example-header,
   .identity-audit-variant {
     grid-template-columns: 1fr;
+  }
+
+  .source-release-source-row {
+    grid-template-columns: 1fr;
+  }
+
+  .source-release-source-stats,
+  .source-release-source-map {
+    justify-items: start;
+    white-space: normal;
   }
 
   .identity-audit-example-header {

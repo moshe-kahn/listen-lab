@@ -225,6 +225,45 @@ def _current_cooldown_until(worker_name: str) -> str | None:
     return str(row[0]) if row and row[0] else None
 
 
+def reset_spotify_track_metadata_worker_cooldown(
+    *,
+    apply: bool = True,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    worker_name = SPOTIFY_TRACK_METADATA_WORKER
+    checked_at = now or _utc_now()
+    previous_cooldown_until = _current_cooldown_until(worker_name)
+    parsed_previous = _parse_iso_utc(previous_cooldown_until)
+    active = parsed_previous is not None and parsed_previous > checked_at
+    result = {
+        "ok": True,
+        "mode": "apply" if apply else "dry_run",
+        "performed_action": "reset_cooldown" if apply and previous_cooldown_until else "none",
+        "worker_name": worker_name,
+        "previous_cooldown_until": previous_cooldown_until,
+        "active_cooldown": bool(active),
+        "cooldown_until": None if apply else previous_cooldown_until,
+        "reset_count": 0,
+        "would_reset_count": 1 if previous_cooldown_until else 0,
+    }
+    if not apply or not previous_cooldown_until:
+        return result
+    with sqlite_connection(write=True) as connection:
+        before = connection.total_changes
+        connection.execute(
+            """
+            UPDATE spotify_catalog_worker_state
+            SET cooldown_until = NULL,
+                updated_at = ?
+            WHERE worker_name = ?
+            """,
+            (_iso_utc(checked_at), worker_name),
+        )
+        if connection.total_changes > before:
+            result["reset_count"] = 1
+    return result
+
+
 def _worker_state(worker_name: str) -> dict[str, Any] | None:
     with sqlite_connection() as connection:
         row = connection.execute(

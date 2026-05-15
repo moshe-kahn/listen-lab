@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -16,19 +18,41 @@ from backend.app.main import app
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from backend.app.spotify_catalog_backfill import (
+    append_resolution_evidence_candidate_tracklists_from_report,
+    append_resolution_evidence_sibling_tracks_from_report,
     enqueue_spotify_catalog_backfill_items,
     dry_run_release_album_merge,
     get_identity_readiness_track_metadata_priority_comparison,
     get_spotify_track_metadata_priority_debug,
+    inspect_spotify_album_metadata_display_gaps,
+    inspect_spotify_catalog_queue_resolution_evidence,
+    inspect_spotify_nested_metadata_integrity,
+    inspect_source_release_album_display_gaps,
     list_spotify_catalog_backfill_queue,
+    plan_source_release_album_display_enrichment,
     preview_release_album_merge,
+    repair_incomplete_done_resolution_tracklist_queue_rows,
+    repair_spotify_album_basic_metadata_from_track_payloads,
     repair_spotify_catalog_backfill_queue_statuses,
+    run_spotify_resolution_evidence_album_tracklist_worker,
+    run_spotify_resolution_evidence_track_metadata_worker,
+    run_source_release_album_display_enrichment_worker,
     search_album_catalog_duplicate_by_name_identities,
     search_album_catalog_duplicate_spotify_identities,
     search_album_catalog_lookup,
     search_track_catalog_duplicate_spotify_identities,
     search_track_catalog_lookup,
+    search_track_mapping_lineage,
     run_spotify_catalog_backfill,
+    _upsert_track_catalog,
+)
+from backend.scripts.inspect_spotify_catalog_queue import (
+    build_album_display_diagnostic_summary,
+    build_queue_snapshot_export,
+    build_summary_only_report,
+    build_unknown_pending_queue_items_report,
+    run_source_release_album_display_enrichment_loop,
+    write_queue_snapshot_export,
 )
 
 
@@ -3647,6 +3671,2842 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         refresh_mock.assert_not_called()
         run_mock.assert_not_called()
+
+    def test_queue_resolution_evidence_report_classifies_existing_queue(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Shared Track", "shared track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("ambig-1", "ambig-2"):
+                source_track_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (
+                          source_name, external_id, external_uri, source_name_raw, raw_payload_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        ("spotify", spotify_track_id, f"spotify:track:{spotify_track_id}", "Shared Track", "{}"),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_track_id, release_track_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO spotify_track_catalog (
+                      spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                      album_id, artists_json, raw_json, market, fetched_at, last_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        spotify_track_id,
+                        "Shared Track",
+                        123000,
+                        0,
+                        1,
+                        1,
+                        "album-1",
+                        '[{"name":"Artist 1"}]',
+                        json.dumps({"external_ids": {"isrc": "US123"}}),
+                        "US",
+                        "2026-04-27T12:00:00Z",
+                        "ok",
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, album_type, release_date, release_date_precision,
+                  total_tracks, artists_json, images_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "album-1",
+                    "Album 1",
+                    "album",
+                    "2026-01-01",
+                    "day",
+                    3,
+                    '[{"name":"Artist 1"}]',
+                    '[{"url":"https://image.test/1.jpg"}]',
+                    json.dumps({"copyrights": [{"text": "C 2026 Label"}], "label": "Label"}),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, album_type, release_date, release_date_precision,
+                  total_tracks, artists_json, images_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "album-2",
+                    "Album 2",
+                    "album",
+                    "2026-01-01",
+                    "day",
+                    1,
+                    '[{"name":"Artist 1"}]',
+                    '[{"url":"https://image.test/2.jpg"}]',
+                    json.dumps({"copyrights": [{"text": "C 2026 Label"}], "label": "Label"}),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_track (
+                  spotify_album_id, spotify_track_id, disc_number, track_number, name,
+                  duration_ms, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "album-1",
+                    "sibling-1",
+                    1,
+                    2,
+                    "Sibling Track",
+                    120000,
+                    '[{"name":"Artist 1"}]',
+                    "{}",
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_track (
+                  spotify_album_id, spotify_track_id, disc_number, track_number, name,
+                  duration_ms, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "album-1",
+                    "sibling-missing-metadata",
+                    1,
+                    3,
+                    "Sibling Missing Metadata",
+                    121000,
+                    '[{"name":"Artist 1"}]',
+                    "{}",
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "sibling-1",
+                    "Sibling Track",
+                    120000,
+                    0,
+                    1,
+                    2,
+                    "album-1",
+                    '[{"name":"Artist 1"}]',
+                    json.dumps({"external_ids": {"isrc": "US456"}}),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            queue_rows = [
+                ("track", "ambig-1", "identity_metadata", 90, "pending", "2026-04-27T12:00:00Z", 0, None),
+                ("album", "album-1", "tracklist_completion", 70, "pending", "2026-04-27T12:01:00Z", 0, None),
+                ("track", "sibling-1", "manual_priority", 50, "pending", "2026-04-27T12:02:00Z", 0, None),
+                ("album", "generic-album", "full_backfill", 10, "pending", "2026-04-27T12:03:00Z", 0, None),
+                ("track", "broken-track", "manual_priority", 20, "error", "2026-04-27T12:04:00Z", 2, "boom"),
+                ("album", "legacy-visible", "visible_incomplete", 5, "pending", "2026-04-27T12:05:00Z", 0, None),
+            ]
+            connection.executemany(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                queue_rows,
+            )
+            connection.commit()
+
+        report = inspect_spotify_catalog_queue_resolution_evidence()
+
+        self.assertTrue(report["ok"])
+        self.assertEqual("read_only", report["mode"])
+        self.assertEqual(6, report["queue_snapshot"]["total_queued_items"])
+        self.assertEqual({"pending": 5, "error": 1}, report["queue_snapshot"]["counts_by_status"])
+        self.assertEqual(
+            {
+                "directly_relevant": 2,
+                "possibly_relevant": 1,
+                "generic_catalog_backfill": 1,
+                "stale_or_blocked": 1,
+                "unknown": 1,
+            },
+            report["resolution_relevance"]["bucket_counts"],
+        )
+        self.assertEqual(2, report["resolution_relevance"]["bucket_counts_by_status"]["directly_relevant_pending"])
+        self.assertEqual(1, report["resolution_relevance"]["bucket_counts_by_status"]["unknown_pending"])
+        self.assertEqual(
+            {"legacy_album_lookup_visible_incomplete": 1},
+            report["resolution_relevance"]["unknown_reason_counts"],
+        )
+        self.assertEqual(1, report["evidence_coverage_hints"]["queued_candidate_albums"])
+        self.assertEqual(1, report["evidence_coverage_hints"]["queued_sibling_tracks"])
+        self.assertEqual(1, report["evidence_coverage_hints"]["queued_ambiguous_source_tracks"])
+        self.assertEqual(1, report["evidence_coverage_hints"]["album_tracklist_gaps"])
+        delta_counts = report["resolution_evidence_delta"]["counts"]
+        self.assertEqual(1, delta_counts["ambiguous_source_tracks_missing_from_queue"])
+        self.assertEqual(1, delta_counts["sibling_tracks_missing_from_queue"])
+        self.assertEqual(0, delta_counts["sibling_tracks_already_present_locally_but_not_queued"])
+        self.assertEqual(1, delta_counts["sibling_tracks_requiring_metadata"])
+        self.assertEqual(1, delta_counts["candidate_albums_queued_but_missing_tracklists"])
+        self.assertEqual(1, delta_counts["tracklists_needed_before_sibling_tracks_can_be_enumerated"])
+        self.assertEqual("preserve_current_queue", report["safety_recommendation"]["action"])
+        self.assertIn(
+            "complete_candidate_album_tracklists_before_sibling_track_collection",
+            report["safety_recommendation"]["recommended_steps"],
+        )
+        self.assertIn(
+            "let_directly_relevant_pending_candidate_albums_or_tracklists_complete_first",
+            report["safety_recommendation"]["recommended_steps"],
+        )
+        self.assertEqual(6, len(report["queue_items"]))
+        plan = report["dry_run_resolution_evidence_plan"]
+        self.assertEqual("dry_run", plan["mode"])
+        self.assertEqual("none", plan["performed_action"])
+        self.assertEqual("resolution_evidence", plan["suggested_reason"])
+        self.assertEqual(1, plan["counts_by_plan_status"]["already_queued_pending"])
+        self.assertEqual(2, plan["counts_by_plan_status"]["should_append_later"])
+        self.assertEqual(1, plan["counts_by_plan_status"]["tracklist_pending"])
+        self.assertEqual(
+            {
+                "ambiguity_group_count": 1,
+                "candidate_album_count": 1,
+                "candidate_album_tracklist_missing_count": 1,
+                "broad_incomplete_album_tracklist_count": 2,
+                "actual_sibling_track_count": 2,
+            },
+            plan["source_set_counts"],
+        )
+        self.assertEqual("album_tracklist", plan["items"][0]["planned_target"])
+        self.assertEqual("already_queued_pending", plan["items"][0]["plan_status"])
+        self.assertEqual("album-1", plan["items"][0]["spotify_id"])
+        self.assertEqual(1, len(plan["candidate_album_tracklist_items"]))
+        self.assertEqual(1, len(plan["actual_sibling_track_items"]))
+        self.assertEqual(1, len(plan["blocked_sibling_collection_prerequisites"]))
+        self.assertLess(
+            [item["planned_target"] for item in plan["items"]].index("album_tracklist"),
+            [item["planned_target"] for item in plan["items"]].index("track_metadata"),
+        )
+        self.assertEqual(
+            1,
+            sum(
+                1
+                for item in plan["items"]
+                if item["planned_target"] == "album_tracklist"
+                and item["spotify_id"] == "album-1"
+                and item["plan_status"] == "already_queued_pending"
+            ),
+        )
+        self.assertIn(
+            {
+                "planned_target": "album_tracklist",
+                "entity_type": "album",
+                "spotify_id": "album-1",
+                "parent_album_id": None,
+                "plan_status": "tracklist_pending",
+                "suggested_reason": "resolution_evidence",
+                "rationale": "candidate album tracklist must be fetched before sibling tracks can be enumerated",
+            },
+            plan["blocked_sibling_collection_prerequisites"],
+        )
+        for item in plan["blocked_sibling_collection_prerequisites"]:
+            self.assertNotEqual("track", item["entity_type"])
+        for item in plan["actual_sibling_track_items"]:
+            self.assertEqual("track", item["entity_type"])
+            self.assertNotEqual(item["spotify_id"], item["parent_album_id"])
+        self.assertNotIn("album-2", {item["spotify_id"] for item in plan["items"]})
+        self.assertEqual(2, len(report["samples"]["directly_relevant_pending_items"]))
+        self.assertIn(
+            "legacy_album_lookup_visible_incomplete",
+            report["samples"]["unknown_pending_items_by_unknown_reason"],
+        )
+        self.assertEqual("none", report["safety_recommendation"]["performed_action"])
+
+    def test_queue_resolution_evidence_report_does_not_mutate_queue_or_call_spotify(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("track", "t1", "manual_priority", 10, "pending", "2026-04-27T12:00:00Z", 0),
+            )
+            before = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+            connection.commit()
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            _ = inspect_spotify_catalog_queue_resolution_evidence()
+        client_mock.assert_not_called()
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_queue_snapshot_export_writes_classified_rows_without_mutating_queue(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album", "legacy-visible", "visible_incomplete", 10, "pending", "2026-04-27T12:00:00Z", 0),
+            )
+            before = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+            connection.commit()
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            report = inspect_spotify_catalog_queue_resolution_evidence()
+            snapshot = build_queue_snapshot_export(report, timestamp="2026-05-08T12:00:00Z")
+            output_path = Path(self._tmp_dir.name) / "queue-snapshot.json"
+            written_path = write_queue_snapshot_export(report, output_path)
+        client_mock.assert_not_called()
+
+        self.assertEqual(output_path, written_path)
+        self.assertEqual("2026-05-08T12:00:00Z", snapshot["timestamp"])
+        self.assertEqual(1, snapshot["total_queued_items"])
+        exported = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(1, exported["total_queued_items"])
+        self.assertEqual("legacy-visible", exported["queue_rows"][0]["spotify_id"])
+        self.assertEqual("unknown", exported["queue_rows"][0]["relevance_bucket"])
+        self.assertEqual("legacy_album_lookup_visible_incomplete", exported["queue_rows"][0]["unknown_reason"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_album_lookup_visible_incomplete_is_generic_not_unknown(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album", "legacy-album", "album_lookup_visible_incomplete", 80, "pending", "2026-04-27T12:00:00Z", 0),
+            )
+            before = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+            connection.commit()
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            report = inspect_spotify_catalog_queue_resolution_evidence()
+            unknown_report = build_unknown_pending_queue_items_report(report, summary_only=True)
+        client_mock.assert_not_called()
+
+        self.assertEqual(
+            {
+                "directly_relevant": 0,
+                "possibly_relevant": 0,
+                "generic_catalog_backfill": 1,
+                "stale_or_blocked": 0,
+                "unknown": 0,
+            },
+            report["resolution_relevance"]["bucket_counts"],
+        )
+        self.assertEqual(1, report["resolution_relevance"]["bucket_counts_by_status"]["generic_catalog_backfill_pending"])
+        self.assertEqual(0, report["resolution_relevance"]["bucket_counts_by_status"]["unknown_pending"])
+        self.assertEqual({}, report["resolution_relevance"]["unknown_reason_counts"])
+        self.assertEqual("clear_and_replace_later", report["safety_recommendation"]["action"])
+        self.assertEqual(0, unknown_report["unknown_pending_queue_item_count"])
+        self.assertEqual([], unknown_report["sample_items"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_unknown_pending_queue_items_report_filters_unknown_pending_rows(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = [
+                ("album", "legacy-visible", "visible_incomplete", 10, "pending", "2026-04-27T12:00:00Z", 0, None),
+                ("track", "weird-track", "weird_reason", 20, "pending", "2026-04-27T12:01:00Z", 1, "later"),
+                ("album", "done-visible", "visible_incomplete", 10, "done", "2026-04-27T12:02:00Z", 0, None),
+            ]
+            connection.executemany(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            before = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+            connection.commit()
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            report = inspect_spotify_catalog_queue_resolution_evidence()
+            unknown_report = build_unknown_pending_queue_items_report(report)
+            summary = build_unknown_pending_queue_items_report(report, summary_only=True, sample_limit=1)
+        client_mock.assert_not_called()
+
+        self.assertEqual("read_only", unknown_report["mode"])
+        self.assertEqual("none", unknown_report["performed_action"])
+        self.assertEqual(2, unknown_report["unknown_pending_queue_item_count"])
+        self.assertEqual({"visible_incomplete": 1, "weird_reason": 1}, unknown_report["counts_by_reason"])
+        self.assertEqual({"album": 1, "track": 1}, unknown_report["counts_by_entity_type"])
+        self.assertEqual({"pending": 2}, unknown_report["counts_by_status"])
+        self.assertEqual(
+            {"legacy_album_lookup_visible_incomplete": 1, "not_ambiguous_source_track": 1},
+            unknown_report["counts_by_unknown_reason"],
+        )
+        self.assertEqual(["legacy-visible", "weird-track"], [item["spotify_id"] for item in unknown_report["queue_items"]])
+        self.assertEqual("later", unknown_report["queue_items"][1]["last_error"])
+        self.assertEqual(1, summary["sample_limit"])
+        self.assertEqual(1, len(summary["sample_items"]))
+        self.assertNotIn("queue_items", summary)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_resolution_evidence_summary_only_omits_verbose_items(self) -> None:
+        report = {
+            "ok": True,
+            "resolution_relevance": {
+                "bucket_counts_by_status": {
+                    "unknown_pending": 2,
+                },
+            },
+            "resolution_evidence_delta": {
+                "counts": {
+                    "candidate_albums_queued_but_missing_tracklists": 3,
+                    "sibling_tracks_missing_from_queue": 4,
+                    "sibling_tracks_requiring_metadata": 5,
+                    "tracklists_needed_before_sibling_tracks_can_be_enumerated": 6,
+                },
+                "samples": {
+                    "sibling_tracks_requiring_metadata": [{"spotify_id": "sample"}],
+                },
+            },
+            "dry_run_resolution_evidence_plan": {
+                "mode": "dry_run",
+                "performed_action": "none",
+                "source_set_counts": {
+                    "candidate_album_tracklist_missing_count": 7,
+                },
+                "counts_by_plan_status": {
+                    "should_append_later": 8,
+                },
+                "items": [{"spotify_id": "verbose"}],
+            },
+            "safety_recommendation": {
+                "action": "needs_manual_review",
+                "rationale": "review",
+                "counts": {
+                    "unknown_pending": 2,
+                },
+            },
+            "queue_items": [{"spotify_id": "verbose"}],
+            "samples": {
+                "unknown_pending_items_by_unknown_reason": {
+                    "pending_but_not_resolution_related": [{"spotify_id": "verbose"}],
+                },
+            },
+        }
+
+        summary = build_summary_only_report(report)
+
+        self.assertEqual(True, summary["ok"])
+        self.assertEqual("none", summary["performed_action"])
+        self.assertEqual("needs_manual_review", summary["safety_recommendation"]["action"])
+        plan_summary = summary["dry_run_resolution_evidence_plan"]
+        self.assertEqual(7, plan_summary["missing_candidate_album_tracklists_count"])
+        self.assertEqual(5, plan_summary["missing_sibling_track_evidence_count"])
+        self.assertNotIn("queue_items", summary)
+        self.assertNotIn("samples", summary)
+        self.assertNotIn("items", plan_summary)
+
+    def test_album_display_diagnostic_summary_only_omits_verbose_samples(self) -> None:
+        report = {
+            "ok": True,
+            "mode": "read_only",
+            "counts": {
+                "total_rows": 3597,
+                "rows_with_source_album_display_info": 1571,
+                "rows_with_source_album_display_after_embedded_fallback": 1571,
+                "rows_with_no_spotify_album_evidence": 2026,
+                "rows_with_album_spotify_id_but_no_local_album_name": 0,
+                "rows_with_no_album_spotify_id": 2026,
+                "rows_with_release_album_display_info": 3597,
+            },
+            "samples": {
+                "no_spotify_album_evidence": [{"spotify_track_id": "verbose"}],
+            },
+            "notes": ["verbose"],
+        }
+
+        summary = build_album_display_diagnostic_summary(report)
+
+        self.assertEqual(
+            {
+                "ok",
+                "total_rows",
+                "rows_with_source_album_display_info",
+                "rows_with_source_album_display_after_embedded_fallback",
+                "rows_with_no_spotify_album_evidence",
+                "rows_with_album_spotify_id_but_no_local_album_name",
+                "rows_with_no_album_spotify_id",
+            },
+            set(summary.keys()),
+        )
+        self.assertEqual(3597, summary["total_rows"])
+        self.assertEqual(2026, summary["rows_with_no_spotify_album_evidence"])
+        self.assertNotIn("samples", summary)
+        self.assertNotIn("notes", summary)
+
+    def test_album_display_diagnostic_summary_only_cli_output_path(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {**os.environ, "SQLITE_DB_PATH": str(self.db_path)}
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "backend.scripts.inspect_spotify_catalog_queue",
+                "--source-release-album-display-diagnostic",
+                "--album-display-diagnostic-summary-only",
+            ],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        payload = json.loads(result.stdout)
+        self.assertEqual(True, payload["ok"])
+        self.assertEqual(0, payload["total_rows"])
+        self.assertEqual(0, payload["rows_with_source_album_display_info"])
+        self.assertEqual(0, payload["rows_with_source_album_display_after_embedded_fallback"])
+        self.assertEqual(0, payload["rows_with_no_spotify_album_evidence"])
+        self.assertEqual(0, payload["rows_with_album_spotify_id_but_no_local_album_name"])
+        self.assertEqual(0, payload["rows_with_no_album_spotify_id"])
+        self.assertNotIn("samples", payload)
+
+        error_result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "backend.scripts.inspect_spotify_catalog_queue",
+                "--album-display-diagnostic-summary-only",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(0, error_result.returncode)
+        self.assertIn(
+            "--album-display-diagnostic-summary-only requires --source-release-album-display-diagnostic",
+            error_result.stderr,
+        )
+
+    def test_append_resolution_evidence_sibling_cli_dry_run_is_accepted_without_apply(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {**os.environ, "SQLITE_DB_PATH": str(self.db_path)}
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "backend.scripts.inspect_spotify_catalog_queue",
+                "--append-resolution-evidence-sibling-tracks",
+            ],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        payload = json.loads(result.stdout)
+        append_result = payload["append_resolution_evidence_sibling_tracks"]
+        self.assertEqual("dry_run", append_result["mode"])
+        self.assertEqual("none", append_result["performed_action"])
+
+    def test_append_resolution_evidence_candidate_tracklists_cli_dry_run_is_accepted_without_apply(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {**os.environ, "SQLITE_DB_PATH": str(self.db_path)}
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "backend.scripts.inspect_spotify_catalog_queue",
+                "--append-resolution-evidence-candidate-tracklists",
+            ],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        payload = json.loads(result.stdout)
+        append_result = payload["append_resolution_evidence_candidate_tracklists"]
+        self.assertEqual("dry_run", append_result["mode"])
+        self.assertEqual("none", append_result["performed_action"])
+
+    def test_append_resolution_evidence_sibling_cli_summary_only_reports_dry_run(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {**os.environ, "SQLITE_DB_PATH": str(self.db_path)}
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "backend.scripts.inspect_spotify_catalog_queue",
+                "--append-resolution-evidence-sibling-tracks",
+                "--summary-only",
+            ],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        payload = json.loads(result.stdout)
+        self.assertEqual("none", payload["performed_action"])
+        append_summary = payload["append_resolution_evidence_sibling_tracks"]
+        self.assertEqual("dry_run", append_summary["mode"])
+        self.assertEqual("none", append_summary["performed_action"])
+        self.assertNotIn("selected_items", append_summary)
+        self.assertIn("appendability_diagnostic", append_summary)
+
+    def test_append_resolution_evidence_cli_dry_run_does_not_mutate_queue(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("track", "existing-track", "manual_priority", 50, "pending", "2026-04-27T12:00:00Z", 0),
+            )
+            before = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+            connection.commit()
+
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {**os.environ, "SQLITE_DB_PATH": str(self.db_path)}
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "backend.scripts.inspect_spotify_catalog_queue",
+                "--append-resolution-evidence-sibling-tracks",
+                "--summary-only",
+            ],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_append_resolution_evidence_candidate_tracklists_is_dry_run_then_idempotent_apply(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album", "already-pending", "tracklist_completion", 70, "pending", "2026-04-27T12:00:00Z", 0),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album", "already-done", "tracklist_completion", 70, "done", "2026-04-27T12:01:00Z", 0),
+            )
+            before = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, attempts
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+            connection.commit()
+
+        report = {
+            "dry_run_resolution_evidence_plan": {
+                "candidate_album_tracklist_items": [
+                    {
+                        "planned_target": "album_tracklist",
+                        "entity_type": "album",
+                        "spotify_id": "already-pending",
+                        "plan_status": "already_queued_pending",
+                        "suggested_reason": "resolution_evidence",
+                    },
+                    {
+                        "planned_target": "album_tracklist",
+                        "entity_type": "album",
+                        "spotify_id": "already-done",
+                        "plan_status": "already_queued_done",
+                        "suggested_reason": "resolution_evidence",
+                    },
+                    {
+                        "planned_target": "album_tracklist",
+                        "entity_type": "album",
+                        "spotify_id": "append-album",
+                        "plan_status": "should_append_later",
+                        "suggested_reason": "resolution_evidence",
+                        "rationale": "candidate album tracklist is needed",
+                    },
+                ],
+                "actual_sibling_track_items": [
+                    {
+                        "planned_target": "track_metadata",
+                        "entity_type": "track",
+                        "spotify_id": "sibling-track",
+                        "parent_album_id": "append-album",
+                        "plan_status": "should_append_later",
+                        "suggested_reason": "resolution_evidence",
+                    }
+                ],
+                "blocked_sibling_collection_prerequisites": [
+                    {
+                        "planned_target": "album_tracklist",
+                        "entity_type": "album",
+                        "spotify_id": "blocked-album",
+                        "plan_status": "blocked_until_tracklist_exists",
+                        "suggested_reason": "resolution_evidence",
+                    }
+                ],
+            }
+        }
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            dry_run = append_resolution_evidence_candidate_tracklists_from_report(report=report, apply=False)
+        client_mock.assert_not_called()
+        self.assertEqual("dry_run", dry_run["mode"])
+        self.assertEqual("none", dry_run["performed_action"])
+        self.assertEqual(1, dry_run["selected_count"])
+        self.assertEqual("append-album", dry_run["selected_items"][0]["spotify_id"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after_dry_run = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, attempts
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(before, after_dry_run)
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            applied = append_resolution_evidence_candidate_tracklists_from_report(report=report, apply=True)
+        client_mock.assert_not_called()
+        self.assertEqual("apply", applied["mode"])
+        self.assertEqual("inserted_queue_rows", applied["performed_action"])
+        self.assertEqual(1, applied["inserted"])
+        self.assertEqual(0, applied["already_existing"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, attempts
+                FROM spotify_catalog_backfill_queue
+                ORDER BY spotify_id
+                """
+            ).fetchall()
+        self.assertIn(("album", "append-album", "resolution_evidence", 80, "pending", 0), rows)
+        self.assertNotIn(("track", "sibling-track", "resolution_evidence", 80, "pending", 0), rows)
+        self.assertNotIn(("album", "blocked-album", "resolution_evidence", 80, "pending", 0), rows)
+        self.assertIn(("album", "already-done", "tracklist_completion", 70, "done", 0), rows)
+        self.assertIn(("album", "already-pending", "tracklist_completion", 70, "pending", 0), rows)
+
+        second_apply = append_resolution_evidence_candidate_tracklists_from_report(report=report, apply=True)
+        self.assertEqual(0, second_apply["inserted"])
+        self.assertEqual(1, second_apply["already_existing"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            append_count = int(
+                connection.execute(
+                    """
+                    SELECT count(*)
+                    FROM spotify_catalog_backfill_queue
+                    WHERE entity_type = 'album'
+                      AND spotify_id = 'append-album'
+                      AND reason = 'resolution_evidence'
+                    """
+                ).fetchone()[0]
+            )
+        self.assertEqual(1, append_count)
+
+    def test_append_resolution_evidence_sibling_tracks_is_dry_run_then_idempotent_apply(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("track", "already-existing-track", "identity_metadata", 70, "done", "2026-04-27T12:00:00Z", 0),
+            )
+            before = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, attempts
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+            connection.commit()
+
+        report = {
+            "dry_run_resolution_evidence_plan": {
+                "candidate_album_tracklist_items": [
+                    {
+                        "planned_target": "album_tracklist",
+                        "entity_type": "album",
+                        "spotify_id": "album-should-not-insert",
+                        "plan_status": "should_append_later",
+                        "suggested_reason": "resolution_evidence",
+                    }
+                ],
+                "actual_sibling_track_items": [
+                    {
+                        "planned_target": "track_metadata",
+                        "entity_type": "track",
+                        "spotify_id": "sibling-new",
+                        "parent_album_id": "candidate-album",
+                        "plan_status": "should_append_later",
+                        "suggested_reason": "resolution_evidence",
+                        "rationale": "sibling track from candidate album needs metadata",
+                    },
+                    {
+                        "planned_target": "track_metadata",
+                        "entity_type": "track",
+                        "spotify_id": "already-existing-track",
+                        "parent_album_id": "candidate-album",
+                        "plan_status": "should_append_later",
+                        "suggested_reason": "resolution_evidence",
+                    },
+                    {
+                        "planned_target": "track_metadata",
+                        "entity_type": "track",
+                        "spotify_id": "already-queued-pending-track",
+                        "parent_album_id": "candidate-album",
+                        "plan_status": "already_queued_pending",
+                        "suggested_reason": "resolution_evidence",
+                    },
+                    {
+                        "planned_target": "album_tracklist",
+                        "entity_type": "album",
+                        "spotify_id": "wrong-section",
+                        "plan_status": "should_append_later",
+                        "suggested_reason": "resolution_evidence",
+                    },
+                    {
+                        "planned_target": "track_metadata",
+                        "entity_type": "track",
+                        "spotify_id": "wrong-reason",
+                        "parent_album_id": "candidate-album",
+                        "plan_status": "should_append_later",
+                        "suggested_reason": "generic_backfill",
+                    },
+                ],
+                "blocked_sibling_collection_prerequisites": [
+                    {
+                        "planned_target": "album_tracklist",
+                        "entity_type": "album",
+                        "spotify_id": "blocked-album",
+                        "plan_status": "tracklist_missing",
+                        "suggested_reason": "resolution_evidence",
+                    }
+                ],
+            }
+        }
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            dry_run = append_resolution_evidence_sibling_tracks_from_report(report=report, apply=False)
+        client_mock.assert_not_called()
+        self.assertEqual("dry_run", dry_run["mode"])
+        self.assertEqual("none", dry_run["performed_action"])
+        self.assertEqual(2, dry_run["selected_count"])
+        self.assertEqual(["sibling-new", "already-existing-track"], [item["spotify_id"] for item in dry_run["selected_items"]])
+        diagnostic = dry_run["appendability_diagnostic"]
+        self.assertEqual(2, diagnostic["source_counts"]["append_selected_count"])
+        self.assertEqual(5, diagnostic["source_counts"]["actual_sibling_track_items_count"])
+        self.assertEqual(2, diagnostic["append_exclusion_counts"]["appendable"])
+        self.assertEqual(1, diagnostic["append_exclusion_counts"]["already_queued_pending"])
+        self.assertEqual(1, diagnostic["append_exclusion_counts"]["planned_target_filter_mismatch"])
+        self.assertEqual(1, diagnostic["append_exclusion_counts"]["suggested_reason_filter_mismatch"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after_dry_run = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, attempts
+                FROM spotify_catalog_backfill_queue
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(before, after_dry_run)
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            applied = append_resolution_evidence_sibling_tracks_from_report(report=report, apply=True)
+        client_mock.assert_not_called()
+        self.assertEqual("apply", applied["mode"])
+        self.assertEqual("inserted_queue_rows", applied["performed_action"])
+        self.assertEqual(1, applied["inserted"])
+        self.assertEqual(1, applied["already_existing"])
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status, attempts
+                FROM spotify_catalog_backfill_queue
+                ORDER BY spotify_id
+                """
+            ).fetchall()
+        self.assertIn(("track", "sibling-new", "resolution_evidence", 80, "pending", 0), rows)
+        self.assertIn(("track", "already-existing-track", "identity_metadata", 70, "done", 0), rows)
+        self.assertNotIn(("album", "album-should-not-insert", "resolution_evidence", 80, "pending", 0), rows)
+        self.assertNotIn(("album", "blocked-album", "resolution_evidence", 80, "pending", 0), rows)
+        self.assertNotIn(("track", "wrong-reason", "resolution_evidence", 80, "pending", 0), rows)
+
+        second_apply = append_resolution_evidence_sibling_tracks_from_report(report=report, apply=True)
+        self.assertEqual(0, second_apply["inserted"])
+        self.assertEqual(2, second_apply["already_existing"])
+
+    def test_append_resolution_evidence_sibling_tracks_explains_zero_candidates_from_broad_delta(self) -> None:
+        report = {
+            "resolution_evidence_delta": {
+                "counts": {
+                    "sibling_tracks_missing_from_queue": 62,
+                    "sibling_tracks_already_present_locally_but_not_queued": 52,
+                    "sibling_tracks_requiring_metadata": 10,
+                    "tracklists_needed_before_sibling_tracks_can_be_enumerated": 985,
+                },
+                "samples": {
+                    "sibling_tracks_requiring_metadata": [
+                        {"spotify_id": "needs-metadata", "parent_album_id": "album-needs-tracklist"}
+                    ],
+                    "sibling_tracks_missing_from_queue": [
+                        {"spotify_id": "missing-queue", "parent_album_id": "album-needs-tracklist"}
+                    ],
+                },
+            },
+            "dry_run_resolution_evidence_plan": {
+                "actual_sibling_track_items": [],
+            },
+        }
+
+        result = append_resolution_evidence_sibling_tracks_from_report(report=report, apply=False)
+
+        self.assertEqual(0, result["selected_count"])
+        diagnostic = result["appendability_diagnostic"]
+        self.assertEqual(10, diagnostic["source_counts"]["sibling_tracks_requiring_metadata_count"])
+        self.assertEqual(62, diagnostic["source_counts"]["sibling_tracks_missing_from_queue_count"])
+        self.assertEqual(0, diagnostic["source_counts"]["actual_sibling_track_items_count"])
+        self.assertEqual(10, diagnostic["broad_delta_not_in_focused_append_plan_count"])
+        self.assertEqual(
+            "not_in_focused_append_plan",
+            diagnostic["samples"]["sibling_tracks_requiring_metadata"][0]["appendability_reason"],
+        )
+        self.assertIn("focused append plan", diagnostic["selection_note"])
+
+    def _seed_resolution_tracklist_worker_case(self, *, extra_candidate_album: bool = False) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Resolution Track", "resolution track"),
+                ).lastrowid
+            )
+            source_defs = [("worker-track-1", "worker-album")]
+            if extra_candidate_album:
+                source_defs.append(("worker-track-2", "worker-album-2"))
+            else:
+                source_defs.append(("worker-track-2", "worker-album"))
+            for spotify_track_id, album_id in source_defs:
+                source_track_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (
+                          source_name, external_id, external_uri, source_name_raw, raw_payload_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        ("spotify", spotify_track_id, f"spotify:track:{spotify_track_id}", "Resolution Track", "{}"),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_track_id, release_track_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO spotify_track_catalog (
+                      spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                      album_id, artists_json, raw_json, market, fetched_at, last_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        spotify_track_id,
+                        "Resolution Track",
+                        100000,
+                        0,
+                        1,
+                        1,
+                        album_id,
+                        '[{"name":"Artist 1"}]',
+                        json.dumps({"external_ids": {"isrc": f"ISRC{spotify_track_id}"}}),
+                        "US",
+                        "2026-04-27T12:00:00Z",
+                        "ok",
+                    ),
+                )
+            for album_id in {"worker-album", *(["worker-album-2"] if extra_candidate_album else [])}:
+                connection.execute(
+                    """
+                    INSERT INTO spotify_album_catalog (
+                      spotify_album_id, name, album_type, release_date, release_date_precision,
+                      total_tracks, artists_json, images_json, raw_json, market, fetched_at, last_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        album_id,
+                        f"Album {album_id}",
+                        "album",
+                        "2026-01-01",
+                        "day",
+                        2,
+                        '[{"name":"Artist 1"}]',
+                        '[{"url":"https://image.test/1.jpg"}]',
+                        json.dumps({"copyrights": [{"text": "C 2026 Label"}], "label": "Label"}),
+                        "US",
+                        "2026-04-27T12:00:00Z",
+                        "ok",
+                    ),
+                )
+            queue_rows = [
+                ("album", "worker-album", "resolution_evidence", 80, "pending", "2026-04-27T12:00:00Z", 0, None),
+                ("album", "legacy-album", "visible_incomplete", 80, "pending", "2026-04-27T12:01:00Z", 0, None),
+                ("album", "generic-album", "full_backfill", 80, "pending", "2026-04-27T12:02:00Z", 0, None),
+                ("track", "worker-track-1", "resolution_evidence", 80, "pending", "2026-04-27T12:03:00Z", 0, None),
+            ]
+            if extra_candidate_album:
+                queue_rows.append(
+                    (
+                        "album",
+                        "worker-album-2",
+                        "album_lookup_visible_incomplete",
+                        80,
+                        "pending",
+                        "2026-04-27T12:04:00Z",
+                        0,
+                        None,
+                    )
+                )
+            connection.executemany(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                queue_rows,
+            )
+            connection.commit()
+
+    def _seed_resolution_track_metadata_worker_case(self) -> None:
+        self._seed_resolution_tracklist_worker_case()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            for track_id, track_number in (("sibling-track-1", 1), ("sibling-track-2", 2)):
+                connection.execute(
+                    """
+                    INSERT INTO spotify_album_track (
+                      spotify_album_id, spotify_track_id, disc_number, track_number, name,
+                      duration_ms, artists_json, raw_json, market, fetched_at, last_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "worker-album",
+                        track_id,
+                        1,
+                        track_number,
+                        f"Sibling {track_number}",
+                        100000 + track_number,
+                        '[{"name":"Artist 1"}]',
+                        "{}",
+                        "US",
+                        "2026-04-27T12:00:00Z",
+                        "ok",
+                    ),
+                )
+            connection.executemany(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("track", "sibling-track-1", "resolution_evidence", 80, "pending", "2026-04-27T12:04:00Z", 0, None),
+                    ("track", "sibling-track-2", "resolution_evidence", 80, "pending", "2026-04-27T12:05:00Z", 0, None),
+                    ("track", "identity-track", "identity_metadata", 90, "pending", "2026-04-27T12:06:00Z", 0, None),
+                    ("track", "resolution-not-sibling", "resolution_evidence", 80, "pending", "2026-04-27T12:07:00Z", 0, None),
+                ],
+            )
+            connection.commit()
+
+    def test_resolution_album_tracklist_worker_dry_run_selects_only_focused_rows_without_mutation(self) -> None:
+        self._seed_resolution_tracklist_worker_case()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            before = connection.execute(
+                "SELECT entity_type, spotify_id, reason, status, attempts FROM spotify_catalog_backfill_queue ORDER BY id"
+            ).fetchall()
+
+        fetch_calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            fetch_calls.append(url)
+            return 200, {}, {}, None
+
+        result = run_spotify_resolution_evidence_album_tracklist_worker(
+            access_token="token",
+            limit=5,
+            dry_run=True,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+        self.assertEqual("dry_run", result["status"])
+        self.assertEqual("none", result["performed_action"])
+        self.assertEqual(
+            [
+                {
+                    "queue_id": 1,
+                    "spotify_album_id": "worker-album",
+                    "stored_reason": "resolution_evidence",
+                    "planner_status": "already_queued_pending",
+                }
+            ],
+            result["selected_items"],
+        )
+        self.assertEqual({"resolution_evidence": 1}, result["selected_count_by_stored_reason"])
+        self.assertEqual([], fetch_calls)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                "SELECT entity_type, spotify_id, reason, status, attempts FROM spotify_catalog_backfill_queue ORDER BY id"
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_resolution_album_tracklist_worker_processes_limit_and_marks_done(self) -> None:
+        self._seed_resolution_tracklist_worker_case(extra_candidate_album=True)
+        calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            calls.append(url)
+            self.assertIn("/v1/albums/", url)
+            self.assertIn("/tracks", url)
+            self.assertNotIn("/v1/albums?ids=", url)
+            return (
+                200,
+                {},
+                {
+                    "items": [
+                        {
+                            "id": "album-track-1",
+                            "name": "Album Track 1",
+                            "duration_ms": 100000,
+                            "disc_number": 1,
+                            "track_number": 1,
+                            "artists": [{"name": "Artist 1"}],
+                        },
+                        {
+                            "id": "album-track-2",
+                            "name": "Album Track 2",
+                            "duration_ms": 101000,
+                            "disc_number": 1,
+                            "track_number": 2,
+                            "artists": [{"name": "Artist 1"}],
+                        },
+                    ],
+                    "next": None,
+                },
+                None,
+            )
+
+        result = run_spotify_resolution_evidence_album_tracklist_worker(
+            access_token="token",
+            limit=1,
+            max_requests=5,
+            dry_run=False,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual(1, result["done_count"])
+        self.assertEqual(1, result["requests_total"])
+        self.assertEqual([1], result["queue_ids_processed"])
+        self.assertEqual(["worker-album"], result["album_spotify_ids_processed"])
+        self.assertEqual(
+            {"resolution_evidence": 1},
+            result["selected_count_by_stored_reason"],
+        )
+        dry_run_all = run_spotify_resolution_evidence_album_tracklist_worker(
+            access_token="token",
+            limit=10,
+            dry_run=True,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+        self.assertEqual(
+            {"album_lookup_visible_incomplete": 1},
+            dry_run_all["selected_count_by_stored_reason"],
+        )
+        self.assertEqual(
+            ["worker-album-2"],
+            [item["spotify_album_id"] for item in dry_run_all["selected_items"]],
+        )
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            statuses = dict(
+                connection.execute(
+                    "SELECT spotify_id, status FROM spotify_catalog_backfill_queue WHERE entity_type = 'album'"
+                ).fetchall()
+            )
+            track_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM spotify_album_track WHERE spotify_album_id = 'worker-album'"
+                ).fetchone()[0]
+            )
+            sibling_queue_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM spotify_catalog_backfill_queue WHERE entity_type = 'track' AND spotify_id LIKE 'album-track-%'"
+                ).fetchone()[0]
+            )
+        self.assertEqual("done", statuses["worker-album"])
+        self.assertEqual("pending", statuses["worker-album-2"])
+        self.assertEqual("pending", statuses["legacy-album"])
+        self.assertEqual("pending", statuses["generic-album"])
+        self.assertEqual(2, track_count)
+        self.assertEqual(0, sibling_queue_count)
+
+    def test_resolution_album_tracklist_worker_does_not_mark_done_when_no_tracks_stored(self) -> None:
+        self._seed_resolution_tracklist_worker_case()
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            return 200, {}, {"items": [], "next": None}, None
+
+        result = run_spotify_resolution_evidence_album_tracklist_worker(
+            access_token="token",
+            limit=1,
+            max_requests=5,
+            dry_run=False,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+        self.assertEqual("partial", result["status"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual(0, result["done_count"])
+        self.assertEqual(1, result["outcome_counts"]["fetched_but_not_complete"])
+        self.assertEqual(0, result["outcomes"][0]["album_track_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT status, attempts
+                FROM spotify_catalog_backfill_queue
+                WHERE spotify_id = 'worker-album'
+                """
+            ).fetchone()
+            track_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM spotify_album_track WHERE spotify_album_id = 'worker-album'"
+                ).fetchone()[0]
+            )
+        self.assertEqual(("pending", 1), row)
+        self.assertEqual(0, track_count)
+
+    def test_resolution_album_tracklist_worker_fetches_missing_album_metadata_before_tracklist(self) -> None:
+        self._seed_resolution_tracklist_worker_case()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE spotify_album_catalog
+                SET release_date = NULL,
+                    total_tracks = NULL,
+                    images_json = NULL,
+                    raw_json = '{}'
+                WHERE spotify_album_id = 'worker-album'
+                """
+            )
+            connection.commit()
+
+        calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            calls.append(url)
+            self.assertNotIn("/v1/albums?ids=", url)
+            if url.endswith("/v1/albums/worker-album"):
+                return 200, {}, _album_payload("worker-album"), None
+            if url.endswith("/v1/albums/worker-album/tracks"):
+                return (
+                    200,
+                    {},
+                    {
+                        "items": [
+                            {
+                                "id": "album-track-1",
+                                "name": "Album Track 1",
+                                "duration_ms": 100000,
+                                "disc_number": 1,
+                                "track_number": 1,
+                                "artists": [{"name": "Artist 1"}],
+                            },
+                            {
+                                "id": "album-track-2",
+                                "name": "Album Track 2",
+                                "duration_ms": 101000,
+                                "disc_number": 1,
+                                "track_number": 2,
+                                "artists": [{"name": "Artist 1"}],
+                            },
+                        ],
+                        "next": None,
+                    },
+                    None,
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        result = run_spotify_resolution_evidence_album_tracklist_worker(
+            access_token="token",
+            limit=1,
+            max_requests=5,
+            dry_run=False,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(2, result["requests_total"])
+        self.assertEqual(1, result["outcome_counts"]["fetched_album_metadata"])
+        self.assertEqual(1, result["outcome_counts"]["fetched_tracklist"])
+        self.assertEqual(1, result["outcome_counts"]["fetched_and_marked_done"])
+        self.assertEqual(
+            [
+                "https://api.spotify.com/v1/albums/worker-album",
+                "https://api.spotify.com/v1/albums/worker-album/tracks",
+            ],
+            calls,
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT q.status, sac.total_tracks, count(sat.spotify_track_id)
+                FROM spotify_catalog_backfill_queue q
+                JOIN spotify_album_catalog sac ON sac.spotify_album_id = q.spotify_id
+                LEFT JOIN spotify_album_track sat ON sat.spotify_album_id = q.spotify_id
+                WHERE q.spotify_id = 'worker-album'
+                GROUP BY q.status, sac.total_tracks
+                """
+            ).fetchone()
+        self.assertEqual(("done", 2, 2), row)
+
+    def test_resolution_track_metadata_worker_dry_run_selects_only_focused_sibling_rows(self) -> None:
+        self._seed_resolution_track_metadata_worker_case()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            before = connection.execute(
+                "SELECT entity_type, spotify_id, reason, status, attempts FROM spotify_catalog_backfill_queue ORDER BY id"
+            ).fetchall()
+
+        fetch_calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            fetch_calls.append(url)
+            return 200, {}, {}, None
+
+        result = run_spotify_resolution_evidence_track_metadata_worker(
+            access_token="token",
+            limit=10,
+            dry_run=True,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+
+        self.assertEqual("dry_run", result["status"])
+        self.assertEqual("none", result["performed_action"])
+        self.assertEqual(2, result["selected_count"])
+        self.assertEqual({"resolution_evidence": 2}, result["selected_count_by_stored_reason"])
+        self.assertEqual(
+            ["sibling-track-1", "sibling-track-2"],
+            [item["spotify_track_id"] for item in result["selected_items"]],
+        )
+        self.assertEqual([], fetch_calls)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                "SELECT entity_type, spotify_id, reason, status, attempts FROM spotify_catalog_backfill_queue ORDER BY id"
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_resolution_track_metadata_worker_processes_only_focused_tracks_and_marks_done(self) -> None:
+        self._seed_resolution_track_metadata_worker_case()
+        calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            calls.append(url)
+            self.assertIn("/v1/tracks/", url)
+            self.assertNotIn("/v1/albums/", url)
+            return 200, {}, _track_payload("sibling-track-1", "worker-album"), None
+
+        result = run_spotify_resolution_evidence_track_metadata_worker(
+            access_token="token",
+            limit=1,
+            max_requests=5,
+            dry_run=False,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+
+        self.assertEqual("ok", result["status"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual(1, result["done_count"])
+        self.assertEqual(1, result["requests_total"])
+        self.assertEqual(["sibling-track-1"], result["track_spotify_ids_processed"])
+        self.assertEqual(1, result["outcome_counts"]["fetched_track_metadata"])
+        self.assertEqual(1, result["outcome_counts"]["fetched_and_marked_done"])
+        self.assertEqual(["https://api.spotify.com/v1/tracks/sibling-track-1"], calls)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            statuses = dict(
+                connection.execute(
+                    """
+                    SELECT spotify_id, status
+                    FROM spotify_catalog_backfill_queue
+                    WHERE spotify_id IN ('sibling-track-1', 'sibling-track-2', 'identity-track', 'resolution-not-sibling')
+                    """
+                ).fetchall()
+            )
+            track_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM spotify_track_catalog WHERE spotify_track_id = 'sibling-track-1'"
+                ).fetchone()[0]
+            )
+        self.assertEqual("done", statuses["sibling-track-1"])
+        self.assertEqual("pending", statuses["sibling-track-2"])
+        self.assertEqual("pending", statuses["identity-track"])
+        self.assertEqual("pending", statuses["resolution-not-sibling"])
+        self.assertEqual(1, track_count)
+
+    def test_resolution_track_metadata_worker_warns_if_local_album_display_gaps_increase(self) -> None:
+        self._seed_resolution_track_metadata_worker_case()
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            return 200, {}, _track_payload("sibling-track-1", "worker-album"), None
+
+        with patch(
+            "backend.app.spotify_catalog_backfill.inspect_spotify_nested_metadata_integrity",
+            side_effect=[
+                {
+                    "ok": True,
+                    "mode": "read_only",
+                    "counts": {
+                        "tracks_with_album_spotify_id_missing_local_album_name": 0,
+                        "tracks_with_artist_ids_missing_artist_names": 0,
+                        "albums_with_artist_ids_missing_artist_names": 0,
+                        "queue_rows_done_but_local_metadata_incomplete": 0,
+                    },
+                    "samples": {},
+                },
+                {
+                    "ok": True,
+                    "mode": "read_only",
+                    "counts": {
+                        "tracks_with_album_spotify_id_missing_local_album_name": 1,
+                        "tracks_with_artist_ids_missing_artist_names": 0,
+                        "albums_with_artist_ids_missing_artist_names": 0,
+                        "queue_rows_done_but_local_metadata_incomplete": 0,
+                    },
+                    "samples": {},
+                },
+            ],
+        ):
+            result = run_spotify_resolution_evidence_track_metadata_worker(
+                access_token="token",
+                limit=1,
+                max_requests=5,
+                dry_run=False,
+                fetcher=fetcher,
+                sleeper=lambda _: None,
+            )
+
+        self.assertEqual("ok", result["status"])
+        self.assertIn(
+            "Local metadata integrity warning: track processing increased tracks_with_album_spotify_id_missing_local_album_name.",
+            result["warnings"],
+        )
+
+    def test_resolution_track_metadata_worker_does_not_mark_done_when_metadata_incomplete(self) -> None:
+        self._seed_resolution_track_metadata_worker_case()
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            payload = _track_payload("sibling-track-1", "worker-album")
+            payload["external_ids"] = {}
+            return 200, {}, payload, None
+
+        result = run_spotify_resolution_evidence_track_metadata_worker(
+            access_token="token",
+            limit=1,
+            max_requests=5,
+            dry_run=False,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual(0, result["done_count"])
+        self.assertEqual(1, result["outcome_counts"]["fetched_but_not_complete"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT status, attempts
+                FROM spotify_catalog_backfill_queue
+                WHERE spotify_id = 'sibling-track-1'
+                """
+            ).fetchone()
+        self.assertEqual(("pending", 1), row)
+
+    def test_track_metadata_upsert_persists_embedded_album_basic_fields_without_full_metadata(self) -> None:
+        payload = _track_payload("track-with-album", "embedded-album")
+        payload["album"] = {
+            "id": "embedded-album",
+            "name": "Embedded Album",
+            "album_type": "album",
+            "release_date": "2024-02-03",
+            "release_date_precision": "day",
+            "total_tracks": 9,
+            "artists": [{"id": "artist-1", "name": "Artist 1"}],
+            "images": [{"url": "https://image.test/embedded.jpg"}],
+        }
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            _upsert_track_catalog(
+                track=payload,
+                market="US",
+                fetched_at="2026-04-27T12:00:00Z",
+                last_status="ok",
+                last_error=None,
+            )
+        client_mock.assert_not_called()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT name, album_type, release_date, release_date_precision, total_tracks, images_json, raw_json
+                FROM spotify_album_catalog
+                WHERE spotify_album_id = 'embedded-album'
+                """
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("Embedded Album", row[0])
+        self.assertEqual("album", row[1])
+        self.assertEqual("2024-02-03", row[2])
+        self.assertEqual("day", row[3])
+        self.assertEqual(9, row[4])
+        self.assertIn("embedded.jpg", row[5])
+        album_raw = json.loads(row[6])
+        self.assertNotIn("label", album_raw)
+        self.assertNotIn("external_ids", album_raw)
+        integrity = inspect_spotify_nested_metadata_integrity()
+        self.assertEqual(0, integrity["counts"]["tracks_with_album_spotify_id_missing_local_album_name"])
+        self.assertEqual(0, integrity["counts"]["tracks_with_artist_ids_missing_artist_names"])
+        self.assertEqual(0, integrity["counts"]["albums_with_artist_ids_missing_artist_names"])
+
+    def test_track_metadata_upsert_does_not_overwrite_full_album_metadata_with_simplified_album(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, album_type, release_date, release_date_precision,
+                  total_tracks, artists_json, images_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "existing-full-album",
+                    "Full Album",
+                    "album",
+                    "2020-01-01",
+                    "day",
+                    12,
+                    '[{"name":"Full Artist"}]',
+                    '[{"url":"https://image.test/full.jpg"}]',
+                    json.dumps(
+                        {
+                            "id": "existing-full-album",
+                            "name": "Full Album",
+                            "label": "Full Label",
+                            "copyrights": [{"text": "C Full"}],
+                            "external_ids": {"upc": "UPC123"},
+                        }
+                    ),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.commit()
+        payload = _track_payload("track-existing-album", "existing-full-album")
+        payload["album"] = {
+            "id": "existing-full-album",
+            "name": "Simplified Album",
+            "album_type": "album",
+            "release_date": "2024",
+            "release_date_precision": "year",
+            "total_tracks": 5,
+            "artists": [{"name": "Simplified Artist"}],
+            "images": [{"url": "https://image.test/simple.jpg"}],
+        }
+        _upsert_track_catalog(
+            track=payload,
+            market="US",
+            fetched_at="2026-04-27T13:00:00Z",
+            last_status="ok",
+            last_error=None,
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT name, release_date, total_tracks, images_json, raw_json
+                FROM spotify_album_catalog
+                WHERE spotify_album_id = 'existing-full-album'
+                """
+            ).fetchone()
+        self.assertEqual("Full Album", row[0])
+        self.assertEqual("2020-01-01", row[1])
+        self.assertEqual(12, row[2])
+        self.assertIn("full.jpg", row[3])
+        album_raw = json.loads(row[4])
+        self.assertEqual("Full Label", album_raw["label"])
+        self.assertEqual("UPC123", album_raw["external_ids"]["upc"])
+
+    def test_album_metadata_display_gap_diagnostic_is_read_only(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "diagnostic-track",
+                    "Diagnostic Track",
+                    123000,
+                    0,
+                    1,
+                    1,
+                    "diagnostic-album",
+                    '[{"name":"Artist 1"}]',
+                    json.dumps({"album": {"id": "diagnostic-album", "name": "Diagnostic Album", "total_tracks": 3}}),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            before = connection.execute(
+                "SELECT spotify_track_id, album_id, raw_json FROM spotify_track_catalog ORDER BY spotify_track_id"
+            ).fetchall()
+            connection.commit()
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            report = inspect_spotify_album_metadata_display_gaps()
+        client_mock.assert_not_called()
+        self.assertTrue(report["ok"])
+        self.assertEqual("read_only", report["mode"])
+        self.assertEqual(1, report["counts"]["tracks_with_album_spotify_id_missing_local_album_name"])
+        self.assertEqual("diagnostic-track", report["samples"][0]["spotify_track_id"])
+        self.assertTrue(report["samples"][0]["can_populate_basic_album_display_from_track_payload"])
+        self.assertTrue(report["samples"][0]["requires_full_album_fetch_for_label_copyright_external_ids"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                "SELECT spotify_track_id, album_id, raw_json FROM spotify_track_catalog ORDER BY spotify_track_id"
+            ).fetchall()
+        self.assertEqual(before, after)
+
+    def test_track_mapping_lineage_uses_embedded_album_display_fallback(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Shared Track", "shared track"),
+                ).lastrowid
+            )
+            release_album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Release Album", "release album"),
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)",
+                (release_album_id, release_track_id),
+            )
+            source_ids: list[int] = []
+            for spotify_track_id in ("local-track", "embedded-track"):
+                source_ids.append(
+                    int(
+                        connection.execute(
+                            """
+                            INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                "spotify",
+                                spotify_track_id,
+                                f"spotify:track:{spotify_track_id}",
+                                f"Track {spotify_track_id}",
+                                "{}",
+                            ),
+                        ).lastrowid
+                    )
+                )
+            for source_id in source_ids:
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, release_track_id),
+                )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, release_date, total_tracks, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("local-album", "Local Album", "2020-01-01", 10, "{}", "US", "2026-04-27T12:00:00Z", "ok"),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "local-track",
+                    "Local Track",
+                    123000,
+                    0,
+                    1,
+                    1,
+                    "local-album",
+                    "[]",
+                    "{}",
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "embedded-track",
+                    "Embedded Track",
+                    124000,
+                    0,
+                    1,
+                    2,
+                    "embedded-album",
+                    "[]",
+                    json.dumps(
+                        {
+                            "album": {
+                                "id": "embedded-album",
+                                "name": "Embedded Album",
+                                "release_date": "2021-02-03",
+                                "total_tracks": 12,
+                            }
+                        }
+                    ),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            before = connection.execute(
+                "SELECT count(*) FROM spotify_album_catalog WHERE spotify_album_id = 'embedded-album'"
+            ).fetchone()[0]
+            connection.commit()
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            lineage = search_track_mapping_lineage(limit=10)
+            diagnostic = inspect_source_release_album_display_gaps(sample_limit=5)
+        client_mock.assert_not_called()
+
+        sources = lineage["source_release"]["groups"][0]["sources"]
+        by_id = {item["external_id"]: item for item in sources}
+        self.assertEqual("Local Album", by_id["local-track"]["album_name_display"])
+        self.assertEqual("spotify_album_catalog", by_id["local-track"]["album_name_display_source"])
+        self.assertEqual("Embedded Album", by_id["embedded-track"]["album_name_display"])
+        self.assertEqual("embedded_track_album", by_id["embedded-track"]["album_name_display_source"])
+        self.assertEqual("2021-02-03", by_id["embedded-track"]["album_release_date"])
+        self.assertEqual(12, by_id["embedded-track"]["album_total_tracks"])
+        self.assertIsNone(by_id["embedded-track"]["album_name"])
+
+        self.assertEqual("read_only", diagnostic["mode"])
+        self.assertEqual(2, diagnostic["counts"]["total_rows"])
+        self.assertEqual(2, diagnostic["counts"]["rows_with_release_album_display_info"])
+        self.assertEqual(1, diagnostic["counts"]["rows_with_source_album_display_info"])
+        self.assertEqual(1, diagnostic["counts"]["rows_with_embedded_album_info"])
+        self.assertEqual(1, diagnostic["counts"]["rows_with_album_spotify_id_but_no_local_album_name"])
+        self.assertEqual(0, diagnostic["counts"]["rows_with_no_album_spotify_id"])
+        self.assertEqual(2, diagnostic["counts"]["rows_with_source_album_display_after_embedded_fallback"])
+        self.assertEqual("embedded-track", diagnostic["samples"]["embedded_album_available_but_not_local_album_name"][0]["spotify_track_id"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                "SELECT count(*) FROM spotify_album_catalog WHERE spotify_album_id = 'embedded-album'"
+            ).fetchone()[0]
+        self.assertEqual(before, after)
+
+    def test_track_mapping_lineage_reports_sibling_metadata_completeness(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Sibling Metadata Track", "sibling metadata track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("complete-sibling", "incomplete-sibling"):
+                source_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES ('spotify', ?, ?, ?, '{}')
+                        """,
+                        (spotify_track_id, f"spotify:track:{spotify_track_id}", spotify_track_id),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, release_track_id),
+                )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "incomplete-sibling",
+                    "Incomplete Sibling",
+                    None,
+                    0,
+                    None,
+                    None,
+                    None,
+                    "[]",
+                    "{}",
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            complete_release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("All Complete Sibling Track", "all complete sibling track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("complete-sibling-a", "complete-sibling-b"):
+                source_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES ('spotify', ?, ?, ?, '{}')
+                        """,
+                        (spotify_track_id, f"spotify:track:{spotify_track_id}", spotify_track_id),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, complete_release_track_id),
+                )
+            safe_release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Safe Confirm Sibling Track", "safe confirm sibling track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("safe-sibling-a", "safe-sibling-b"):
+                source_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES ('spotify', ?, ?, ?, '{}')
+                        """,
+                        (spotify_track_id, f"spotify:track:{spotify_track_id}", "Safe Confirm Sibling Track"),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, safe_release_track_id),
+                )
+            missing_album_name_release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Missing Album Name Sibling Track", "missing album name sibling track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("missing-album-name-a", "missing-album-name-b"):
+                source_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES ('spotify', ?, ?, ?, '{}')
+                        """,
+                        (spotify_track_id, f"spotify:track:{spotify_track_id}", spotify_track_id),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, missing_album_name_release_track_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO spotify_track_catalog (
+                      spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                      album_id, artists_json, raw_json, market, fetched_at, last_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        spotify_track_id,
+                        f"Missing Album Name {spotify_track_id}",
+                        123000,
+                        0,
+                        1,
+                        1,
+                        f"{spotify_track_id}-album",
+                        json.dumps([{"id": "artist-1", "name": "Artist 1"}]),
+                        json.dumps({"external_ids": {"isrc": f"ISRC{spotify_track_id}"}}),
+                        "US",
+                        "2026-04-27T12:00:00Z",
+                        "ok",
+                    ),
+                )
+            connection.commit()
+
+        for track_id, album_id, track_number in (
+            ("complete-sibling", "complete-album", 2),
+            ("complete-sibling-a", "complete-album-a", 1),
+            ("complete-sibling-b", "complete-album-b", 2),
+            ("safe-sibling-a", "safe-album-a", 7),
+            ("safe-sibling-b", "safe-album-b", 7),
+        ):
+            _upsert_track_catalog(
+                track={
+                    "id": track_id,
+                    "name": "Safe Confirm Sibling Track" if track_id.startswith("safe-") else f"Complete {track_id}",
+                    "duration_ms": 123000,
+                    "explicit": False,
+                    "disc_number": 1,
+                    "track_number": track_number,
+                    "album": {
+                        "id": album_id,
+                        "name": "Shared Safe Album" if track_id.startswith("safe-") else f"Album {album_id}",
+                        "album_type": "album",
+                        "release_date": "2020-01-01",
+                        "release_date_precision": "day",
+                        "total_tracks": 10,
+                        "artists": [{"id": "artist-1", "name": "Artist 1"}],
+                        "images": [],
+                    },
+                    "artists": [{"id": "artist-1", "name": "Artist 1"}],
+                    "external_ids": {"isrc": "ISRCSAFE" if track_id.startswith("safe-") else f"ISRC{track_id}"},
+                },
+                market="US",
+                fetched_at="2026-04-27T12:00:00Z",
+                last_status="ok",
+                last_error=None,
+            )
+
+        lineage = search_track_mapping_lineage(limit=10)
+
+        self.assertEqual(4, lineage["source_release"]["total"])
+        group = next(
+            item for item in lineage["source_release"]["groups"] if item["release_track_id"] == release_track_id
+        )
+        self.assertFalse(group["all_source_metadata_complete"])
+        self.assertEqual(1, group["source_metadata_complete_count"])
+        self.assertEqual(1, group["source_metadata_incomplete_count"])
+        by_id = {item["external_id"]: item for item in group["sources"]}
+        self.assertTrue(by_id["complete-sibling"]["metadata_complete"])
+        self.assertEqual([], by_id["complete-sibling"]["metadata_gaps"])
+        self.assertFalse(by_id["incomplete-sibling"]["metadata_complete"])
+        self.assertIn("duration_ms", by_id["incomplete-sibling"]["metadata_gaps"])
+        self.assertIn("album_id", by_id["incomplete-sibling"]["metadata_gaps"])
+
+        missing_album_name_group = next(
+            item for item in lineage["source_release"]["groups"] if item["release_track_id"] == missing_album_name_release_track_id
+        )
+        self.assertFalse(missing_album_name_group["all_source_metadata_complete"])
+        self.assertEqual(0, missing_album_name_group["source_metadata_complete_count"])
+        self.assertEqual(2, missing_album_name_group["source_metadata_incomplete_count"])
+        for source in missing_album_name_group["sources"]:
+            self.assertFalse(source["metadata_complete"])
+            self.assertTrue(source["album_id"])
+            self.assertIn("album_display_name", source["metadata_gaps"])
+
+        complete_lineage = search_track_mapping_lineage(limit=10, source_metadata="complete")
+        self.assertEqual(2, complete_lineage["source_release"]["total"])
+        complete_by_id = {
+            group["release_track_id"]: group
+            for group in complete_lineage["source_release"]["groups"]
+        }
+        self.assertTrue(complete_by_id[complete_release_track_id]["all_source_metadata_complete"])
+        self.assertEqual("unsafe", complete_by_id[complete_release_track_id]["confirmation_preview"]["readiness"])
+        self.assertIn(
+            "Source rows do not all share the same normalized album name.",
+            complete_by_id[complete_release_track_id]["confirmation_preview"]["reasons"],
+        )
+        self.assertTrue(complete_by_id[safe_release_track_id]["all_source_metadata_complete"])
+        self.assertEqual("safe_candidate", complete_by_id[safe_release_track_id]["confirmation_preview"]["readiness"])
+        self.assertEqual(["shared safe album"], complete_by_id[safe_release_track_id]["confirmation_preview"]["evidence"]["normalized_album_names"])
+        self.assertEqual(["1.7"], complete_by_id[safe_release_track_id]["confirmation_preview"]["evidence"]["positions"])
+
+        certain_lineage = search_track_mapping_lineage(
+            limit=10,
+            source_metadata="complete",
+            confirmation_certainty="certain",
+        )
+        self.assertEqual(1, certain_lineage["source_release"]["total"])
+        self.assertEqual(safe_release_track_id, certain_lineage["source_release"]["groups"][0]["release_track_id"])
+        self.assertEqual("certain", certain_lineage["source_release"]["confirmation_certainty_filter"])
+
+        uncertain_lineage = search_track_mapping_lineage(
+            limit=10,
+            source_metadata="complete",
+            confirmation_certainty="uncertain",
+        )
+        self.assertEqual(1, uncertain_lineage["source_release"]["total"])
+        self.assertEqual(complete_release_track_id, uncertain_lineage["source_release"]["groups"][0]["release_track_id"])
+        self.assertEqual("uncertain", uncertain_lineage["source_release"]["confirmation_certainty_filter"])
+
+        incomplete_lineage = search_track_mapping_lineage(limit=10, source_metadata="incomplete")
+        self.assertEqual(2, incomplete_lineage["source_release"]["total"])
+        incomplete_release_track_ids = {
+            group["release_track_id"] for group in incomplete_lineage["source_release"]["groups"]
+        }
+        self.assertEqual({release_track_id, missing_album_name_release_track_id}, incomplete_release_track_ids)
+        self.assertTrue(
+            all(not group["all_source_metadata_complete"] for group in incomplete_lineage["source_release"]["groups"])
+        )
+
+    def test_source_release_album_display_enrichment_plan_selects_only_missing_album_evidence(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Shared Plan Track", "shared plan track"),
+                ).lastrowid
+            )
+            for source_name, spotify_track_id in (
+                ("spotify", "needs-metadata"),
+                ("spotify", "embedded-covered"),
+                ("spotify", "catalog-covered"),
+                ("spotify", "source-album-covered"),
+                ("local", "local-invalid"),
+            ):
+                source_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (source_name, spotify_track_id, f"{source_name}:track:{spotify_track_id}", spotify_track_id, "{}"),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, release_track_id),
+                )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, album_id, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("needs-metadata", "Needs Metadata", 123000, None, "{}", "US", "2026-04-27T12:00:00Z", "ok"),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, album_id, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "embedded-covered",
+                    "Embedded Covered",
+                    123000,
+                    None,
+                    json.dumps({"album": {"id": "embedded-album", "name": "Embedded Album"}}),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("catalog-album", "Catalog Album", "{}", "US", "2026-04-27T12:00:00Z", "ok"),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, album_id, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("catalog-covered", "Catalog Covered", 123000, "catalog-album", "{}", "US", "2026-04-27T12:00:00Z", "ok"),
+            )
+            connection.execute(
+                """
+                INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("spotify", "source-only-album", "spotify:album:source-only-album", "Source Album", "{}"),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, album_id, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("source-album-covered", "Source Album Covered", 123000, "source-only-album", "{}", "US", "2026-04-27T12:00:00Z", "ok"),
+            )
+            connection.commit()
+
+        report = plan_source_release_album_display_enrichment(sample_limit=10)
+
+        self.assertEqual("read_only", report["mode"])
+        self.assertEqual(5, report["total_source_release_rows"])
+        self.assertEqual(2, report["rows_with_no_spotify_album_evidence"])
+        self.assertEqual(1, report["distinct_track_spotify_ids_needing_metadata"])
+        self.assertEqual(1, report["eligible_to_fetch"])
+        self.assertEqual(1, report["blocked_or_invalid"])
+        self.assertEqual(["needs-metadata"], report["sample_track_spotify_ids"])
+
+    def test_source_release_album_display_enrichment_worker_uses_bounded_limits(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Shared Worker Track", "shared worker track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("worker-gap-1", "worker-gap-2", "worker-gap-3"):
+                source_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        ("spotify", spotify_track_id, f"spotify:track:{spotify_track_id}", spotify_track_id, "{}"),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, release_track_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO spotify_track_catalog (
+                      spotify_track_id, name, duration_ms, raw_json, market, fetched_at, last_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (spotify_track_id, spotify_track_id, 123000, "{}", "US", "2026-04-27T12:00:00Z", "ok"),
+                )
+            connection.commit()
+
+        calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            track_id = url.rsplit("/", 1)[-1]
+            calls.append(track_id)
+            payload = _track_payload(track_id, f"album-{track_id}")
+            payload["album"]["name"] = f"Album {track_id}"
+            return 200, {}, payload, None
+
+        result = run_source_release_album_display_enrichment_worker(
+            access_token="token",
+            limit=2,
+            max_requests=1,
+            request_delay_seconds=0,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual(2, result["selected_count"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual(1, result["fetched_track_metadata"])
+        self.assertEqual(1, result["fetched_and_album_evidence_added"])
+        self.assertEqual(0, result["fetched_but_still_missing_album_evidence"])
+        self.assertEqual(1, result["requests_total"])
+        self.assertEqual(0, result["requests_429"])
+        self.assertEqual(["worker-gap-1"], calls)
+        after_plan = plan_source_release_album_display_enrichment(sample_limit=10)
+        self.assertEqual(2, after_plan["distinct_track_spotify_ids_needing_metadata"])
+        self.assertNotIn("worker-gap-1", after_plan["sample_track_spotify_ids"])
+
+    def test_source_release_album_display_enrichment_loop_summarizes_batches_and_writes_jsonl(self) -> None:
+        calls: list[int] = []
+        clock = {"value": 0.0}
+        jsonl_path = Path(self._tmp_dir.name) / "source-release-loop.jsonl"
+
+        def runner(**_: Any) -> dict[str, Any]:
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                return {
+                    "ok": True,
+                    "status": "ok",
+                    "selected_count": 2,
+                    "processed_count": 2,
+                    "fetched_track_metadata": 2,
+                    "fetched_and_album_evidence_added": 1,
+                    "requests_total": 2,
+                    "requests_429": 0,
+                    "error_count": 0,
+                    "selected_track_spotify_ids": ["verbose-1", "verbose-2"],
+                    "cooldown_until": None,
+                }
+            return {
+                "ok": True,
+                "status": "ok",
+                "selected_count": 0,
+                "processed_count": 0,
+                "fetched_track_metadata": 0,
+                "fetched_and_album_evidence_added": 0,
+                "requests_total": 0,
+                "requests_429": 0,
+                "error_count": 0,
+                "selected_track_spotify_ids": [],
+                "cooldown_until": None,
+            }
+
+        def sleeper(seconds: float) -> None:
+            clock["value"] += seconds
+
+        result = run_source_release_album_display_enrichment_loop(
+            access_token="token",
+            limit=5,
+            max_requests=5,
+            request_delay_seconds=0,
+            market="US",
+            max_runtime_minutes=1,
+            between_runs_seconds=5,
+            jsonl_output=str(jsonl_path),
+            summary_only=True,
+            runner=runner,
+            sleeper=sleeper,
+            monotonic=lambda: clock["value"],
+        )
+
+        self.assertEqual("loop", result["mode"])
+        self.assertEqual(2, result["total_batches"])
+        self.assertEqual(2, result["total_processed_count"])
+        self.assertEqual(2, result["total_fetched_track_metadata"])
+        self.assertEqual(1, result["total_fetched_and_album_evidence_added"])
+        self.assertEqual(2, result["total_requests"])
+        self.assertEqual(0, result["total_429"])
+        self.assertEqual(0, result["total_errors"])
+        self.assertEqual("no_selected_candidates", result["stop_reason"])
+        self.assertNotIn("batches", result)
+        self.assertEqual(str(jsonl_path), result["jsonl_output"])
+        rows = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(2, len(rows))
+        self.assertEqual("batch_result", rows[0]["event"])
+        self.assertEqual(["verbose-1", "verbose-2"], rows[0]["selected_track_spotify_ids"])
+
+    def test_source_release_album_display_enrichment_loop_stops_on_429(self) -> None:
+        result = run_source_release_album_display_enrichment_loop(
+            access_token="token",
+            limit=5,
+            max_requests=5,
+            request_delay_seconds=0,
+            market="US",
+            max_runtime_minutes=1,
+            between_runs_seconds=5,
+            summary_only=True,
+            runner=lambda **_: {
+                "ok": True,
+                "status": "partial",
+                "selected_count": 1,
+                "processed_count": 1,
+                "fetched_track_metadata": 0,
+                "fetched_and_album_evidence_added": 0,
+                "requests_total": 1,
+                "requests_429": 1,
+                "error_count": 0,
+                "cooldown_until": "2026-05-09T12:00:00Z",
+            },
+            sleeper=lambda _: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(1, result["total_batches"])
+        self.assertEqual(1, result["total_429"])
+        self.assertEqual("cooldown", result["stop_reason"])
+
+    def test_resolution_track_metadata_worker_ignores_source_release_album_display_gaps(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Shared Gap Track", "shared gap track"),
+                ).lastrowid
+            )
+            for spotify_track_id in ("gap-only-1", "gap-only-2"):
+                source_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        ("spotify", spotify_track_id, f"spotify:track:{spotify_track_id}", spotify_track_id, "{}"),
+                    ).lastrowid
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation
+                    ) VALUES (?, ?, 'seed', 1.0, 'accepted', 0, 'seed')
+                    """,
+                    (source_id, release_track_id),
+                )
+            connection.commit()
+
+        plan = plan_source_release_album_display_enrichment(sample_limit=10)
+        result = run_spotify_resolution_evidence_track_metadata_worker(access_token="", dry_run=True)
+
+        self.assertEqual(2, plan["distinct_track_spotify_ids_needing_metadata"])
+        self.assertEqual(0, result["selected_count"])
+        self.assertEqual([], result["selected_items"])
+
+    def test_nested_metadata_integrity_reports_incomplete_done_queue_rows(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "done-incomplete-track",
+                    "Done Incomplete",
+                    123000,
+                    0,
+                    1,
+                    1,
+                    "done-incomplete-album",
+                    '[{"id":"artist-1","name":"Artist 1"}]',
+                    json.dumps({"external_ids": {"isrc": "ISRC1"}, "album": {"id": "done-incomplete-album", "name": "Missing Album"}}),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("track", "done-incomplete-track", "resolution_evidence", 80, "done", "2026-04-27T12:01:00Z", 0),
+            )
+            connection.commit()
+
+        report = inspect_spotify_nested_metadata_integrity()
+        self.assertEqual(1, report["counts"]["tracks_with_album_spotify_id_missing_local_album_name"])
+        self.assertEqual(1, report["counts"]["queue_rows_done_but_local_metadata_incomplete"])
+        self.assertEqual(
+            ["album_display_name"],
+            report["samples"]["queue_rows_done_but_local_metadata_incomplete"][0]["gaps"],
+        )
+
+    def test_repair_album_metadata_display_gaps_populates_from_stored_track_payloads(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "repair-track",
+                    "Repair Track",
+                    123000,
+                    0,
+                    1,
+                    1,
+                    "repair-album",
+                    '[{"name":"Artist 1"}]',
+                    json.dumps(
+                        {
+                            "album": {
+                                "id": "repair-album",
+                                "name": "Repair Album",
+                                "album_type": "album",
+                                "release_date": "2022-02-02",
+                                "release_date_precision": "day",
+                                "total_tracks": 8,
+                                "artists": [{"name": "Artist 1"}],
+                                "images": [{"url": "https://image.test/repair.jpg"}],
+                            }
+                        }
+                    ),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, album_type, release_date, release_date_precision,
+                  total_tracks, artists_json, images_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "full-album",
+                    "Full Album",
+                    "album",
+                    "2020-01-01",
+                    "day",
+                    12,
+                    '[{"name":"Full Artist"}]',
+                    '[{"url":"https://image.test/full.jpg"}]',
+                    json.dumps(
+                        {
+                            "id": "full-album",
+                            "name": "Full Album",
+                            "label": "Full Label",
+                            "copyrights": [{"text": "C Full"}],
+                            "external_ids": {"upc": "UPC123"},
+                        }
+                    ),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, disc_number, track_number,
+                  album_id, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "full-track",
+                    "Full Track",
+                    124000,
+                    0,
+                    1,
+                    1,
+                    "full-album",
+                    '[{"name":"Artist 1"}]',
+                    json.dumps(
+                        {
+                            "album": {
+                                "id": "full-album",
+                                "name": "Simplified Full Album",
+                                "release_date": "2024",
+                                "total_tracks": 3,
+                                "images": [{"url": "https://image.test/simple.jpg"}],
+                            }
+                        }
+                    ),
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            before = connection.execute(
+                "SELECT spotify_album_id, name, raw_json FROM spotify_album_catalog ORDER BY spotify_album_id"
+            ).fetchall()
+            connection.commit()
+
+        before_diagnostic = inspect_spotify_album_metadata_display_gaps()
+        self.assertEqual(1, before_diagnostic["counts"]["tracks_with_album_spotify_id_missing_local_album_name"])
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            dry_run = repair_spotify_album_basic_metadata_from_track_payloads(apply=False)
+        client_mock.assert_not_called()
+        self.assertEqual("dry_run", dry_run["mode"])
+        self.assertEqual("none", dry_run["performed_action"])
+        self.assertEqual(1, dry_run["candidate_count"])
+        self.assertEqual(1, dry_run["would_update_count"])
+        self.assertEqual(0, dry_run["updated_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after_dry_run = connection.execute(
+                "SELECT spotify_album_id, name, raw_json FROM spotify_album_catalog ORDER BY spotify_album_id"
+            ).fetchall()
+        self.assertEqual(before, after_dry_run)
+
+        with patch("backend.app.spotify_catalog_backfill.httpx.Client") as client_mock:
+            applied = repair_spotify_album_basic_metadata_from_track_payloads(apply=True)
+        client_mock.assert_not_called()
+        self.assertEqual("apply", applied["mode"])
+        self.assertEqual("populated_basic_album_metadata", applied["performed_action"])
+        self.assertEqual(1, applied["updated_count"])
+        after_diagnostic = inspect_spotify_album_metadata_display_gaps()
+        self.assertEqual(0, after_diagnostic["counts"]["tracks_with_album_spotify_id_missing_local_album_name"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            repaired = connection.execute(
+                """
+                SELECT name, release_date, total_tracks, images_json
+                FROM spotify_album_catalog
+                WHERE spotify_album_id = 'repair-album'
+                """
+            ).fetchone()
+            full = connection.execute(
+                "SELECT name, release_date, total_tracks, images_json, raw_json FROM spotify_album_catalog WHERE spotify_album_id = 'full-album'"
+            ).fetchone()
+        self.assertEqual(("Repair Album", "2022-02-02", 8), repaired[:3])
+        self.assertIn("repair.jpg", repaired[3])
+        self.assertEqual("Full Album", full[0])
+        self.assertEqual("2020-01-01", full[1])
+        self.assertEqual(12, full[2])
+        self.assertIn("full.jpg", full[3])
+        full_raw = json.loads(full[4])
+        self.assertEqual("Full Label", full_raw["label"])
+        self.assertEqual("UPC123", full_raw["external_ids"]["upc"])
+
+    def test_repair_incomplete_done_resolution_tracklists_is_narrow_and_apply_gated(self) -> None:
+        self._seed_resolution_tracklist_worker_case(extra_candidate_album=True)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE spotify_catalog_backfill_queue SET status = 'done', reason = 'identity_metadata' WHERE spotify_id = 'worker-album'"
+            )
+            connection.execute(
+                "UPDATE spotify_catalog_backfill_queue SET status = 'done' WHERE spotify_id = 'worker-album-2'"
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("album", "nonfocused-identity", "identity_metadata", 80, "done", "2026-04-27T12:05:00Z", 0),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_track (
+                  spotify_album_id, spotify_track_id, disc_number, track_number, name,
+                  duration_ms, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "worker-album-2",
+                    "complete-track-1",
+                    1,
+                    1,
+                    "Complete Track 1",
+                    100000,
+                    '[{"name":"Artist 1"}]',
+                    "{}",
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_track (
+                  spotify_album_id, spotify_track_id, disc_number, track_number, name,
+                  duration_ms, artists_json, raw_json, market, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "worker-album-2",
+                    "complete-track-2",
+                    1,
+                    2,
+                    "Complete Track 2",
+                    101000,
+                    '[{"name":"Artist 1"}]',
+                    "{}",
+                    "US",
+                    "2026-04-27T12:00:00Z",
+                    "ok",
+                ),
+            )
+            before = connection.execute(
+                "SELECT spotify_id, status FROM spotify_catalog_backfill_queue ORDER BY spotify_id"
+            ).fetchall()
+            connection.commit()
+
+        report = inspect_spotify_catalog_queue_resolution_evidence()
+        plan = report["dry_run_resolution_evidence_plan"]
+        worker_album_plan_items = [
+            item for item in plan["candidate_album_tracklist_items"]
+            if item["spotify_id"] == "worker-album"
+        ]
+        self.assertEqual(1, len(worker_album_plan_items))
+        self.assertEqual("done_but_tracklist_incomplete", worker_album_plan_items[0]["plan_status"])
+        self.assertEqual(0, plan["counts_by_plan_status"]["already_queued_done"])
+        self.assertEqual(2, plan["counts_by_plan_status"]["done_but_tracklist_incomplete"])
+        self.assertIn(
+            {
+                "planned_target": "album_tracklist",
+                "entity_type": "album",
+                "spotify_id": "worker-album",
+                "parent_album_id": None,
+                "plan_status": "done_but_tracklist_incomplete",
+                "suggested_reason": "resolution_evidence",
+                "rationale": "candidate album tracklist must be fetched before sibling tracks can be enumerated",
+            },
+            plan["blocked_sibling_collection_prerequisites"],
+        )
+
+        dry_run = repair_incomplete_done_resolution_tracklist_queue_rows(apply=False)
+        self.assertEqual("dry_run", dry_run["mode"])
+        self.assertEqual("none", dry_run["performed_action"])
+        self.assertEqual(1, dry_run["selected_count"])
+        self.assertEqual(1, dry_run["would_reset_count"])
+        self.assertEqual("worker-album", dry_run["selected_items"][0]["spotify_album_id"])
+        self.assertEqual("identity_metadata", dry_run["selected_items"][0]["stored_reason"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after_dry_run = connection.execute(
+                "SELECT spotify_id, status FROM spotify_catalog_backfill_queue ORDER BY spotify_id"
+            ).fetchall()
+        self.assertEqual(before, after_dry_run)
+
+        applied = repair_incomplete_done_resolution_tracklist_queue_rows(apply=True)
+        self.assertEqual("apply", applied["mode"])
+        self.assertEqual(1, applied["reset_count"])
+        self.assertEqual(1, applied["would_reset_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            statuses = dict(
+                connection.execute(
+                    """
+                    SELECT spotify_id, status
+                    FROM spotify_catalog_backfill_queue
+                    WHERE spotify_id IN ('worker-album', 'worker-album-2', 'nonfocused-identity')
+                    """
+                ).fetchall()
+            )
+        self.assertEqual("pending", statuses["worker-album"])
+        self.assertEqual("done", statuses["worker-album-2"])
+        self.assertEqual("done", statuses["nonfocused-identity"])
+
+    def test_resolution_album_tracklist_worker_stops_on_429_and_leaves_pending(self) -> None:
+        self._seed_resolution_tracklist_worker_case(extra_candidate_album=True)
+        calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            calls.append(url)
+            return 429, {"Retry-After": "2"}, {"error": {"status": 429}}, None
+
+        result = run_spotify_resolution_evidence_album_tracklist_worker(
+            access_token="token",
+            limit=2,
+            max_requests=5,
+            dry_run=False,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+        self.assertEqual("partial", result["status"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual(
+            {"album_lookup_visible_incomplete": 1, "resolution_evidence": 1},
+            result["selected_count_by_stored_reason"],
+        )
+        self.assertEqual(1, result["rate_limited_count"])
+        self.assertEqual(1, result["requests_total"])
+        self.assertIsNotNone(result["cooldown_until"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT spotify_id, reason, status, attempts
+                FROM spotify_catalog_backfill_queue
+                WHERE entity_type = 'album' AND spotify_id LIKE 'worker-album%'
+                ORDER BY spotify_id
+                """
+            ).fetchall()
+        self.assertEqual(
+            [
+                ("worker-album", "resolution_evidence", "pending", 1),
+                ("worker-album-2", "album_lookup_visible_incomplete", "pending", 0),
+            ],
+            rows,
+        )
+        self.assertEqual(1, len(calls))
+
+    def test_resolution_track_metadata_worker_stops_on_429_and_leaves_pending(self) -> None:
+        self._seed_resolution_track_metadata_worker_case()
+        calls: list[str] = []
+
+        def fetcher(url: str, params: dict[str, Any], token: str) -> tuple[int, dict[str, str], dict[str, Any], str | None]:
+            calls.append(url)
+            return 429, {"Retry-After": "2"}, {"error": {"status": 429}}, None
+
+        result = run_spotify_resolution_evidence_track_metadata_worker(
+            access_token="token",
+            limit=2,
+            max_requests=5,
+            dry_run=False,
+            fetcher=fetcher,
+            sleeper=lambda _: None,
+        )
+
+        self.assertEqual("partial", result["status"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual({"resolution_evidence": 2}, result["selected_count_by_stored_reason"])
+        self.assertEqual(1, result["rate_limited_count"])
+        self.assertEqual(1, result["requests_total"])
+        self.assertIsNotNone(result["cooldown_until"])
+        self.assertEqual(["sibling-track-1"], result["track_spotify_ids_processed"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT spotify_id, reason, status, attempts
+                FROM spotify_catalog_backfill_queue
+                WHERE spotify_id IN ('sibling-track-1', 'sibling-track-2', 'identity-track')
+                ORDER BY spotify_id
+                """
+            ).fetchall()
+        self.assertEqual(
+            [
+                ("identity-track", "identity_metadata", "pending", 0),
+                ("sibling-track-1", "resolution_evidence", "pending", 1),
+                ("sibling-track-2", "resolution_evidence", "pending", 0),
+            ],
+            rows,
+        )
+        self.assertEqual(1, len(calls))
 
     def test_queue_list_does_not_mutate_analysis_track_map(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:

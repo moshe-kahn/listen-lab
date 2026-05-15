@@ -7,6 +7,7 @@ import logging
 import secrets
 import sqlite3
 import time
+import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -22,14 +23,19 @@ from starlette.middleware.sessions import SessionMiddleware
 from backend.app.config import get_settings
 from backend.app.db import (
     apply_pending_migrations,
+    complete_ingest_run,
     ensure_sqlite_db,
+    insert_ingest_run,
+    insert_listenlab_player_play,
     list_spotify_auth_users,
     recover_stale_ingest_runs,
+    update_listenlab_player_play_progress,
 )
 from backend.app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
 from backend.app.listening_log import query_listening_log
 from backend.app.logging_config import configure_logging
 from backend.app.merged_track_aggregate import get_merged_track_aggregate
+from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
 from backend.app.recent_debug_compare import build_recent_comparison_summary
 from backend.app.recent_top_tracks_db import build_recent_top_tracks_section_from_db
 from backend.app.recent_tracks_db import (
@@ -59,6 +65,7 @@ from backend.app.spotify_catalog_backfill import (
     search_track_catalog_duplicate_spotify_identities,
     search_track_catalog_lookup,
     search_track_mapping_lineage,
+    inspect_source_release_album_display_gaps,
 )
 from backend.app.spotify_token_store import (
     SpotifyTokenStoreError,
@@ -3599,6 +3606,82 @@ async def auth_current_playback(request: Request) -> dict[str, Any]:
     return await get_current_playback_for_user(user_id)
 
 
+@app.post("/auth/player-listen-event")
+async def auth_player_listen_event(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    event_id = str(payload.get("event_id") or uuid.uuid4())
+    track_uri = str(payload.get("track_uri") or "") or None
+    track_id = str(payload.get("track_id") or "") or None
+    if track_id is None and track_uri and track_uri.startswith("spotify:track:"):
+        track_id = track_uri.split(":")[-1] or None
+    if not track_id and not track_uri:
+        raise HTTPException(status_code=400, detail="A Spotify track id or URI is required.")
+
+    duration_ms_raw = payload.get("duration_ms")
+    duration_ms = int(duration_ms_raw) if isinstance(duration_ms_raw, (int, float)) and duration_ms_raw >= 0 else None
+    progress_ms_raw = payload.get("progress_ms")
+    progress_ms = int(progress_ms_raw) if isinstance(progress_ms_raw, (int, float)) and progress_ms_raw >= 0 else 0
+    if duration_ms is not None:
+        progress_ms = min(progress_ms, duration_ms)
+    confidence = str(payload.get("ms_played_confidence") or ("complete" if duration_ms and progress_ms >= duration_ms * 0.98 else "in_progress"))
+
+    if payload.get("row_id") is not None:
+        updated = update_listenlab_player_play_progress(
+            row_id=int(payload["row_id"]),
+            user_id=str(user_id),
+            ms_played=progress_ms,
+            ms_played_confidence=confidence,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="ListenLab player event was not found.")
+        return {"ok": True, "row_id": int(payload["row_id"]), "action": "updated"}
+
+    run_id = f"listenlab-player-{uuid.uuid4()}"
+    insert_ingest_run(
+        run_id=run_id,
+        source_type="listenlab_player",
+        source_ref="web_player",
+        started_at=now,
+    )
+    source_row_key = f"listenlab_player:{user_id}:{event_id}"
+    auth_row = get_spotify_tokens(str(user_id))
+    result = insert_listenlab_player_play(
+        ingest_run_id=run_id,
+        source_row_key=source_row_key,
+        source_event_id=event_id,
+        user_id=str(user_id),
+        spotify_user_id=str(auth_row.get("spotify_user_id")) if auth_row else None,
+        played_at=str(payload.get("played_at") or now),
+        raw_payload_json=json.dumps(payload, separators=(",", ":")),
+        spotify_track_id=track_id,
+        spotify_track_uri=track_uri,
+        spotify_album_id=str(payload.get("album_id") or "") or None,
+        spotify_artist_ids_json=json.dumps(payload.get("artist_ids") or []),
+        track_name_raw=str(payload.get("track_name") or "") or None,
+        artist_name_raw=str(payload.get("artist_name") or "") or None,
+        album_name_raw=str(payload.get("album_name") or "") or None,
+        track_duration_ms=duration_ms,
+        ms_played=progress_ms,
+        ms_played_confidence=confidence,
+    )
+    complete_ingest_run(
+        run_id=run_id,
+        completed_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        row_count=1,
+        inserted_count=1 if result.get("action") == "inserted" else 0,
+        duplicate_count=0 if result.get("action") == "inserted" else 1,
+    )
+    projection = reconcile_fact_play_events_for_ingest_run(source_type="listenlab_player", run_id=run_id)
+    return {
+        "ok": True,
+        "row_id": int(result["row_id"]),
+        "event_id": event_id,
+        "action": result.get("action"),
+        "projection": projection,
+    }
+
+
 @app.post("/auth/recent-ingest/poll-now")
 async def auth_recent_ingest_poll_now(request: Request) -> dict[str, Any]:
     user_id = _require_user_id(request)
@@ -4569,6 +4652,7 @@ def debug_search_track_duplicates(
     _require_local_data_session(request)
     return search_track_catalog_duplicate_spotify_identities(limit=limit, offset=offset)
 
+
 @app.get("/debug/search/tracks/lineage")
 def debug_search_track_lineage(
     request: Request,
@@ -4588,6 +4672,15 @@ def debug_search_track_lineage(
         limit=limit,
         offset=offset,
     )
+
+
+@app.get("/debug/search/tracks/lineage/album-display-diagnostic")
+def debug_search_track_lineage_album_display_diagnostic(
+    request: Request,
+    sample_limit: int = 10,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return inspect_source_release_album_display_gaps(sample_limit=sample_limit)
 
 
 @app.get("/debug/tracks/identity-audit/readiness")
