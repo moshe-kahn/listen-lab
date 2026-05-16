@@ -5,7 +5,6 @@ import logging
 import secrets
 import sqlite3
 import time
-import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -52,16 +51,11 @@ from backend.app.cache.static_metadata_cache import (
 from backend.app.config import get_settings
 from backend.app.db import (
     apply_pending_migrations,
-    complete_ingest_run,
     ensure_sqlite_db,
-    insert_ingest_run,
-    insert_listenlab_player_play,
     recover_stale_ingest_runs,
-    update_listenlab_player_play_progress,
 )
 from backend.app.history_analysis import get_history_signature, load_history_insights
 from backend.app.logging_config import configure_logging
-from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
 from backend.app.progress_tracker import (
     LOAD_PROGRESS,
     _clear_load_progress,
@@ -77,6 +71,7 @@ from backend.app.recent_tracks_db import (
 )
 from backend.app.routes.admin_routes import router as admin_router
 from backend.app.routes.audit_routes import router as identity_audit_router
+from backend.app.routes.playback_routes import router as playback_router
 from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get, _spotify_get_many
 from backend.app.spotify_lookup_helpers import (
     _album_enrichment_lookup,
@@ -101,7 +96,6 @@ from backend.app.spotify_rate_limit import (
     _spotify_cooldown_seconds_remaining,
     _spotify_rate_limit_detail,
 )
-from backend.app.spotify_current_playback import get_current_playback_for_user
 from backend.app.spotify_recent_polling import poll_recent_for_user
 from backend.app.spotify_recent_sync import sync_spotify_recent_plays
 from backend.app.spotify_catalog_backfill import (
@@ -1525,115 +1519,6 @@ async def _fetch_album_track_ids(
     return track_ids
 
 
-async def _fetch_album_track_refs(
-    access_token: str,
-    album_id: str,
-    max_tracks: int = 50,
-    market: str | None = None,
-) -> list[dict[str, Any]]:
-    offset = 0
-    limit = 50
-    tracks: list[dict[str, Any]] = []
-
-    while offset < max_tracks:
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if market:
-            params["market"] = market
-        payload = await _spotify_get(
-            access_token,
-            f"https://api.spotify.com/v1/albums/{album_id}/tracks",
-            params,
-        )
-        items = payload.get("items") or []
-        if not items:
-            break
-
-        tracks.extend(items)
-        offset += len(items)
-        if len(items) < limit:
-            break
-
-    return tracks[:max_tracks]
-
-
-async def _fetch_tracks_by_ids(
-    access_token: str,
-    track_ids: list[str],
-    market: str | None = None,
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for start in range(0, len(track_ids), 50):
-        batch = [track_id for track_id in track_ids[start:start + 50] if track_id]
-        if not batch:
-            continue
-        params: dict[str, Any] = {"ids": ",".join(batch)}
-        if market:
-            params["market"] = market
-        payload = await _spotify_get(
-            access_token,
-            "https://api.spotify.com/v1/tracks",
-            params,
-        )
-        results.extend([track for track in (payload.get("tracks") or []) if track])
-    return results
-
-
-def _choose_representative_track(
-    tracks: list[dict[str, Any]],
-    album_track_numbers: dict[str, int] | None = None,
-) -> dict[str, Any] | None:
-    if not tracks:
-        return None
-
-    def sort_key(track: dict[str, Any]) -> tuple[int, int, int, str]:
-        track_id = track.get("id") or ""
-        preview_bonus = 1 if track.get("preview_url") else 0
-        popularity = int(track.get("popularity") or 0)
-        track_number = 9999
-        if album_track_numbers:
-            track_number = int(album_track_numbers.get(track_id, track.get("track_number") or 9999))
-        else:
-            track_number = int(track.get("track_number") or 9999)
-        return (preview_bonus, popularity, -track_number, track.get("name") or "")
-
-    return sorted(tracks, key=sort_key, reverse=True)[0]
-
-
-async def _fetch_artist_representative_track(
-    access_token: str,
-    artist_id: str,
-    market: str | None = None,
-) -> dict[str, Any] | None:
-    params = {"market": market} if market else None
-    payload = await _spotify_get(
-        access_token,
-        f"https://api.spotify.com/v1/artists/{artist_id}/top-tracks",
-        params,
-    )
-    track = _choose_representative_track(payload.get("tracks") or [])
-    return _normalize_track(track) if track else None
-
-
-async def _fetch_album_representative_track(
-    access_token: str,
-    album_id: str,
-    market: str | None = None,
-) -> dict[str, Any] | None:
-    album_tracks = await _fetch_album_track_refs(access_token, album_id, market=market)
-    ordered_ids = [item.get("id") for item in album_tracks if item.get("id")]
-    if not ordered_ids:
-        return None
-
-    track_number_lookup = {
-        item["id"]: int(item.get("track_number") or 9999)
-        for item in album_tracks
-        if item.get("id")
-    }
-    full_tracks = await _fetch_tracks_by_ids(access_token, ordered_ids, market=market)
-    track = _choose_representative_track(full_tracks, album_track_numbers=track_number_lookup)
-    return _normalize_track(track) if track else None
-
-
 def _track_weight_map(tracks: list[dict[str, Any]]) -> dict[str, float]:
     total = len(tracks)
     if total == 0:
@@ -2284,6 +2169,7 @@ def _build_local_profile_payload(
 
 
 app.include_router(admin_router)
+app.include_router(playback_router)
 
 
 @app.get("/auth/login")
@@ -2646,88 +2532,6 @@ async def auth_session(request: Request) -> dict[str, Any]:
     }
 
 
-@app.get("/auth/current-playback")
-async def auth_current_playback(request: Request) -> dict[str, Any]:
-    user_id = _require_user_id(request)
-    return await get_current_playback_for_user(user_id)
-
-
-@app.post("/auth/player-listen-event")
-async def auth_player_listen_event(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-    user_id = _require_user_id(request)
-    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    event_id = str(payload.get("event_id") or uuid.uuid4())
-    track_uri = str(payload.get("track_uri") or "") or None
-    track_id = str(payload.get("track_id") or "") or None
-    if track_id is None and track_uri and track_uri.startswith("spotify:track:"):
-        track_id = track_uri.split(":")[-1] or None
-    if not track_id and not track_uri:
-        raise HTTPException(status_code=400, detail="A Spotify track id or URI is required.")
-
-    duration_ms_raw = payload.get("duration_ms")
-    duration_ms = int(duration_ms_raw) if isinstance(duration_ms_raw, (int, float)) and duration_ms_raw >= 0 else None
-    progress_ms_raw = payload.get("progress_ms")
-    progress_ms = int(progress_ms_raw) if isinstance(progress_ms_raw, (int, float)) and progress_ms_raw >= 0 else 0
-    if duration_ms is not None:
-        progress_ms = min(progress_ms, duration_ms)
-    confidence = str(payload.get("ms_played_confidence") or ("complete" if duration_ms and progress_ms >= duration_ms * 0.98 else "in_progress"))
-
-    if payload.get("row_id") is not None:
-        updated = update_listenlab_player_play_progress(
-            row_id=int(payload["row_id"]),
-            user_id=str(user_id),
-            ms_played=progress_ms,
-            ms_played_confidence=confidence,
-        )
-        if not updated:
-            raise HTTPException(status_code=404, detail="ListenLab player event was not found.")
-        return {"ok": True, "row_id": int(payload["row_id"]), "action": "updated"}
-
-    run_id = f"listenlab-player-{uuid.uuid4()}"
-    insert_ingest_run(
-        run_id=run_id,
-        source_type="listenlab_player",
-        source_ref="web_player",
-        started_at=now,
-    )
-    source_row_key = f"listenlab_player:{user_id}:{event_id}"
-    auth_row = get_spotify_tokens(str(user_id))
-    result = insert_listenlab_player_play(
-        ingest_run_id=run_id,
-        source_row_key=source_row_key,
-        source_event_id=event_id,
-        user_id=str(user_id),
-        spotify_user_id=str(auth_row.get("spotify_user_id")) if auth_row else None,
-        played_at=str(payload.get("played_at") or now),
-        raw_payload_json=json.dumps(payload, separators=(",", ":")),
-        spotify_track_id=track_id,
-        spotify_track_uri=track_uri,
-        spotify_album_id=str(payload.get("album_id") or "") or None,
-        spotify_artist_ids_json=json.dumps(payload.get("artist_ids") or []),
-        track_name_raw=str(payload.get("track_name") or "") or None,
-        artist_name_raw=str(payload.get("artist_name") or "") or None,
-        album_name_raw=str(payload.get("album_name") or "") or None,
-        track_duration_ms=duration_ms,
-        ms_played=progress_ms,
-        ms_played_confidence=confidence,
-    )
-    complete_ingest_run(
-        run_id=run_id,
-        completed_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        row_count=1,
-        inserted_count=1 if result.get("action") == "inserted" else 0,
-        duplicate_count=0 if result.get("action") == "inserted" else 1,
-    )
-    projection = reconcile_fact_play_events_for_ingest_run(source_type="listenlab_player", run_id=run_id)
-    return {
-        "ok": True,
-        "row_id": int(result["row_id"]),
-        "event_id": event_id,
-        "action": result.get("action"),
-        "projection": projection,
-    }
-
-
 @app.post("/auth/recent-ingest/poll-now")
 async def auth_recent_ingest_poll_now(request: Request) -> dict[str, Any]:
     user_id = _require_user_id(request)
@@ -2860,45 +2664,6 @@ async def auth_token(request: Request) -> dict[str, Any]:
         "token_type": request.session.get("token_type") or "Bearer",
         "expires_in": request.session.get("expires_in"),
     }
-
-
-@app.get("/preview/representative")
-async def preview_representative(
-    request: Request,
-    kind: str,
-    spotify_id: str,
-) -> dict[str, Any]:
-    token = _require_token(request)
-
-    market: str | None = None
-    try:
-        profile = await _fetch_spotify_profile(token)
-        market = profile.get("country")
-    except HTTPException:
-        market = None
-
-    try:
-        if kind == "artist":
-            track = await _fetch_artist_representative_track(token, spotify_id, market=market)
-        elif kind == "album":
-            track = await _fetch_album_representative_track(token, spotify_id, market=market)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported preview kind.")
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_403_FORBIDDEN:
-            return {"track": None, "reason": "spotify_rejected_lookup"}
-        if exc.status_code == status.HTTP_404_NOT_FOUND:
-            return {"track": None, "reason": "item_not_found"}
-        if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
-            return {"track": None, "reason": "rate_limited"}
-        if exc.status_code == status.HTTP_502_BAD_GATEWAY:
-            return {"track": None, "reason": "spotify_lookup_failed"}
-        raise
-
-    if not track:
-        return {"track": None, "reason": "no_representative_track"}
-
-    return {"track": track, "reason": "ok"}
 
 
 @app.post("/auth/logout")
