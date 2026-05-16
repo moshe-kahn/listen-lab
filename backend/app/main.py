@@ -24,6 +24,7 @@ from backend.app.auth.session import (
 )
 from backend.app.auth.token import _refresh_spotify_access_token, _require_token
 from backend.app.cache.file_cache import _cache_dir, _read_json_file, _write_json_file
+from backend.app.cache.short_cache import SECTION_CACHE, _cache_key, _get_short_cache, _set_short_cache
 from backend.app.cache import static_metadata_cache
 from backend.app.cache.static_metadata_cache import (
     _hydrate_albums_from_static_cache,
@@ -142,9 +143,7 @@ logger = logging.getLogger("listenlabs.auth")
 SECTION_PREVIEW_LIMIT = 10
 ALBUM_ANALYSIS_LIMIT = 10
 PLAYLIST_ANALYSIS_LIMIT = 10
-SECTION_CACHE: dict[str, dict[str, Any]] = {}
 INITIAL_DASHBOARD_LIMIT = 5
-SHORT_CACHE_TTL_SECONDS = 180
 CACHE_VERSION = 1
 PERSISTENT_HISTORY_CACHE_SCHEMA = "history_sections.v1"
 PERSISTENT_HISTORY_CACHE_FILE = "history_sections.json"
@@ -248,28 +247,6 @@ def _user_recent_cache_path() -> Path:
 
 def _user_profile_snapshot_cache_path() -> Path:
     return _cache_dir() / USER_PROFILE_SNAPSHOT_CACHE_FILE
-
-
-def _cache_key(section: str, user_id: str | None, limit: int) -> str:
-    return f"{section}:{user_id or 'anonymous'}:{limit}"
-
-
-def _get_short_cache(section: str, user_id: str | None, limit: int) -> Any | None:
-    entry = SECTION_CACHE.get(_cache_key(section, user_id, limit))
-    if not entry:
-        return None
-    if time.time() - float(entry.get("stored_at", 0)) > SHORT_CACHE_TTL_SECONDS:
-        SECTION_CACHE.pop(_cache_key(section, user_id, limit), None)
-        return None
-    return entry.get("value")
-
-
-def _set_short_cache(section: str, user_id: str | None, limit: int, value: Any) -> Any:
-    SECTION_CACHE[_cache_key(section, user_id, limit)] = {
-        "stored_at": time.time(),
-        "value": value,
-    }
-    return value
 
 
 def _load_persistent_history_cache(
