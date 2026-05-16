@@ -165,6 +165,8 @@ import {
   currentTrackFromState,
   dedupeRecentTracksForPlayer,
   formatPlaybackClock,
+  queueRepeatsTrack,
+  recentTracksToPlayerQueueTracks,
   spotifyTrackIdFromUri,
   spotifyTrackUrl,
   trackUriWithFallback,
@@ -573,6 +575,24 @@ export function App() {
   const playerDisplayAlbumLabel = playerDisplayAlbumName
     ? (playerDisplayAlbumYear ? `${playerDisplayAlbumYear} - ${playerDisplayAlbumName}` : playerDisplayAlbumName)
     : "Choose something to play";
+  const recentLikedStartupTrack = profile?.recent_likes_tracks[0] ?? null;
+  const recentLikedStartupTrackUri = recentLikedStartupTrack
+    ? trackUriWithFallback(recentLikedStartupTrack.uri, recentLikedStartupTrack.track_id)
+    : null;
+  const recentLikedStartupTrackId = recentLikedStartupTrack?.track_id ?? spotifyTrackIdFromUri(recentLikedStartupTrackUri);
+  const currentTrackId = spotifyTrackIdFromUri(currentTrack?.uri ?? null);
+  const usingRecentLikedStartupFallback = Boolean(
+    !usingLivePlaybackSnapshot
+    && currentTrack
+    && recentLikedStartupTrack
+    && playbackPaused
+    && playbackPositionMs === 0
+    && playbackDurationMs === 0
+    && (
+      (currentTrackId && recentLikedStartupTrackId && currentTrackId === recentLikedStartupTrackId)
+      || (currentTrack.uri && recentLikedStartupTrackUri && currentTrack.uri === recentLikedStartupTrackUri)
+    ),
+  );
   const canControlPlayback = !liveReadOnlyMode || livePlaybackOnListenLabDevice;
   const canSeekSelectedPreview = Boolean(
     canControlPlayback
@@ -2000,12 +2020,22 @@ export function App() {
   }, [playerMenuOpen, profile, recentRange, experienceMode]);
 
   useEffect(() => {
-    if (!playerMenuOpen || !profile || playerQueueLoading) {
+    if (!playerMenuOpen || !profile) {
+      return;
+    }
+
+    if (usingRecentLikedStartupFallback) {
+      setPlayerQueueTracks(recentTracksToPlayerQueueTracks(profile.recent_likes_tracks.slice(1)));
+      setPlayerQueueError(null);
+      return;
+    }
+
+    if (playerQueueLoading) {
       return;
     }
 
     void loadPlayerQueueTracks();
-  }, [playerMenuOpen, profile, experienceMode]);
+  }, [playerMenuOpen, profile, experienceMode, usingRecentLikedStartupFallback]);
 
   useEffect(() => {
     if (pendingSeekMs == null) {
@@ -9509,7 +9539,7 @@ export function App() {
           artists?: Array<{ name?: string | null }>;
         }>;
       };
-      setPlayerQueueTracks((payload.queue ?? [])
+      const liveQueueTracks = (payload.queue ?? [])
         .filter((item) => item.type === "track" || item.uri?.startsWith("spotify:track:"))
         .map((item) => ({
           name: item.name ?? "Unknown track",
@@ -9521,7 +9551,8 @@ export function App() {
           trackId: item.id ?? spotifyTrackIdFromUri(item.uri ?? null),
           albumId: item.album?.id ?? null,
         }))
-        .slice(0, PLAYER_RECENT_FETCH_LIMIT));
+        .slice(0, PLAYER_RECENT_FETCH_LIMIT);
+      setPlayerQueueTracks(queueRepeatsTrack(liveQueueTracks, currentTrack?.uri) ? [] : liveQueueTracks);
     } catch (error) {
       setPlayerQueueTracks([]);
       setPlayerQueueError(formatUiErrorMessage(error, "Failed to load Spotify queue."));

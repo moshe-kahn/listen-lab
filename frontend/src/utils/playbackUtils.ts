@@ -1,5 +1,5 @@
 import { PLAYER_RECENT_FETCH_LIMIT } from "../constants/appConstants";
-import type { PlayerTrackSummary, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
+import type { PlayerQueueTrack, PlayerTrackSummary, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
 
 export function currentTrackFromState(state: SpotifyPlayerState): PlayerTrackSummary {
   const current = state.track_window.current_track;
@@ -56,6 +56,36 @@ export function dedupeRecentTracksForPlayer(tracks: RecentTrack[], limit = PLAYE
     }
   }
   return unique;
+}
+
+export function recentTracksToPlayerQueueTracks(tracks: RecentTrack[]): PlayerQueueTrack[] {
+  return tracks.map((track) => {
+    const uri = trackUriWithFallback(track.uri, track.track_id);
+    return {
+      name: track.track_name ?? "Unknown track",
+      artists: track.artist_name ?? "Unknown artist",
+      album: track.album_name ?? "Unknown album",
+      image: track.image_url ?? null,
+      uri,
+      durationMs: Math.max(0, Number(track.duration_ms ?? 0)),
+      trackId: track.track_id ?? spotifyTrackIdFromUri(uri),
+      albumId: track.album_id ?? null,
+    };
+  });
+}
+
+export function queueRepeatsTrack(queueTracks: PlayerQueueTrack[], trackUri: string | null | undefined) {
+  const trackId = spotifyTrackIdFromUri(trackUri ?? null);
+  if (!trackId && !trackUri) {
+    return false;
+  }
+  return queueTracks.length > 0 && queueTracks.every((track) => {
+    const queueTrackId = track.trackId ?? spotifyTrackIdFromUri(track.uri);
+    return Boolean(
+      (trackId && queueTrackId && queueTrackId === trackId)
+      || (trackUri && track.uri && track.uri === trackUri),
+    );
+  });
 }
 
 export function trackUriWithFallback(trackUri: string | null | undefined, trackId: string | null | undefined) {
