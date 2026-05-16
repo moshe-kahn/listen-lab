@@ -72,6 +72,10 @@ Current note:
   - track metadata backfill prioritizes duplicate/split/suggested identity candidates before broad backlog
   - a local track metadata worker can run bounded one-shot or looped batches with cooldown, JSONL logging, and rolling request-budget protection
   - catalog enrichment remains evidence-only and must not create, merge, promote, or apply identity decisions
+- current implementation note:
+  - `backend/app/main.py` is being reduced through behavior-preserving helper extraction
+  - extracted backend helper modules and the uncommitted frontend `App.tsx` extraction are tracked in `docs/reference/refactor-notes.md`
+  - frontend Identity Audit refactors should preserve the current workflow and persisted local review state unless a UX redesign is explicitly requested
 
 ## Domain Vocabulary
 ### Overlooked artist
@@ -182,6 +186,7 @@ The MVP succeeds when:
 - Keep Spotify as the source of truth rather than copying user data into app storage.
 - Use local runtime caches and snapshot files to preserve usability during rate limits or local-only sessions.
 - Use the local SQLite store for raw ingest, sync state, and ingest-run bookkeeping.
+- Keep large-file refactors incremental and behavior-preserving; update `docs/reference/refactor-notes.md` when module ownership changes.
 
 ## Current Follow-Ups
 - Fix album breadth/counting so albums do not overcount duplicate or alternate track variants.

@@ -11,6 +11,7 @@ This roadmap translates the product brief into buildable engineering milestones.
 - Local development comes first, with a simple cloud deployment path later.
 - The current dashboard also supports local cached operation when Spotify is rate-limited or intentionally disabled.
 - Current identity/catalog work has added a source-catalog enrichment layer and local Spotify metadata worker to improve duplicate/split review evidence before any merge/apply behavior is introduced.
+- `backend/app/main.py` is being reduced through small committed helper extractions; the current module map is tracked in `docs/reference/refactor-notes.md`.
 
 ## MVP Boundary
 The MVP includes:
@@ -94,6 +95,7 @@ Ship a trustworthy authenticated dashboard that exposes the raw listening signal
 - dedicated recent-ingest auth/probe controls for validating recently-played API behavior
 - a tracks-only comparison page for current vs new all-time ranking formulas
 - multiple dashboard and popover usability refinements
+- ongoing `App.tsx` extraction into API wrappers, shared types/constants, and Identity Audit support components
 
 ## Milestone 3 - Data Collection and Artist Aggregation
 ### Purpose

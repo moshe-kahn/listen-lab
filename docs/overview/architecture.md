@@ -14,6 +14,8 @@ This document is the implementation-oriented technical source of truth for the L
 - The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
 - The frontend now includes a tracks-only comparison page for evaluating current vs new all-time track ranking formulas.
 - Backend section-level caching is implemented for moderate-freshness live sections, long-lived history-derived favorites, shared static Spotify metadata, and saved user snapshot sections for local mode.
+- Backend helper code has been split out of `backend/app/main.py` into focused modules for auth/session/token, OAuth helpers, progress tracking, file/static metadata cache handling, Spotify HTTP/rate-limit helpers, Spotify normalization, lookup/merge helpers, and time formatting.
+- Frontend `App.tsx` is being reduced through focused extraction of API wrappers, shared types/constants, Identity Audit issue/diagnostic components, and Identity Audit preference helpers.
 - A local SQLite database now stores raw play events, live playback observations, ingest runs, and Spotify recent-sync state.
 - Encrypted Spotify token persistence now supports token-backed session restore for returning users.
 - Spotify recent-play API ingest is implemented with replay overlap handling, conservative early-stop paging, and batch chronology-based `ms_played` upgrades.
@@ -67,8 +69,12 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend recent-ingest controls for connect+ingest, before-cursor probe, backfill probe, and post-track-end polling
 - frontend recent-debug page for grouped recent-play inspection plus DB-archive pagination
 - frontend track-detail overlay enhancements for album-song browsing, playback toggles, and same-album track switching without full overlay reset
+- frontend helper extraction for API wrappers, shared constants/types, and Identity Audit support components is in progress; see `docs/reference/refactor-notes.md`
 - backend OAuth endpoints
 - backend token exchange and session storage
+- backend auth/session/token helpers extracted under `backend/app/auth/`
+- backend generic file cache and static Spotify metadata cache helpers extracted under `backend/app/cache/`
+- backend Spotify HTTP, rate-limit, normalization, and lookup helpers extracted into focused `backend/app/spotify_*.py` modules
 - backend encrypted Spotify token persistence and token-backed session restore
 - backend PKCE code-challenge handling for Spotify auth flows
 - authenticated `GET /me` snapshot endpoint
@@ -235,11 +241,14 @@ This layout should be used when scaffolding the repository:
 backend/
   app/
     api/
+    auth/
+    cache/
     clients/
     core/
     models/
     schemas/
     services/
+    utils/
     main.py
 frontend/
   src/
