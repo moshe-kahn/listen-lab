@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Request
+
+from backend.app.auth.session import _require_local_data_session
+from backend.app.cache.history_cache import (
+    HISTORY_TRACKS_DISPLAY_LIMIT,
+    SECTION_PREVIEW_LIMIT,
+    _clear_dashboard_caches,
+    _store_local_history_insights_cache,
+    _store_persistent_history_cache,
+)
+from backend.app.config import get_settings
+from backend.app.history_analysis import get_history_signature, load_history_insights
+from backend.app.listening_log import query_listening_log
+
+router = APIRouter(tags=["admin"])
+
+
+@router.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@router.post("/cache/rebuild")
+async def cache_rebuild(request: Request) -> dict[str, str]:
+    settings = get_settings()
+    _clear_dashboard_caches()
+    history_signature = get_history_signature(settings.spotify_history_dir)
+    if history_signature:
+        for recent_window_days in (28, 180):
+            history_insights = load_history_insights(
+                settings.spotify_history_dir,
+                max(SECTION_PREVIEW_LIMIT, 50),
+                recent_window_days=recent_window_days,
+            )
+            if not history_insights:
+                continue
+            _store_local_history_insights_cache(
+                history_signature,
+                recent_window_days,
+                max(SECTION_PREVIEW_LIMIT, 50),
+                history_insights,
+            )
+            history_sections_with_tracks = {
+                "tracks_all_time": history_insights.get("tracks_all_time", [])[:HISTORY_TRACKS_DISPLAY_LIMIT],
+                "tracks_recent": history_insights.get("tracks_recent", [])[:SECTION_PREVIEW_LIMIT],
+                "artists_all_time": history_insights.get("artists_all_time", [])[:SECTION_PREVIEW_LIMIT],
+                "artists_recent": history_insights.get("artists_recent", [])[:SECTION_PREVIEW_LIMIT],
+                "albums_all_time": history_insights.get("albums_all_time", [])[:SECTION_PREVIEW_LIMIT],
+                "albums_recent": history_insights.get("albums_recent", [])[:SECTION_PREVIEW_LIMIT],
+            }
+            _store_persistent_history_cache(
+                history_signature,
+                recent_window_days,
+                history_sections_with_tracks,
+            )
+    return {"status": "cache_rebuilt"}
+
+
+@router.get("/debug/listening-log")
+async def debug_listening_log(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    source_filter: str = "all",
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    payload = query_listening_log(
+        limit=limit,
+        offset=offset,
+        source_filter=source_filter if source_filter in {"all", "api", "history", "both"} else "all",
+    )
+    return dict(payload)

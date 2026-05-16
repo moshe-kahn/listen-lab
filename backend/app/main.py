@@ -7,7 +7,6 @@ import sqlite3
 import time
 import uuid
 from datetime import UTC, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -24,9 +23,22 @@ from backend.app.auth.session import (
     _session_user_id,
 )
 from backend.app.auth.token import _refresh_spotify_access_token, _require_token
-from backend.app.cache.file_cache import _cache_dir, _read_json_file, _write_json_file
-from backend.app.cache.short_cache import SECTION_CACHE, _cache_key, _get_short_cache, _set_short_cache
-from backend.app.cache import static_metadata_cache
+from backend.app.cache.file_cache import _read_json_file, _write_json_file
+from backend.app.cache.history_cache import (
+    CACHE_VERSION,
+    HISTORY_TRACKS_DISPLAY_LIMIT,
+    LOCAL_HISTORY_INSIGHTS_CACHE_SCHEMA,
+    LOCAL_HISTORY_INSIGHTS_CACHE_VERSION,
+    PERSISTENT_HISTORY_CACHE_SCHEMA,
+    SECTION_PREVIEW_LIMIT,
+    _local_history_insights_cache_path,
+    _persistent_history_cache_path,
+    _store_local_history_insights_cache,
+    _store_persistent_history_cache,
+    _user_profile_snapshot_cache_path,
+    _user_recent_cache_path,
+)
+from backend.app.cache.short_cache import _get_short_cache, _set_short_cache
 from backend.app.cache.static_metadata_cache import (
     _hydrate_albums_from_static_cache,
     _hydrate_artists_from_static_cache,
@@ -34,7 +46,6 @@ from backend.app.cache.static_metadata_cache import (
     _remember_artist_metadata,
     _remember_track_metadata,
     _save_static_metadata_cache,
-    _static_metadata_cache_path,
     _static_metadata_get,
     _static_metadata_set,
 )
@@ -48,8 +59,7 @@ from backend.app.db import (
     recover_stale_ingest_runs,
     update_listenlab_player_play_progress,
 )
-from backend.app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
-from backend.app.listening_log import query_listening_log
+from backend.app.history_analysis import get_history_signature, load_history_insights
 from backend.app.logging_config import configure_logging
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
 from backend.app.progress_tracker import (
@@ -65,6 +75,7 @@ from backend.app.recent_tracks_db import (
     map_recent_track_row_to_canonical_item,
     query_recent_track_rows,
 )
+from backend.app.routes.admin_routes import router as admin_router
 from backend.app.routes.audit_routes import router as identity_audit_router
 from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get, _spotify_get_many
 from backend.app.spotify_lookup_helpers import (
@@ -128,24 +139,14 @@ from backend.app.utils.time_helpers import (
 
 settings = get_settings()
 logger = logging.getLogger("listenlabs.auth")
-SECTION_PREVIEW_LIMIT = 10
 ALBUM_ANALYSIS_LIMIT = 10
 PLAYLIST_ANALYSIS_LIMIT = 10
 INITIAL_DASHBOARD_LIMIT = 5
-CACHE_VERSION = 1
-PERSISTENT_HISTORY_CACHE_SCHEMA = "history_sections.v1"
-PERSISTENT_HISTORY_CACHE_FILE = "history_sections.json"
-LOCAL_HISTORY_INSIGHTS_CACHE_FILE = "local_history_insights.json"
-LOCAL_HISTORY_INSIGHTS_CACHE_SCHEMA = "local_history_insights.v1"
-HISTORY_TRACKS_DISPLAY_LIMIT = 40
 HISTORY_CACHE_REBUILD_WINDOW_DAYS = 28
 MIN_ALBUM_DISTINCT_TRACKS = 3
 MIN_RECENT_ALBUM_DISTINCT_TRACKS = 2
-LOCAL_HISTORY_INSIGHTS_CACHE_VERSION = 1
-USER_RECENT_CACHE_FILE = "user_recent_sections.json"
 USER_RECENT_CACHE_VERSION = 1
 USER_RECENT_CACHE_SCHEMA = "user_recent_sections.v1"
-USER_PROFILE_SNAPSHOT_CACHE_FILE = "user_profile_snapshots.json"
 USER_PROFILE_SNAPSHOT_CACHE_VERSION = 1
 USER_PROFILE_SNAPSHOT_CACHE_SCHEMA = "user_profile_snapshots.v1"
 USER_RECENT_CACHE_MAX_USERS = 50
@@ -221,22 +222,6 @@ def _normalize_recent_tracks_payload_for_route(items: list[dict[str, Any]]) -> l
     return [_normalize_recent_track_item_for_route(item) for item in items]
 
 
-def _persistent_history_cache_path() -> Path:
-    return _cache_dir() / PERSISTENT_HISTORY_CACHE_FILE
-
-
-def _local_history_insights_cache_path() -> Path:
-    return _cache_dir() / LOCAL_HISTORY_INSIGHTS_CACHE_FILE
-
-
-def _user_recent_cache_path() -> Path:
-    return _cache_dir() / USER_RECENT_CACHE_FILE
-
-
-def _user_profile_snapshot_cache_path() -> Path:
-    return _cache_dir() / USER_PROFILE_SNAPSHOT_CACHE_FILE
-
-
 def _load_persistent_history_cache(
     history_signature: tuple[tuple[str, int, int], ...] | None,
     recent_window_days: int,
@@ -290,27 +275,6 @@ def _load_persistent_history_cache_any_window(
     return payload.get("sections")
 
 
-def _store_persistent_history_cache(
-    history_signature: tuple[tuple[str, int, int], ...] | None,
-    recent_window_days: int,
-    sections: dict[str, Any],
-) -> None:
-    if not history_signature:
-        return
-
-    payload = {
-        "cache_version": CACHE_VERSION,
-        "schema": PERSISTENT_HISTORY_CACHE_SCHEMA,
-        "history_signature": [list(item) for item in history_signature],
-        "recent_window_days": recent_window_days,
-        "stored_at": time.time(),
-        "sections": sections,
-    }
-
-    cache_path = _persistent_history_cache_path()
-    cache_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-
-
 def _load_local_history_insights_cache(
     history_signature: tuple[tuple[str, int, int], ...] | None,
     recent_window_days: int,
@@ -333,38 +297,6 @@ def _load_local_history_insights_cache(
         return None
     insights = entry.get("insights")
     return insights if isinstance(insights, dict) else None
-
-
-def _store_local_history_insights_cache(
-    history_signature: tuple[tuple[str, int, int], ...] | None,
-    recent_window_days: int,
-    track_limit: int,
-    insights: dict[str, Any],
-) -> None:
-    if not history_signature or not insights:
-        return
-    path = _local_history_insights_cache_path()
-    payload = _read_json_file(path) or {}
-    existing_signature = payload.get("history_signature")
-    next_signature = [list(item) for item in history_signature]
-    if existing_signature != next_signature:
-        payload = {
-            "cache_version": LOCAL_HISTORY_INSIGHTS_CACHE_VERSION,
-            "schema": LOCAL_HISTORY_INSIGHTS_CACHE_SCHEMA,
-            "history_signature": next_signature,
-            "entries": {},
-        }
-    payload["cache_version"] = LOCAL_HISTORY_INSIGHTS_CACHE_VERSION
-    payload["schema"] = LOCAL_HISTORY_INSIGHTS_CACHE_SCHEMA
-    payload["history_signature"] = next_signature
-    entries = payload.get("entries") or {}
-    entries[str(recent_window_days)] = {
-        "track_limit": int(track_limit),
-        "stored_at": time.time(),
-        "insights": insights,
-    }
-    payload["entries"] = entries
-    _write_json_file(path, payload)
 
 
 def _load_user_recent_cache() -> dict[str, Any]:
@@ -492,34 +424,6 @@ def _load_user_recent_snapshot(
         return None
     snapshot = entry.get("snapshot")
     return snapshot if isinstance(snapshot, dict) else None
-
-
-def _clear_dashboard_caches() -> None:
-    SECTION_CACHE.clear()
-    static_metadata_cache.STATIC_METADATA_CACHE = None
-    static_metadata_cache.STATIC_METADATA_DIRTY_ACCESS = False
-    static_metadata_cache.STATIC_METADATA_DIRTY_CONTENT = False
-    clear_history_insights_cache()
-    try:
-        _persistent_history_cache_path().unlink(missing_ok=True)
-    except OSError:
-        logger.exception("Failed to remove persistent history cache.")
-    try:
-        _local_history_insights_cache_path().unlink(missing_ok=True)
-    except OSError:
-        logger.exception("Failed to remove local history insights cache.")
-    try:
-        _static_metadata_cache_path().unlink(missing_ok=True)
-    except OSError:
-        logger.exception("Failed to remove static metadata cache.")
-    try:
-        _user_recent_cache_path().unlink(missing_ok=True)
-    except OSError:
-        logger.exception("Failed to remove user recent cache.")
-    try:
-        _user_profile_snapshot_cache_path().unlink(missing_ok=True)
-    except OSError:
-        logger.exception("Failed to remove user profile snapshot cache.")
 
 
 def _playlist_cache_needs_refresh(playlists: list[dict[str, Any]]) -> bool:
@@ -2379,9 +2283,7 @@ def _build_local_profile_payload(
     }
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+app.include_router(admin_router)
 
 
 @app.get("/auth/login")
@@ -3003,41 +2905,6 @@ async def preview_representative(
 async def auth_logout(request: Request) -> dict[str, str]:
     request.session.clear()
     return {"status": "logged_out"}
-
-
-@app.post("/cache/rebuild")
-async def cache_rebuild(request: Request) -> dict[str, str]:
-    _clear_dashboard_caches()
-    history_signature = get_history_signature(settings.spotify_history_dir)
-    if history_signature:
-        for recent_window_days in (28, 180):
-            history_insights = load_history_insights(
-                settings.spotify_history_dir,
-                max(SECTION_PREVIEW_LIMIT, 50),
-                recent_window_days=recent_window_days,
-            )
-            if not history_insights:
-                continue
-            _store_local_history_insights_cache(
-                history_signature,
-                recent_window_days,
-                max(SECTION_PREVIEW_LIMIT, 50),
-                history_insights,
-            )
-            history_sections_with_tracks = {
-                "tracks_all_time": history_insights.get("tracks_all_time", [])[:HISTORY_TRACKS_DISPLAY_LIMIT],
-                "tracks_recent": history_insights.get("tracks_recent", [])[:SECTION_PREVIEW_LIMIT],
-                "artists_all_time": history_insights.get("artists_all_time", [])[:SECTION_PREVIEW_LIMIT],
-                "artists_recent": history_insights.get("artists_recent", [])[:SECTION_PREVIEW_LIMIT],
-                "albums_all_time": history_insights.get("albums_all_time", [])[:SECTION_PREVIEW_LIMIT],
-                "albums_recent": history_insights.get("albums_recent", [])[:SECTION_PREVIEW_LIMIT],
-            }
-            _store_persistent_history_cache(
-                history_signature,
-                recent_window_days,
-                history_sections_with_tracks,
-            )
-    return {"status": "cache_rebuilt"}
 
 
 @app.get("/me/progress")
@@ -3837,22 +3704,6 @@ async def debug_spotify_catalog_access_probe(
         "message": message,
         "body": body_payload if isinstance(body_payload, dict) else {},
     }
-
-
-@app.get("/debug/listening-log")
-async def debug_listening_log(
-    request: Request,
-    limit: int = 50,
-    offset: int = 0,
-    source_filter: str = "all",
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    payload = query_listening_log(
-        limit=limit,
-        offset=offset,
-        source_filter=source_filter if source_filter in {"all", "api", "history", "both"} else "all",
-    )
-    return dict(payload)
 
 
 @app.get("/me/recent/archive")
