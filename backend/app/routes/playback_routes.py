@@ -22,6 +22,10 @@ from backend.app.spotify_preview import (
     _fetch_album_representative_track,
     _fetch_artist_representative_track,
 )
+from backend.app.spotify_queue_playlist import (
+    sync_queue_playlist,
+    validate_queue_playlist_uris,
+)
 from backend.app.spotify_token_store import get_spotify_tokens
 
 router = APIRouter(tags=["playback"])
@@ -31,6 +35,18 @@ router = APIRouter(tags=["playback"])
 async def auth_current_playback(request: Request) -> dict[str, Any]:
     user_id = _require_user_id(request)
     return await get_current_playback_for_user(user_id)
+
+
+@router.post("/auth/playback/queue-playlist/sync")
+async def auth_sync_queue_playlist(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    token = _require_token(request)
+    uris = validate_queue_playlist_uris(payload.get("uris") if isinstance(payload, dict) else None)
+    return await sync_queue_playlist(
+        access_token=token,
+        spotify_user_id=str(user_id),
+        uris=uris,
+    )
 
 
 @router.post("/auth/player-listen-event")

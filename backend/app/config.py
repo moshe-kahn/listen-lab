@@ -26,7 +26,7 @@ class Settings:
     spotify_recent_full_page_mode: bool = True
     spotify_scope: str = (
         "user-read-email user-read-private user-read-recently-played playlist-read-private "
-        "user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
+        "playlist-modify-private user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
         "user-read-playback-state user-read-currently-playing"
     )
 

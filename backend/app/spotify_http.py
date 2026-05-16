@@ -101,6 +101,76 @@ async def _spotify_get(access_token: str, url: str, params: dict[str, Any] | Non
     return response.json()
 
 
+async def _spotify_post(access_token: str, url: str, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
+    _enforce_spotify_cooldown()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            url,
+            json=json_body,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    if response.status_code == status.HTTP_401_UNAUTHORIZED:
+        raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
+    if response.status_code == status.HTTP_403_FORBIDDEN:
+        raise HTTPException(status_code=403, detail="Spotify scope is missing for this resource.")
+    if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+        retry_after_header = response.headers.get("Retry-After")
+        retry_after_seconds = _parse_retry_after_seconds(retry_after_header)
+        _note_spotify_rate_limit(retry_after_seconds)
+        raise HTTPException(status_code=429, detail=_spotify_rate_limit_detail("Spotify rate limit reached for this resource."))
+    if response.status_code >= 400:
+        detail = ""
+        try:
+            payload = response.json()
+            detail = payload.get("error_description") or payload.get("error", {}).get("message") or ""
+        except ValueError:
+            detail = response.text[:160]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to post Spotify data to {url} (status {response.status_code}){f': {detail}' if detail else ''}",
+        )
+
+    if response.status_code == status.HTTP_204_NO_CONTENT or not response.content:
+        return {}
+    return response.json()
+
+
+async def _spotify_put(access_token: str, url: str, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
+    _enforce_spotify_cooldown()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.put(
+            url,
+            json=json_body,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    if response.status_code == status.HTTP_401_UNAUTHORIZED:
+        raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
+    if response.status_code == status.HTTP_403_FORBIDDEN:
+        raise HTTPException(status_code=403, detail="Spotify scope is missing for this resource.")
+    if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+        retry_after_header = response.headers.get("Retry-After")
+        retry_after_seconds = _parse_retry_after_seconds(retry_after_header)
+        _note_spotify_rate_limit(retry_after_seconds)
+        raise HTTPException(status_code=429, detail=_spotify_rate_limit_detail("Spotify rate limit reached for this resource."))
+    if response.status_code >= 400:
+        detail = ""
+        try:
+            payload = response.json()
+            detail = payload.get("error_description") or payload.get("error", {}).get("message") or ""
+        except ValueError:
+            detail = response.text[:160]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to put Spotify data to {url} (status {response.status_code}){f': {detail}' if detail else ''}",
+        )
+
+    if response.status_code == status.HTTP_204_NO_CONTENT or not response.content:
+        return {}
+    return response.json()
+
+
 async def _spotify_get_many(access_token: str, url: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     _enforce_spotify_cooldown()
     async with httpx.AsyncClient(timeout=15.0) as client:
