@@ -23,8 +23,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
             "items": [],
             "parse_warning": "",
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.query_ambiguous_review_queue",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.query_ambiguous_review_queue",
             return_value=payload,
         ):
             client = TestClient(app)
@@ -43,8 +43,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
             "pagination": {"limit": 50, "offset": 0, "returned": 0, "has_more": False},
             "items": [],
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.query_suggested_analysis_groups",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.query_suggested_analysis_groups",
             return_value=payload,
         ):
             client = TestClient(app)
@@ -81,8 +81,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
             "pagination": {"limit": 50, "offset": 0, "returned": 0, "has_more": False},
             "items": [],
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.build_track_identity_readiness_report",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.build_track_identity_readiness_report",
             return_value=payload,
         ), patch("backend.app.main.refresh_access_token_if_needed") as refresh_mock, patch(
             "backend.app.main.run_spotify_catalog_backfill"
@@ -119,8 +119,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
                 "tracks": {"approved": [], "rejected": [], "skipped": []},
             },
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.validate_identity_audit_submission_preview",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.validate_identity_audit_submission_preview",
             return_value=payload,
         ):
             client = TestClient(app)
@@ -133,7 +133,7 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
         self.assertEqual([], body["validated"]["tracks"]["approved"])
 
     def test_submission_preview_validate_requires_json_object(self) -> None:
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"):
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"):
             client = TestClient(app)
             response = client.post("/debug/tracks/identity-audit/submission-preview/validate", json=[])
         self.assertEqual(400, response.status_code)
@@ -159,8 +159,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
             "warnings": [],
             "unknown_items": {"groups": [], "tracks": []},
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.save_identity_audit_submission",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.save_identity_audit_submission",
             return_value=payload,
         ):
             client = TestClient(app)
@@ -174,7 +174,7 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
         self.assertEqual([], body["unknown_items"]["groups"])
 
     def test_submission_save_requires_json_object(self) -> None:
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"):
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"):
             client = TestClient(app)
             response = client.post("/debug/tracks/identity-audit/submissions", json=[])
         self.assertEqual(400, response.status_code)
@@ -187,7 +187,7 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
             ensure_sqlite_db()
             apply_pending_migrations()
 
-            with patch("backend.app.main._require_local_data_session", return_value="user-1"):
+            with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"):
                 client = TestClient(app)
                 response = client.post("/debug/tracks/identity-audit/submissions", json=[])
             self.assertEqual(400, response.status_code)
@@ -213,8 +213,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
             ],
             "total": 1,
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.list_identity_audit_submissions",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.list_identity_audit_submissions",
             return_value=payload,
         ):
             client = TestClient(app)
@@ -238,8 +238,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
                 "promoted_at": None,
             },
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.get_identity_audit_submission",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.get_identity_audit_submission",
             return_value=payload,
         ):
             client = TestClient(app)
@@ -251,8 +251,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
         self.assertIn("validation", body["item"])
 
     def test_submission_read_missing_stable_404_shape(self) -> None:
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.get_identity_audit_submission",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.get_identity_audit_submission",
             return_value=None,
         ):
             client = TestClient(app)
@@ -282,8 +282,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
             "noops": {"rejected": [], "skipped": []},
             "warnings": [],
         }
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.dry_run_identity_audit_submission",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.dry_run_identity_audit_submission",
             return_value=payload,
         ):
             client = TestClient(app)
@@ -296,8 +296,8 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
         self.assertIsInstance(body["plan"]["groups"], list)
 
     def test_submission_dry_run_missing_stable_404_shape(self) -> None:
-        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
-            "backend.app.main.dry_run_identity_audit_submission",
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.dry_run_identity_audit_submission",
             return_value=None,
         ):
             client = TestClient(app)

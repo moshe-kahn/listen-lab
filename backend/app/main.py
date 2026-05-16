@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from backend.app.auth.oauth_helpers import _callback_redirect_url, _is_configured, _pkce_code_challenge
 from backend.app.auth.session import (
+    _require_local_data_session,
     _require_user_id,
     _restore_session_user_from_token_store,
     _session_user_id,
@@ -50,7 +51,6 @@ from backend.app.db import (
 from backend.app.history_analysis import clear_history_insights_cache, get_history_signature, load_history_insights
 from backend.app.listening_log import query_listening_log
 from backend.app.logging_config import configure_logging
-from backend.app.merged_track_aggregate import get_merged_track_aggregate
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
 from backend.app.progress_tracker import (
     LOAD_PROGRESS,
@@ -65,6 +65,7 @@ from backend.app.recent_tracks_db import (
     map_recent_track_row_to_canonical_item,
     query_recent_track_rows,
 )
+from backend.app.routes.audit_routes import router as identity_audit_router
 from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get, _spotify_get_many
 from backend.app.spotify_lookup_helpers import (
     _album_enrichment_lookup,
@@ -118,19 +119,6 @@ from backend.app.spotify_token_store import (
     refresh_access_token_if_needed,
     upsert_spotify_tokens,
     validate_token_encryption_key,
-)
-from backend.app.track_identity_audit import (
-    build_track_identity_readiness_report,
-    build_track_identity_audit,
-    query_ambiguous_review_queue,
-    query_suggested_analysis_groups,
-)
-from backend.app.track_identity_audit_submission import (
-    dry_run_identity_audit_submission,
-    get_identity_audit_submission,
-    list_identity_audit_submissions,
-    save_identity_audit_submission,
-    validate_identity_audit_submission_preview,
 )
 from backend.app.utils.time_helpers import (
     _expires_at_from_expires_in,
@@ -3384,191 +3372,7 @@ async def debug_me_recent_compare(
     }
 
 
-def _merged_track_aggregate_payload(
-    *,
-    limit: int,
-    recent_window_days: int,
-    source_filter: str,
-) -> dict[str, Any]:
-    normalized_source_filter = source_filter if source_filter in {"all", "recent", "history", "both"} else "all"
-    bounded_limit = max(1, min(int(limit), 500))
-    bounded_recent_window_days = max(0, int(recent_window_days))
-    result = get_merged_track_aggregate(
-        limit=bounded_limit,
-        recent_window_days=bounded_recent_window_days,
-        source_filter=normalized_source_filter,
-    )
-    return {
-        "limit": bounded_limit,
-        "recent_window_days": bounded_recent_window_days,
-        "source_filter": normalized_source_filter,
-        "returned_items": len(result["items"]),
-        "excluded_unknown_identity_count": result["excluded_unknown_identity_count"],
-        "items": result["items"],
-    }
-
-
-def _require_local_data_session(request: Request) -> str:
-    user_id = _session_user_id(request) or _restore_session_user_from_token_store(request)
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated with Spotify.",
-        )
-    return user_id
-
-
-@app.get("/tracks/merged-aggregate")
-async def tracks_merged_aggregate(
-    request: Request,
-    limit: int = 200,
-    recent_window_days: int = 28,
-    source_filter: str = "all",
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    return _merged_track_aggregate_payload(
-        limit=limit,
-        recent_window_days=recent_window_days,
-        source_filter=source_filter,
-    )
-
-
-@app.get("/debug/tracks/merged-aggregate")
-async def debug_tracks_merged_aggregate(
-    request: Request,
-    limit: int = 200,
-    recent_window_days: int = 28,
-    source_filter: str = "all",
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    return _merged_track_aggregate_payload(
-        limit=limit,
-        recent_window_days=recent_window_days,
-        source_filter=source_filter,
-    )
-
-
-@app.get("/debug/tracks/identity-audit")
-async def debug_tracks_identity_audit(
-    request: Request,
-    limit: int = 5,
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    return build_track_identity_audit(limit=limit)
-
-
-@app.get("/debug/tracks/identity-audit/ambiguous-review")
-async def debug_tracks_identity_audit_ambiguous_review(
-    request: Request,
-    limit: int = 200,
-    offset: int = 0,
-    family: str | None = None,
-    bucket: str | None = None,
-    log_path: str | None = None,
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    return query_ambiguous_review_queue(
-        log_path=log_path,
-        limit=limit,
-        offset=offset,
-        family=family,
-        bucket=bucket,
-    )
-
-
-@app.get("/debug/tracks/identity-audit/suggested-groups")
-async def debug_tracks_identity_audit_suggested_groups(
-    request: Request,
-    limit: int = 50,
-    offset: int = 0,
-    status_filter: str = "suggested",
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    return query_suggested_analysis_groups(
-        limit=limit,
-        offset=offset,
-        status=status_filter,
-    )
-
-
-@app.post("/debug/tracks/identity-audit/submission-preview/validate")
-async def debug_tracks_identity_audit_submission_preview_validate(
-    request: Request,
-    payload: Any = Body(...),
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Payload must be a JSON object.",
-    )
-    return validate_identity_audit_submission_preview(payload)
-
-
-@app.post("/debug/tracks/identity-audit/submissions")
-async def debug_tracks_identity_audit_submissions_create(
-    request: Request,
-    payload: Any = Body(...),
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Payload must be a JSON object.",
-    )
-    return save_identity_audit_submission(payload)
-
-
-@app.get("/debug/tracks/identity-audit/submissions")
-async def debug_tracks_identity_audit_submissions_list(
-    request: Request,
-    limit: int = 20,
-    offset: int = 0,
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    return list_identity_audit_submissions(limit=limit, offset=offset)
-
-
-@app.get("/debug/tracks/identity-audit/submissions/{submission_id}")
-async def debug_tracks_identity_audit_submissions_read(
-    request: Request,
-    submission_id: int,
-) -> Any:
-    _require_local_data_session(request)
-    payload = get_identity_audit_submission(submission_id)
-    if payload is None:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={
-                "ok": False,
-                "error": {
-                    "code": "submission_not_found",
-                    "message": f"Submission {submission_id} was not found.",
-                },
-            },
-        )
-    return payload
-
-
-@app.post("/debug/tracks/identity-audit/submissions/{submission_id}/dry-run")
-async def debug_tracks_identity_audit_submissions_dry_run(
-    request: Request,
-    submission_id: int,
-) -> Any:
-    _require_local_data_session(request)
-    payload = dry_run_identity_audit_submission(submission_id)
-    if payload is None:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={
-                "ok": False,
-                "error": {
-                    "code": "submission_not_found",
-                    "message": f"Submission {submission_id} was not found.",
-                },
-            },
-        )
-    return payload
+app.include_router(identity_audit_router)
 
 
 @app.post("/debug/spotify/catalog-backfill")
@@ -3837,16 +3641,6 @@ def debug_search_track_lineage_album_display_diagnostic(
 ) -> dict[str, Any]:
     _require_local_data_session(request)
     return inspect_source_release_album_display_gaps(sample_limit=sample_limit)
-
-
-@app.get("/debug/tracks/identity-audit/readiness")
-async def debug_track_identity_readiness(
-    request: Request,
-    limit: int = 200,
-    offset: int = 0,
-) -> dict[str, Any]:
-    _require_local_data_session(request)
-    return build_track_identity_readiness_report(limit=limit, offset=offset)
 
 
 @app.post("/debug/identity/release-albums/merge-preview")

@@ -29,6 +29,16 @@ def _require_user_id(request: Request) -> str:
     return user_id
 
 
+def _require_local_data_session(request: Request) -> str:
+    user_id = _session_user_id(request) or _restore_session_user_from_token_store(request)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated with Spotify.",
+        )
+    return user_id
+
+
 def _restore_session_user_from_token_store(request: Request) -> str | None:
     existing_user_id = _session_user_id(request)
     if existing_user_id:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from backend.app.db import sqlite_connection
 
@@ -40,6 +40,30 @@ class MergedTrackAggregateItem(TypedDict, total=False):
 class MergedTrackAggregateResult(TypedDict):
     items: list[MergedTrackAggregateItem]
     excluded_unknown_identity_count: int
+
+
+def _merged_track_aggregate_payload(
+    *,
+    limit: int,
+    recent_window_days: int,
+    source_filter: str,
+) -> dict[str, Any]:
+    normalized_source_filter = source_filter if source_filter in {"all", "recent", "history", "both"} else "all"
+    bounded_limit = max(1, min(int(limit), 500))
+    bounded_recent_window_days = max(0, int(recent_window_days))
+    result = get_merged_track_aggregate(
+        limit=bounded_limit,
+        recent_window_days=bounded_recent_window_days,
+        source_filter=normalized_source_filter,
+    )
+    return {
+        "limit": bounded_limit,
+        "recent_window_days": bounded_recent_window_days,
+        "source_filter": normalized_source_filter,
+        "returned_items": len(result["items"]),
+        "excluded_unknown_identity_count": result["excluded_unknown_identity_count"],
+        "items": result["items"],
+    }
 
 
 def _track_longevity_score(
