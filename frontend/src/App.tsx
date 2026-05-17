@@ -136,6 +136,7 @@ import {
 } from "./api/appApi";
 import { syncQueuePlaylist } from "./api/playbackApi";
 import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfillPage";
+import { DashboardAlbumColumn, DashboardArtistColumn, DashboardPlaylistColumn } from "./components/dashboard/DashboardColumns";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
 import { DashboardPaging } from "./components/dashboard/DashboardPaging";
 import {
@@ -184,14 +185,11 @@ import {
   collapseTrackPreviewAlbums,
   emptySlots,
   firstArtistFromRecentTrack,
-  formatAlbumBreadth,
-  formatAlbumSummary,
   formatCooldownCopy,
   formatCooldownTimerLabel,
   formatDebugTimestamp,
   formatDurationMs,
   formatFormulaRankDelta,
-  formatHistoryDebugLine,
   formatListeningSince,
   formatLoadingStatusDetailed,
   formatLoadingStatusUi,
@@ -3887,48 +3885,18 @@ export function App() {
     unavailableCopy: string,
     unavailableAction?: ReactNode,
   ) {
-    if (!available) {
-      return (
-        <div className="section-unavailable">
-          <p className="empty-copy">{unavailableCopy}</p>
-          {unavailableAction ? <div className="section-unavailable-action">{unavailableAction}</div> : null}
-        </div>
-      );
-    }
-    if (items.length === 0) {
-      return <p className="empty-copy">{emptyCopy}</p>;
-    }
-
-    const pageItems = visibleItems(section, items);
     return (
-      <>
-        <div className="item-list">
-          {pageItems.map((artist, index) => (
-            renderDashboardListCard(
-              {
-                href: artist.url,
-                entityId: artist.artist_id,
-                imageUrl: artist.image_url,
-                imageAlt: `${artist.name ?? "Artist"} portrait`,
-                fallbackLabel: "A",
-                primaryText: artist.name ?? "Unknown artist",
-                secondaryText:
-                  artist.genres.length > 0
-                    ? artist.genres.join(", ")
-                    : artist.popularity != null
-                      ? `Popularity ${artist.popularity}/100`
-                      : "Spotify artist",
-                tertiaryText: formatHistoryDebugLine(artist),
-              },
-              artist.artist_id ?? `${artist.name}-${index}`,
-            )
-          ))}
-          {Array.from({ length: emptySlots(pageItems) }).map((_, index) => (
-            <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
-          ))}
-        </div>
-        {renderPaging(section, items.length)}
-      </>
+      <DashboardArtistColumn
+        section={section}
+        items={items}
+        available={available}
+        emptyCopy={emptyCopy}
+        unavailableCopy={unavailableCopy}
+        unavailableAction={unavailableAction}
+        sectionPage={sectionPages[section]}
+        moveSectionPage={moveSectionPage}
+        onSelectPreview={setSelectedPreview}
+      />
     );
   }
 
@@ -6799,46 +6767,18 @@ export function App() {
     unavailableCopy: string,
     unavailableAction?: ReactNode,
   ) {
-    if (!available) {
-      return (
-        <div className="section-unavailable">
-          <p className="empty-copy">{unavailableCopy}</p>
-          {unavailableAction ? <div className="section-unavailable-action">{unavailableAction}</div> : null}
-        </div>
-      );
-    }
-    if (items.length === 0) {
-      return <p className="empty-copy">{emptyCopy}</p>;
-    }
-
-    const pageItems = visibleItems(section, items);
     return (
-      <>
-        <div className="item-list">
-          {pageItems.map((album, index) =>
-            renderDashboardListCard(
-              {
-                href: album.url,
-                entityId: album.album_id,
-                imageUrl: album.image_url,
-                imageAlt: `${album.name ?? "Album"} cover`,
-                fallbackLabel: "A",
-                primaryText: album.name ?? "Unknown album",
-                secondaryText: album.artist_name ?? "Unknown artist",
-                tertiaryText:
-                  formatHistoryDebugLine(album) ??
-                  formatAlbumSummary(album),
-                metricText: formatAlbumBreadth(album),
-              },
-              album.album_id ?? `${album.name}-${index}-${section}`,
-            ),
-          )}
-          {Array.from({ length: emptySlots(pageItems) }).map((_, index) => (
-            <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
-          ))}
-        </div>
-        {renderPaging(section, items.length)}
-      </>
+      <DashboardAlbumColumn
+        section={section}
+        items={items}
+        available={available}
+        emptyCopy={emptyCopy}
+        unavailableCopy={unavailableCopy}
+        unavailableAction={unavailableAction}
+        sectionPage={sectionPages[section]}
+        moveSectionPage={moveSectionPage}
+        onSelectPreview={setSelectedPreview}
+      />
     );
   }
 
@@ -6850,40 +6790,18 @@ export function App() {
     unavailableCopy: string,
     paged: boolean = true,
   ) {
-    if (!available) {
-      return <p className="empty-copy">{unavailableCopy}</p>;
-    }
-    if (items.length === 0) {
-      return <p className="empty-copy">{emptyCopy}</p>;
-    }
-
-    const pageItems = paged ? visibleItems(section, items) : items;
     return (
-      <>
-        <div className="item-list">
-          {pageItems.map((playlist, index) =>
-            renderDashboardListCard(
-              {
-                href: playlist.url,
-                entityId: playlist.playlist_id,
-                imageUrl: playlist.image_url,
-                imageAlt: `${playlist.name ?? "Playlist"} cover`,
-                fallbackLabel: "P",
-                primaryText: playlist.name ?? "Untitled playlist",
-                primaryClamp: "two-line-clamp",
-                secondaryText: playlist.description?.trim() || null,
-                tertiaryText:
-                  playlist.track_count != null ? `${playlist.track_count} tracks` : "Playlist",
-              },
-              playlist.playlist_id ?? `${playlist.name}-${index}-${section}`,
-            ),
-          )}
-          {Array.from({ length: emptySlots(pageItems) }).map((_, index) => (
-            <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
-          ))}
-        </div>
-        {paged ? renderPaging(section, items.length) : null}
-      </>
+      <DashboardPlaylistColumn
+        section={section}
+        items={items}
+        available={available}
+        emptyCopy={emptyCopy}
+        unavailableCopy={unavailableCopy}
+        sectionPage={sectionPages[section]}
+        moveSectionPage={moveSectionPage}
+        onSelectPreview={setSelectedPreview}
+        paged={paged}
+      />
     );
   }
 
