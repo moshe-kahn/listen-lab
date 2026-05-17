@@ -101,7 +101,6 @@ import {
   MERGED_TRACK_SOURCE_FILTER_OPTIONS,
   PAGE_SIZE,
   PLAYER_RECENT_FETCH_LIMIT,
-  PLAYLISTS_PAGE_SIZE,
   PREVIEW_RAMP_DURATION_MS,
   PREVIEW_RAMP_START_VOLUME,
   PREVIEW_RAMP_STEP_MS,
@@ -139,6 +138,7 @@ import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfil
 import { DashboardAlbumColumn, DashboardArtistColumn, DashboardPlaylistColumn } from "./components/dashboard/DashboardColumns";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
 import { DashboardPaging } from "./components/dashboard/DashboardPaging";
+import { DashboardPlaylistsSection } from "./components/dashboard/DashboardPlaylistsSection";
 import { DualSectionCard } from "./components/dashboard/DualSectionCard";
 import {
   auditList,
@@ -6833,67 +6833,19 @@ export function App() {
       return null;
     }
 
-    const visiblePlaylists = visibleItemsWithPageSize(
-      "playlists",
-      profile.owned_playlists,
-      PLAYLISTS_PAGE_SIZE,
-    );
-    const playlistColumns = splitItems(visiblePlaylists);
-
     return (
-      <section className="info-card info-card-wide" id="playlists">
-        <button className="section-toggle section-toggle-header" onClick={() => toggleSection("playlists", "playlists")} type="button">
-          <h2>{renderSectionTitle("Playlists", "playlists")}</h2>
-        </button>
-        {openSections.playlists ? (
-          profile.owned_playlists_available ? (
-            profile.owned_playlists.length > 0 ? (
-              <div className="artists-grid">
-                <div className="artists-column">
-                  {renderPlaylistColumn(
-                    "playlists",
-                    playlistColumns.left,
-                    true,
-                    "No playlists were returned by Spotify for this account.",
-                    "",
-                    false,
-                  )}
-                </div>
-                <div className="artists-column">
-                  {playlistColumns.right.length > 0
-                    ? renderPlaylistColumn(
-                        "playlists",
-                        playlistColumns.right,
-                        true,
-                        "No playlists were returned by Spotify for this account.",
-                        "",
-                        false,
-                      )
-                    : <p className="empty-copy">No more playlists in this column yet.</p>}
-                </div>
-              </div>
-            ) : (
-              <p className="empty-copy">No playlists were returned by Spotify for this account.</p>
-            )
-          ) : (
-            <p className="empty-copy">
-              {quickUnavailableCopy("Playlist access is not available for this session yet. Log out and log back in to grant access.")}
-            </p>
-          )
-        ) : (
-          <div className="preview-strip">
-            {previewItems(profile.owned_playlists).map((item, index) =>
-              renderPreviewCard(item, `playlists-${item.image}-${index}`),
-            )}
-          </div>
-        )}
-        {openSections.playlists && profile.owned_playlists.length > PLAYLISTS_PAGE_SIZE
-          ? renderPagingWithPageSize("playlists", profile.owned_playlists.length, PLAYLISTS_PAGE_SIZE)
-          : null}
-        <button className="section-toggle section-toggle-footer" onClick={() => toggleSection("playlists", "playlists")} type="button">
-          <span>{openSections.playlists ? "^" : "v"}</span>
-        </button>
-      </section>
+      <DashboardPlaylistsSection
+        ownedPlaylists={profile.owned_playlists}
+        ownedPlaylistsAvailable={profile.owned_playlists_available}
+        playlistsOpen={openSections.playlists}
+        toggleSection={toggleSection}
+        visibleItemsWithPageSize={visibleItemsWithPageSize}
+        renderPlaylistColumn={renderPlaylistColumn}
+        renderSectionTitle={renderSectionTitle}
+        quickUnavailableCopy={quickUnavailableCopy}
+        renderPreviewCard={renderPreviewCard}
+        renderPagingWithPageSize={renderPagingWithPageSize}
+      />
     );
   }
 
