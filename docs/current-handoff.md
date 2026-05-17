@@ -4,62 +4,87 @@
 Start here in a new chat, then open only the docs relevant to the requested task.
 
 Recommended topic docs:
-- `docs/reference/refactor-notes.md` for the current backend `main.py` extraction map and the uncommitted frontend App extraction.
-- `docs/reference/drafts/entity-model-draft.md` for release/source/analysis identity, duplicate diagnostics, and merge preview/dry-run.
-- `docs/reference/spotify-catalog-backfill.md` for catalog enrichment, queue behavior, lookup, and backfill invariants.
+- `docs/reference/refactor-notes.md` for prior extraction notes.
+- `docs/reference/spotify-catalog-backfill.md` for catalog enrichment, lookup, and backfill invariants.
 - `docs/reference/raw-ingest.md` for raw play events, recent/history ingest, and fallback history text.
+- `docs/reference/drafts/entity-model-draft.md` for release/source/analysis identity and duplicate diagnostics.
 - `docs/reference/drafts/identity-audit-submission-contract.md` only when working on saved track-audit submissions.
 - `docs/reference/album-family-review-policy.md` only when working on album-family candidate review.
 
-Avoid reading every doc by default. Historical handoff details were moved into reference docs where they are durable.
+Avoid reading every doc by default.
 
 ## Current State
-Active branch: `ui-identity-audit-work`.
+Active branch: `frontend-app-refactor`.
 
 Branch status:
-- Ahead of `origin/ui-identity-audit-work` by 12 commits.
-- Latest commit: `cc6a224` (`Extract static metadata cache`).
+- Created from `playback-tweaks`.
+- Working tree is clean before this handoff update.
+- Latest commit before this branch: `5cd4c80` (`Fix startup player source priority`).
 - No backend, Vite frontend, or catalog worker process is known to be running.
 
-Working tree:
-- `docs/current-handoff.md` is being reworked in this doc cleanup.
-- Frontend refactor remains intentionally uncommitted:
-  - `frontend/src/App.tsx`
-  - `frontend/src/api/appApi.ts`
-  - `frontend/src/components/identityAudit/IdentityAuditDiagnostics.tsx`
-  - `frontend/src/components/identityAudit/IssueFeed.tsx`
-  - `frontend/src/constants/appConstants.ts`
-  - `frontend/src/types/appTypes.ts`
-  - `frontend/src/utils/identityAuditPrefs.ts`
+Playback state:
+- Recent playback queue/source work is committed on the branch history:
+  - `442a187` `Fix player queue fallback and duplicate live queue`
+  - `7f16f35` `Add Spotify queue playlist mirror backend`
+  - `497da99` `Sync ListenLab queue playlist before playback`
+  - `0303c97` `Play ListenLab queue from playlist context`
+  - `5cd4c80` `Fix startup player source priority`
+- Do not change playback behavior, SDK lifecycle, queue source priority, or queue semantics during the first frontend refactor slice.
 
-Backend `main.py` extraction status:
-- The recent backend helper extractions are committed.
-- `backend/app/main.py` is currently `4,742` lines / `193,125` bytes.
-- The extracted module map is documented in `docs/reference/refactor-notes.md`.
+Frontend App size:
+- `frontend/src/App.tsx`: `500,999` bytes / `11,402` lines.
+- Babel warns because this file exceeds 500 KB.
 
-Frontend App extraction status:
-- `frontend/src/App.tsx` is currently `11,367` lines / `498,613` bytes.
-- The uncommitted extraction scope and constraints are documented in `docs/reference/refactor-notes.md`.
+## Refactor Plan
+Goal: reduce `App.tsx` size and Codex context use with behavior-preserving slices.
 
-## Guardrails
-- Do not redesign Identity Audit in the current frontend refactor.
-- Do not change backend API contracts unless explicitly requested.
-- Keep identity resolution read-only unless the user explicitly asks for an apply/confirm/promote path.
-- If committing, stage only the requested scope. The frontend refactor is intentionally dirty until separately reviewed/committed.
+Largest embedded clusters in `App.tsx`:
+- App/global state and effects near the top of the component.
+- Playback/player logic and player menu JSX. This area changed recently; avoid first.
+- Navigation/auth/profile loading.
+- Search/catalog lookup helpers and preview openers.
+- Ranking/formula/dashboard pure helpers.
+- Dashboard card render helpers.
+- Identity Audit tabs and helpers. High payoff, but larger prop/state surface.
+- Catalog Backfill page.
+- Search / Lookup page.
+- Recent Debug page.
+- Data loaders/actions.
+- Main return and detail modal JSX.
 
-## Last Verified
-Backend static metadata extraction, before commit `cc6a224`:
-- `./.venv/bin/python -m py_compile backend/app/main.py backend/app/cache/static_metadata_cache.py`
-- `./.venv/bin/python -c "import backend.app.cache.static_metadata_cache; import backend.app.main; print('main import ok')"`
-- `./.venv/bin/python -m unittest discover -s backend/tests` (`328 tests OK`)
-- `git diff --check -- backend/app/main.py backend/app/cache/static_metadata_cache.py`
+Recommended first slice:
+- Extract pure, stateless dashboard/ranking/debug helpers into `frontend/src/utils/dashboardUtils.ts`.
+- Move only helpers that do not close over React state or setters.
+- Leave JSX render helpers, hooks, effects, playback functions, SDK lifecycle, and queue behavior in `App.tsx`.
 
-Frontend refactor, earlier in this branch:
+Likely first files:
+- `frontend/src/App.tsx`
+- `frontend/src/utils/dashboardUtils.ts`
+
+Later candidate files:
+- `frontend/src/components/recentDebug/RecentDebugPage.tsx`
+- `frontend/src/components/catalogBackfill/CatalogBackfillPage.tsx`
+- `frontend/src/components/searchLookup/SearchLookupPage.tsx`
+- `frontend/src/components/identityAudit/*Tab.tsx`
+
+## Verification
+Run after each refactor slice:
 - `cd frontend && npm run build`
 - `git diff --check`
 
-## Recommended Next Task
-Review the remaining frontend refactor and commit it if satisfied. If continuing extraction instead, extract one large Identity Audit view component at a time, starting with Track Mapping or Review Queue.
+For larger JSX/component slices, manually smoke check:
+- Dashboard loads.
+- Track/artist/album previews still open.
+- Identity Audit tab still renders.
+- Catalog/Search pages still load.
+- Player menu still opens, without changing playback behavior.
+
+## Guardrails
+- Do not touch playback hooks, Spotify SDK lifecycle, queue source logic, queue playlist sync, or `playTrackUri` in the first refactor slice.
+- Do not move stateful effects in the first slice.
+- Avoid changing render order or callback behavior.
+- Avoid splitting `types/appTypes.ts` in the same slice.
+- Stage only the requested files if committing.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Documents/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch `ui-identity-audit-work` is ahead by 12 backend extraction commits through `cc6a224`. Backend helper extractions are committed and documented in `docs/reference/refactor-notes.md`. The remaining intentional dirty work is the frontend App refactor plus current doc edits: `App.tsx` was reduced to `11,367` lines / `498,613` bytes by extracting API wrappers, Identity Audit issue/diagnostic components, constants, types, and prefs helpers. Do not redesign Identity Audit or change backend APIs.
+Continue in `/Users/kahntra/Documents/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Current branch is `frontend-app-refactor`, created from `playback-tweaks`; latest commit is `5cd4c80` (`Fix startup player source priority`). `App.tsx` is `500,999` bytes / `11,402` lines, and the next intended task is a behavior-preserving frontend refactor. First recommended slice: extract pure stateless dashboard/ranking/debug helpers to `frontend/src/utils/dashboardUtils.ts`. Do not touch playback behavior, SDK lifecycle, queue source priority, queue playlist sync, or `playTrackUri` in the first slice.
