@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type {
   SessionResponse,
   ProfileProgressResponse,
@@ -438,6 +438,16 @@ export function App() {
   const quickRecentAutoAttemptRef = useRef<string | null>(null);
   const hasPremiumPlayback = profile?.product?.toLowerCase() === "premium";
   const usingLivePlaybackSnapshot = Boolean(livePlaybackSnapshot);
+  const livePlaybackTrackSummary: PlayerTrackSummary | null = useMemo(() => (livePlaybackSnapshot
+    ? {
+      name: livePlaybackSnapshot.name ?? "Spotify Playback",
+      artists: (livePlaybackSnapshot.artist_names ?? []).join(", ") || "Unknown artist",
+      album: livePlaybackSnapshot.album_name ?? "Unknown album",
+      image: livePlaybackSnapshot.image_url ?? null,
+      uri: livePlaybackSnapshot.uri ?? null,
+      durationMs: Math.max(0, Number(livePlaybackSnapshot.duration_ms ?? 0)),
+    }
+    : null), [livePlaybackSnapshot]);
   const liveControlOverrideActive = Boolean(
     liveControlOverrideUntilMs != null
     && liveControlOverrideUntilMs > Date.now()
@@ -454,17 +464,11 @@ export function App() {
       || ((livePlaybackSnapshot?.device_name ?? "").toLocaleLowerCase().includes("listenlab"))
     ),
   );
+  const liveSpotifyPlaybackShouldOwnQueue = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice;
   const liveReadOnlyMode = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice && !liveControlOverrideActive;
   const shouldUseLiveSnapshotDisplay = liveReadOnlyMode || (usingLivePlaybackSnapshot && !currentTrack);
   const playerDisplayTrack: PlayerTrackSummary | null = shouldUseLiveSnapshotDisplay
-    ? {
-      name: livePlaybackSnapshot?.name ?? "Spotify Playback",
-      artists: (livePlaybackSnapshot?.artist_names ?? []).join(", ") || "Unknown artist",
-      album: livePlaybackSnapshot?.album_name ?? "Unknown album",
-      image: livePlaybackSnapshot?.image_url ?? null,
-      uri: livePlaybackSnapshot?.uri ?? null,
-      durationMs: Math.max(0, Number(livePlaybackSnapshot?.duration_ms ?? 0)),
-    }
+    ? livePlaybackTrackSummary
     : currentTrack;
   const playerDisplayPaused = shouldUseLiveSnapshotDisplay
     ? !Boolean(livePlaybackSnapshot?.is_playing)
@@ -2035,12 +2039,16 @@ export function App() {
       return;
     }
 
+    if (!liveSpotifyPlaybackShouldOwnQueue && playerQueueSource === "listenlab") {
+      return;
+    }
+
     if (playerQueueLoading) {
       return;
     }
 
     void loadPlayerQueueTracks();
-  }, [playerMenuOpen, profile, experienceMode, usingRecentLikedStartupFallback]);
+  }, [playerMenuOpen, profile, experienceMode, usingRecentLikedStartupFallback, liveSpotifyPlaybackShouldOwnQueue, playerQueueSource]);
 
   useEffect(() => {
     if (pendingSeekMs == null) {
@@ -2085,6 +2093,17 @@ export function App() {
     setPlaybackDurationMs(0);
   }, [currentTrack, hasPremiumPlayback, livePlaybackProbeComplete, profile, usingLivePlaybackSnapshot]);
 
+  useEffect(() => {
+    if (!liveSpotifyPlaybackShouldOwnQueue || !livePlaybackSnapshot || !livePlaybackTrackSummary) {
+      return;
+    }
+    setPlayerQueueSource("spotify");
+    setCurrentTrack(livePlaybackTrackSummary);
+    setPlaybackPaused(!Boolean(livePlaybackSnapshot.is_playing));
+    setPlaybackPositionMs(Math.max(0, Number(livePlaybackSnapshot.progress_ms ?? 0)));
+    setPlaybackDurationMs(Math.max(0, Number(livePlaybackSnapshot.duration_ms ?? 0)));
+  }, [livePlaybackSnapshot, livePlaybackTrackSummary, liveSpotifyPlaybackShouldOwnQueue]);
+
   async function playTrackUri(trackUri: string | null, positionMs = 0, options?: { syncQueuePlaylist?: boolean }) {
     if (!trackUri) {
       setPlayerError("This item does not have a playable Spotify track.");
@@ -2107,37 +2126,33 @@ export function App() {
     const deviceId = spotifyDeviceIdRef.current;
 
     const safePositionMs = Math.max(0, Math.floor(positionMs));
-    const payload = JSON.stringify(
-      syncedPlaylistUri
-        ? {
-          context_uri: syncedPlaylistUri,
-          offset: { uri: trackUri },
-          position_ms: safePositionMs,
-        }
-        : {
-          uris: [trackUri],
-          position_ms: safePositionMs,
-        },
-    );
+    const singleTrackPayload = JSON.stringify({
+      uris: [trackUri],
+      position_ms: safePositionMs,
+    });
+    const playlistContextPayload = syncedPlaylistUri
+      ? JSON.stringify({
+        context_uri: syncedPlaylistUri,
+        offset: { uri: trackUri },
+        position_ms: safePositionMs,
+      })
+      : null;
+    const preferredPayload = playlistContextPayload ?? singleTrackPayload;
     try {
       if (deviceId) {
-        await spotifyApiRequest("/me/player", {
-          method: "PUT",
-          body: JSON.stringify({ device_ids: [deviceId], play: false }),
-        });
         await spotifyApiRequest(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
           method: "PUT",
-          body: payload,
+          body: preferredPayload,
         });
         setPlayerError(null);
         return true;
       }
     } catch (primaryError) {
       try {
-        if (deviceId) {
+        if (deviceId && playlistContextPayload) {
           await spotifyApiRequest(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
             method: "PUT",
-            body: payload,
+            body: singleTrackPayload,
           });
           setPlayerError(null);
           return true;
@@ -2150,11 +2165,23 @@ export function App() {
     try {
       await spotifyApiRequest("/me/player/play", {
         method: "PUT",
-        body: payload,
+        body: preferredPayload,
       });
       setPlayerError(null);
       return true;
     } catch (fallbackError) {
+      if (playlistContextPayload) {
+        try {
+          await spotifyApiRequest("/me/player/play", {
+            method: "PUT",
+            body: singleTrackPayload,
+          });
+          setPlayerError(null);
+          return true;
+        } catch {
+          // Report the original fallback error below.
+        }
+      }
       setPlayerError(
         fallbackError instanceof Error
           ? fallbackError.message
@@ -2192,7 +2219,9 @@ export function App() {
 
   async function resumePlayback() {
     if (currentTrack?.uri && (playbackDurationMs <= 0 || currentTrack.durationMs <= 0)) {
-      return playTrackUri(currentTrack.uri, Math.max(0, playbackPositionMs));
+      return playTrackUri(currentTrack.uri, Math.max(0, playbackPositionMs), {
+        syncQueuePlaylist: playerQueueSource === "listenlab",
+      });
     }
     const player = spotifyPlayerRef.current;
     if (player) {
