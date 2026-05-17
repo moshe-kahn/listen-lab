@@ -136,6 +136,8 @@ import {
 } from "./api/appApi";
 import { syncQueuePlaylist } from "./api/playbackApi";
 import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfillPage";
+import { DashboardListCard } from "./components/dashboard/DashboardListCard";
+import { DashboardPaging } from "./components/dashboard/DashboardPaging";
 import {
   auditList,
   auditNumber,
@@ -3846,120 +3848,34 @@ export function App() {
   }
 
   function renderPagingWithPageSize(section: SectionKey, itemCount: number, pageSize: number) {
-    if (itemCount <= pageSize) {
-      return null;
-    }
-
     return (
-      <div className="section-nav">
-        <button
-          className="secondary-button"
-          disabled={sectionPages[section] === 0}
-          onClick={() => moveSectionPage(section, -1, itemCount, pageSize)}
-          type="button"
-        >
-          {"<"}
-        </button>
-        <span>
-          {sectionPages[section] + 1} / {Math.ceil(itemCount / pageSize)}
-        </span>
-        <button
-          className="secondary-button"
-          disabled={(sectionPages[section] + 1) * pageSize >= itemCount}
-          onClick={() => moveSectionPage(section, 1, itemCount, pageSize)}
-          type="button"
-        >
-          {">"}
-        </button>
-      </div>
+      <DashboardPaging
+        section={section}
+        itemCount={itemCount}
+        pageSize={pageSize}
+        sectionPage={sectionPages[section]}
+        moveSectionPage={moveSectionPage}
+      />
     );
   }
 
   function renderDashboardListCard(props: DashboardListCardProps, key: string) {
-    const {
-      href,
-      entityId,
-      imageUrl,
-      imageAlt,
-      fallbackLabel,
-    primaryText,
-    secondaryText,
-    tertiaryText,
-    metricText,
-    primaryBadgeText,
-    secondaryBadgeText,
-    trackUri,
-    previewTrack,
-    primaryClamp = "single-line-ellipsis",
-  } = props;
-    const previewKind: PreviewItem["kind"] = fallbackLabel === "T"
+    const previewKind: PreviewItem["kind"] = props.fallbackLabel === "T"
       ? "track"
-      : fallbackLabel === "A"
+      : props.fallbackLabel === "A"
         ? "artist"
-        : fallbackLabel === "P"
+        : props.fallbackLabel === "P"
           ? "playlist"
           : "album";
-    const secondaryValue = secondaryText && secondaryText.trim().length > 0 ? secondaryText : "\u00A0";
-    const tertiaryValue = tertiaryText && tertiaryText.trim().length > 0 ? tertiaryText : "\u00A0";
-    const secondaryPlaceholder = !(secondaryText && secondaryText.trim().length > 0);
-    const tertiaryPlaceholder = !(tertiaryText && tertiaryText.trim().length > 0);
 
     return (
-      <button
-        className="list-row list-link dashboard-card-row"
+      <DashboardListCard
         key={key}
-        onClick={() =>
-          setSelectedPreview({
-            image: imageUrl ?? null,
-            fallbackLabel,
-            label: primaryText,
-            meta: secondaryText ?? null,
-            detail: tertiaryText ?? null,
-            kind: previewKind,
-            entityId: entityId ?? null,
-            trackUri: previewKind === "track"
-              ? trackUriWithFallback(trackUri, previewTrack?.track_id ?? entityId ?? null)
-              : trackUri ?? null,
-            url: href ?? "",
-            trackId: previewTrack?.track_id ?? null,
-            albumId: previewTrack?.album_id ?? null,
-            artistName: previewTrack?.artist_name ?? null,
-            sourceTrack: previewTrack ?? null,
-          })}
-        type="button"
-      >
-        <div className="dashboard-card-layout">
-          <div className="list-primary">
-            {imageUrl ? (
-              <img alt={imageAlt} className="list-art" src={imageUrl} />
-            ) : (
-              <div className="list-art list-art-fallback" aria-hidden="true">
-                {fallbackLabel}
-              </div>
-            )}
-            <div className="card-copy">
-              <div className="card-primary-line">
-                <strong className={`card-primary ${primaryClamp}`}>{primaryText}</strong>
-                {primaryBadgeText ? <span className="card-inline-badge">{primaryBadgeText}</span> : null}
-                {secondaryBadgeText ? <span className="card-inline-badge">{secondaryBadgeText}</span> : null}
-              </div>
-              <p
-                aria-hidden={secondaryPlaceholder}
-                className={`card-secondary single-line-ellipsis${secondaryPlaceholder ? " card-line-placeholder" : ""}`}
-              >
-                {secondaryValue}
-              </p>
-              <p
-                aria-hidden={tertiaryPlaceholder}
-                className={`card-tertiary single-line-ellipsis${tertiaryPlaceholder ? " card-line-placeholder" : ""}`}
-              >
-                {tertiaryValue}
-              </p>
-            </div>
-          </div>
-          {metricText ? <div className="card-metric">{metricText}</div> : null}
-        </div>
-      </button>
+        {...props}
+        previewKind={previewKind}
+        previewTrackUri={trackUriWithFallback(props.trackUri, props.previewTrack?.track_id ?? props.entityId ?? null)}
+        onSelectPreview={setSelectedPreview}
+      />
     );
   }
 
