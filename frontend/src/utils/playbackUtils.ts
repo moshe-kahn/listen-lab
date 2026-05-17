@@ -1,6 +1,8 @@
 import { PLAYER_RECENT_FETCH_LIMIT } from "../constants/appConstants";
 import type { PlayerQueueTrack, PlayerTrackSummary, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
 
+export const QUEUE_PLAYLIST_URI_LIMIT = 100;
+
 export function currentTrackFromState(state: SpotifyPlayerState): PlayerTrackSummary {
   const current = state.track_window.current_track;
   return {
@@ -86,6 +88,19 @@ export function queueRepeatsTrack(queueTracks: PlayerQueueTrack[], trackUri: str
       || (trackUri && track.uri && track.uri === trackUri),
     );
   });
+}
+
+export function queuePlaylistTrackUris(currentTrackUri: string | null, queueTracks: PlayerQueueTrack[]) {
+  const uris: string[] = [];
+  for (const uri of [currentTrackUri, ...queueTracks.map((track) => track.uri)]) {
+    if (uri?.startsWith("spotify:track:")) {
+      uris.push(uri);
+    }
+    if (uris.length >= QUEUE_PLAYLIST_URI_LIMIT) {
+      break;
+    }
+  }
+  return uris;
 }
 
 export function trackUriWithFallback(trackUri: string | null | undefined, trackId: string | null | undefined) {

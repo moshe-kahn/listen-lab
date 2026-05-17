@@ -138,6 +138,7 @@ import {
   fetchIdentityAuditSavedSubmissionById,
   fetchIdentityAuditSavedSubmissionDryRun
 } from "./api/appApi";
+import { syncQueuePlaylist } from "./api/playbackApi";
 import {
   auditList,
   auditNumber,
@@ -165,6 +166,7 @@ import {
   currentTrackFromState,
   dedupeRecentTracksForPlayer,
   formatPlaybackClock,
+  queuePlaylistTrackUris,
   queueRepeatsTrack,
   recentTracksToPlayerQueueTracks,
   spotifyTrackIdFromUri,
@@ -225,6 +227,8 @@ export function App() {
   const [playerRecentTracksLoading, setPlayerRecentTracksLoading] = useState(false);
   const [playerRecentTracksError, setPlayerRecentTracksError] = useState<string | null>(null);
   const [playerQueueTracks, setPlayerQueueTracks] = useState<PlayerQueueTrack[]>([]);
+  const [playerQueueSource, setPlayerQueueSource] = useState<"listenlab" | "spotify" | null>(null);
+  const [queuePlaylistUri, setQueuePlaylistUri] = useState<string | null>(null);
   const [playerQueueLoading, setPlayerQueueLoading] = useState(false);
   const [playerQueueError, setPlayerQueueError] = useState<string | null>(null);
   const [activePlayerListenEventId, setActivePlayerListenEventId] = useState<number | null>(null);
@@ -2026,6 +2030,7 @@ export function App() {
 
     if (usingRecentLikedStartupFallback) {
       setPlayerQueueTracks(recentTracksToPlayerQueueTracks(profile.recent_likes_tracks.slice(1)));
+      setPlayerQueueSource("listenlab");
       setPlayerQueueError(null);
       return;
     }
@@ -2080,10 +2085,22 @@ export function App() {
     setPlaybackDurationMs(0);
   }, [currentTrack, hasPremiumPlayback, livePlaybackProbeComplete, profile, usingLivePlaybackSnapshot]);
 
-  async function playTrackUri(trackUri: string | null, positionMs = 0) {
+  async function playTrackUri(trackUri: string | null, positionMs = 0, options?: { syncQueuePlaylist?: boolean }) {
     if (!trackUri) {
       setPlayerError("This item does not have a playable Spotify track.");
       return false;
+    }
+    if (options?.syncQueuePlaylist && playerQueueSource === "listenlab") {
+      const queuePlaylistUris = queuePlaylistTrackUris(trackUri, playerQueueTracks);
+      if (queuePlaylistUris.length > 0) {
+        try {
+          const playlist = await syncQueuePlaylist(queuePlaylistUris);
+          setQueuePlaylistUri(playlist.playlist_uri ?? null);
+        } catch (error) {
+          setQueuePlaylistUri(null);
+          console.warn("ListenLab queue playlist sync failed; falling back to single-track playback.", error);
+        }
+      }
     }
     const deviceId = spotifyDeviceIdRef.current;
 
@@ -2304,7 +2321,7 @@ export function App() {
         return true;
       }
 
-      const playbackStarted = await playTrackUri(trackUri);
+      const playbackStarted = await playTrackUri(trackUri, 0, { syncQueuePlaylist: true });
       if (!playbackStarted) {
         return false;
       }
@@ -2667,6 +2684,9 @@ export function App() {
     setOpenSections(INITIAL_OPEN_SECTIONS);
     setSectionPages(INITIAL_SECTION_PAGES);
     setRateLimitMenuOpen(false);
+    setPlayerQueueTracks([]);
+    setPlayerQueueSource(null);
+    setQueuePlaylistUri(null);
     setReloadCooldownUntil(null);
     setReloadCooldownDurationMs(60_000);
     if (nextMode === "local") {
@@ -2831,6 +2851,9 @@ export function App() {
         setLivePlaybackProbeComplete(false);
         setLiveControlOverrideUntilMs(null);
         setCurrentTrack(null);
+        setPlayerQueueTracks([]);
+        setPlayerQueueSource(null);
+        setQueuePlaylistUri(null);
         setPlayerReady(false);
         setStatusMessage("Not connected yet. Use Spotify login to start the auth flow.");
         setStatusHistory([]);
@@ -4531,6 +4554,9 @@ export function App() {
     setBrandMenuOpen(false);
     setPlayerMenuOpen(false);
     setCurrentTrack(null);
+    setPlayerQueueTracks([]);
+    setPlayerQueueSource(null);
+    setQueuePlaylistUri(null);
     setPlayerReady(false);
     setListeningLogTracks([]);
     setListeningLogHasMore(false);
@@ -9509,6 +9535,8 @@ export function App() {
   async function loadPlayerQueueTracks() {
     if (experienceMode === "local") {
       setPlayerQueueTracks([]);
+      setPlayerQueueSource(null);
+      setQueuePlaylistUri(null);
       setPlayerQueueError(null);
       return;
     }
@@ -9553,8 +9581,10 @@ export function App() {
         }))
         .slice(0, PLAYER_RECENT_FETCH_LIMIT);
       setPlayerQueueTracks(queueRepeatsTrack(liveQueueTracks, currentTrack?.uri) ? [] : liveQueueTracks);
+      setPlayerQueueSource("spotify");
     } catch (error) {
       setPlayerQueueTracks([]);
+      setPlayerQueueSource(null);
       setPlayerQueueError(formatUiErrorMessage(error, "Failed to load Spotify queue."));
     } finally {
       setPlayerQueueLoading(false);
