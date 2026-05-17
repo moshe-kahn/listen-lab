@@ -2090,12 +2090,14 @@ export function App() {
       setPlayerError("This item does not have a playable Spotify track.");
       return false;
     }
+    let syncedPlaylistUri: string | null = null;
     if (options?.syncQueuePlaylist && playerQueueSource === "listenlab") {
       const queuePlaylistUris = queuePlaylistTrackUris(trackUri, playerQueueTracks);
       if (queuePlaylistUris.length > 0) {
         try {
           const playlist = await syncQueuePlaylist(queuePlaylistUris);
-          setQueuePlaylistUri(playlist.playlist_uri ?? null);
+          syncedPlaylistUri = playlist.playlist_uri?.startsWith("spotify:playlist:") ? playlist.playlist_uri : null;
+          setQueuePlaylistUri(syncedPlaylistUri);
         } catch (error) {
           setQueuePlaylistUri(null);
           console.warn("ListenLab queue playlist sync failed; falling back to single-track playback.", error);
@@ -2104,10 +2106,19 @@ export function App() {
     }
     const deviceId = spotifyDeviceIdRef.current;
 
-    const payload = JSON.stringify({
-      uris: [trackUri],
-      position_ms: Math.max(0, Math.floor(positionMs)),
-    });
+    const safePositionMs = Math.max(0, Math.floor(positionMs));
+    const payload = JSON.stringify(
+      syncedPlaylistUri
+        ? {
+          context_uri: syncedPlaylistUri,
+          offset: { uri: trackUri },
+          position_ms: safePositionMs,
+        }
+        : {
+          uris: [trackUri],
+          position_ms: safePositionMs,
+        },
+    );
     try {
       if (deviceId) {
         await spotifyApiRequest("/me/player", {
