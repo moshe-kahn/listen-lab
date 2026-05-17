@@ -82,6 +82,27 @@ export function recentRangeLabel(range: RecentRange) {
   return RECENT_RANGE_OPTIONS.find((option) => option.value === range)?.label ?? "Recent";
 }
 
+export function representativeReasonMessage(reason: string | null, kind: "artist" | "album") {
+  switch (reason) {
+    case "spotify_rejected_lookup":
+      return "Spotify rejected the lookup for this item, so no representative song could be loaded.";
+    case "item_not_found":
+      return `Spotify did not return a matching ${kind} for this item.`;
+    case "rate_limited":
+      return "Spotify rate-limited this lookup. Try again in a moment.";
+    case "spotify_lookup_failed":
+      return "Spotify did not return usable data for this lookup.";
+    case "no_representative_track":
+      return kind === "artist"
+        ? "Spotify did not return a top song for this artist."
+        : "Spotify did not return a representative song for this album.";
+    case "request_failed":
+      return "The app could not load a representative song for this item.";
+    default:
+      return "No representative song was found for this item.";
+  }
+}
+
 export function albumLookupRowIsNotBackfilled(item: AlbumCatalogLookupItem): boolean {
   return item.catalog_fetched_at === null && item.catalog_last_status === null && item.catalog_last_error === null;
 }
@@ -292,6 +313,14 @@ export function previewItems(
 
 export function emptySlots<T>(items: T[]) {
   return Math.max(0, PAGE_SIZE - items.length);
+}
+
+export function splitItems<T>(items: T[]) {
+  const midpoint = Math.ceil(items.length / 2);
+  return {
+    left: items.slice(0, midpoint),
+    right: items.slice(midpoint),
+  };
 }
 
 export function formatAlbumSummary(album: TopAlbum) {

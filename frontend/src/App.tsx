@@ -221,7 +221,9 @@ import {
   primaryArtistName,
   queueStatusLabel,
   recentRangeLabel,
+  representativeReasonMessage,
   rowIsPendingQueue,
+  splitItems,
   sortedTracksForView,
   trackEstimatedMs,
   trackLookupRowCanBulkPrioritize,
@@ -1617,27 +1619,6 @@ export function App() {
       cancelled = true;
     };
   }, [experienceMode, profile?.recent_likes_tracks, profile?.recent_top_tracks, profile?.recent_tracks, profile?.top_tracks, selectedPreview, spotifyCooldownActive]);
-
-  function representativeReasonMessage(reason: string | null, kind: "artist" | "album") {
-    switch (reason) {
-      case "spotify_rejected_lookup":
-        return "Spotify rejected the lookup for this item, so no representative song could be loaded.";
-      case "item_not_found":
-        return `Spotify did not return a matching ${kind} for this item.`;
-      case "rate_limited":
-        return "Spotify rate-limited this lookup. Try again in a moment.";
-      case "spotify_lookup_failed":
-        return "Spotify did not return usable data for this lookup.";
-      case "no_representative_track":
-        return kind === "artist"
-          ? "Spotify did not return a top song for this artist."
-          : "Spotify did not return a representative song for this album.";
-      case "request_failed":
-        return "The app could not load a representative song for this item.";
-      default:
-        return "No representative song was found for this item.";
-    }
-  }
 
   async function fetchPlaybackToken() {
     if (experienceMode === "local") {
@@ -8270,14 +8251,6 @@ export function App() {
         {paged ? renderPaging(section, items.length) : null}
       </>
     );
-  }
-
-  function splitItems<T>(items: T[]) {
-    const midpoint = Math.ceil(items.length / 2);
-    return {
-      left: items.slice(0, midpoint),
-      right: items.slice(midpoint),
-    };
   }
 
   function renderDualSectionCard(props: {
