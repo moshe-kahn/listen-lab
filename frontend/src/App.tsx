@@ -151,6 +151,7 @@ import {
   issueSeverityForCount,
   type NormalizedAuditIssue,
 } from "./components/identityAudit/IssueFeed";
+import { FullAnalysisOverlay, LoadingScreen } from "./components/loading/LoadingScreens";
 import { RecentDebugPage } from "./components/recentDebug/RecentDebugPage";
 import { SearchLookupPage } from "./components/searchLookup/SearchLookupPage";
 import {
@@ -7094,113 +7095,14 @@ export function App() {
     );
   }
 
-  function renderLoadingScreen() {
-    const latestHistory = statusHistory.length > 0 ? statusHistory[statusHistory.length - 1] : null;
-    const loadingLabel =
-      statusMessage && !statusMessage.startsWith("Spotify login succeeded")
-        ? statusMessage
-        : latestHistory ?? "Analyzing your music...";
-    const analyzingStage = loadingLabel.toLowerCase().startsWith("analyzing");
-    const quickLoadMode = analysisMode === "quick" && !analyzingStage;
-
-    return (
-      <main className="app-shell">
-        <section className={`loading-screen${showRateLimitReload && !reloadReady ? " loading-screen-error" : ""}`}>
-          <div className="loading-graphic" aria-hidden="true">
-            <div className={`loading-headphones${showRateLimitReload && !reloadReady ? " loading-headphones-error" : ""}`}>
-              <div className="loading-headphones-band" />
-              <div className="loading-headphones-cup loading-headphones-cup-left" />
-              <div className="loading-headphones-cup loading-headphones-cup-right" />
-            </div>
-          </div>
-          <p className="eyebrow">ListenLab</p>
-          <h1>{quickLoadMode ? "Loading your Spotify profile" : "Your music is being analyzed"}</h1>
-          <p className="loading-copy two-line-clamp">
-            {quickLoadMode
-              ? "We're starting with a lighter profile view so you can get in quickly."
-              : "We're pulling together your recent activity, favorites, and history-backed listening patterns."}
-          </p>
-          <p className="loading-phase single-line-ellipsis">{loadingLabel}</p>
-          {renderCooldownRetryControl()}
-        </section>
-      </main>
-    );
-  }
-
-  function renderCooldownRetryControl() {
-    if (!showRateLimitReload) {
-      return null;
+  function handleCooldownRetry() {
+    setReloadCooldownUntil(null);
+    setReloadCooldownDurationMs(60_000);
+    if (!profile) {
+      void loadProfile();
+      return;
     }
-
-    return (
-      <div className="loading-retry-row">
-        <button
-          className={`secondary-button loading-retry-button${reloadReady ? " loading-retry-button-ready" : ""}`}
-          aria-label={reloadReady ? "Reload" : "Waiting for Spotify cooldown"}
-          disabled={!reloadReady || loadingProfile || loadingRecentSection || loadingExtendedProfile}
-          onClick={() => {
-            setReloadCooldownUntil(null);
-            setReloadCooldownDurationMs(60_000);
-            if (!profile) {
-              void loadProfile();
-              return;
-            }
-            void refreshRecentSection(recentRange);
-          }}
-          style={{ opacity: 0.35 + reloadProgress * 0.65 }}
-          type="button"
-        >
-          <span
-            className="loading-retry-clock"
-            aria-hidden="true"
-            style={{ ["--reload-progress" as string]: `${reloadProgress * 360}deg` }}
-          >
-            <span className="loading-retry-clock-face">
-              <span className="loading-retry-clock-groove loading-retry-clock-groove-outer" />
-              <span className="loading-retry-clock-groove loading-retry-clock-groove-inner" />
-              <span className="loading-retry-clock-pie" />
-              <span className="loading-retry-clock-center-ring" />
-              <span className="loading-retry-clock-center">
-                {reloadReady ? "\u21bb" : ""}
-              </span>
-            </span>
-          </span>
-        </button>
-      </div>
-    );
-  }
-
-  function renderFullAnalysisOverlay() {
-    const latestHistory = statusHistory.length > 0 ? statusHistory[statusHistory.length - 1] : null;
-    const loadingLabel =
-      statusMessage && !statusMessage.startsWith("Spotify login succeeded")
-        ? statusMessage
-        : latestHistory ?? "Analyzing your music...";
-    const analyzingStage = loadingLabel.toLowerCase().startsWith("analyzing");
-    const quickLoadMode = analysisMode === "quick" && !analyzingStage;
-
-    return (
-      <div className="loading-overlay-backdrop" role="status" aria-live="polite">
-        <section className={`loading-screen${showRateLimitReload ? " loading-screen-error" : ""}`}>
-          <div className="loading-graphic" aria-hidden="true">
-            <div className={`loading-headphones${showRateLimitReload ? " loading-headphones-error" : ""}`}>
-              <div className="loading-headphones-band" />
-              <div className="loading-headphones-cup loading-headphones-cup-left" />
-              <div className="loading-headphones-cup loading-headphones-cup-right" />
-            </div>
-          </div>
-          <p className="eyebrow">ListenLab</p>
-          <h1>{quickLoadMode ? "Loading your Spotify profile" : "Your music is being analyzed"}</h1>
-          <p className="loading-copy two-line-clamp">
-            {quickLoadMode
-              ? "We're starting with a lighter profile view so you can get in quickly."
-              : "We're pulling together your recent activity, favorites, and history-backed listening patterns."}
-          </p>
-          <p className="loading-phase single-line-ellipsis">{loadingLabel}</p>
-          {renderCooldownRetryControl()}
-        </section>
-      </div>
-    );
+    void refreshRecentSection(recentRange);
   }
 
   async function loadFullAnalysis() {
@@ -8065,12 +7967,38 @@ export function App() {
     "Connect your account and browse the listening, library, and profile details Spotify already makes available to ListenLab.";
 
   if (showLoadingScreen) {
-    return renderLoadingScreen();
+    return (
+      <LoadingScreen
+        statusHistory={statusHistory}
+        statusMessage={statusMessage}
+        analysisMode={analysisMode}
+        showRateLimitReload={showRateLimitReload}
+        reloadReady={reloadReady}
+        reloadProgress={reloadProgress}
+        loadingProfile={loadingProfile}
+        loadingRecentSection={loadingRecentSection}
+        loadingExtendedProfile={loadingExtendedProfile}
+        onCooldownRetry={handleCooldownRetry}
+      />
+    );
   }
 
   return (
     <>
-      {profile && loadingExtendedProfile ? renderFullAnalysisOverlay() : null}
+      {profile && loadingExtendedProfile ? (
+        <FullAnalysisOverlay
+          statusHistory={statusHistory}
+          statusMessage={statusMessage}
+          analysisMode={analysisMode}
+          showRateLimitReload={showRateLimitReload}
+          reloadReady={reloadReady}
+          reloadProgress={reloadProgress}
+          loadingProfile={loadingProfile}
+          loadingRecentSection={loadingRecentSection}
+          loadingExtendedProfile={loadingExtendedProfile}
+          onCooldownRetry={handleCooldownRetry}
+        />
+      ) : null}
       <main className="app-shell">
         <section className="hero-card">
         {!profile ? (
