@@ -139,6 +139,7 @@ import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfil
 import { DashboardAlbumColumn, DashboardArtistColumn, DashboardPlaylistColumn } from "./components/dashboard/DashboardColumns";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
 import { DashboardPaging } from "./components/dashboard/DashboardPaging";
+import { DualSectionCard } from "./components/dashboard/DualSectionCard";
 import {
   auditList,
   auditNumber,
@@ -6817,46 +6818,13 @@ export function App() {
     previewItemsRight: PreviewItem[];
     collapsedPreviewItems?: PreviewItem[];
   }) {
-    const {
-      title,
-      section,
-      anchorId,
-      leftTitle,
-      rightTitle,
-      leftContent,
-      rightContent,
-      previewItemsLeft,
-      previewItemsRight,
-      collapsedPreviewItems,
-    } = props;
-
     return (
-      <section className="info-card info-card-wide" id={anchorId}>
-        <button className="section-toggle section-toggle-header" onClick={() => toggleSection(section, anchorId)} type="button">
-          <h2>{title}</h2>
-        </button>
-        {openSections[section] ? (
-          <div className="artists-grid">
-            <div className="artists-column">
-              {typeof leftTitle === "string" ? <h3>{leftTitle}</h3> : leftTitle}
-              {leftContent}
-            </div>
-            <div className="artists-column">
-              {typeof rightTitle === "string" ? <h3>{rightTitle}</h3> : rightTitle}
-              {rightContent}
-            </div>
-          </div>
-        ) : (
-          <div className="preview-strip">
-            {(collapsedPreviewItems ?? previewItemsLeft.concat(previewItemsRight)).slice(0, 5).map((item, index) =>
-              renderPreviewCard(item, `${String(typeof title === "string" ? title : "section")}-${item.image}-${index}`),
-            )}
-          </div>
-        )}
-        <button className="section-toggle section-toggle-footer" onClick={() => toggleSection(section, anchorId)} type="button">
-          <span>{openSections[section] ? "^" : "v"}</span>
-        </button>
-      </section>
+      <DualSectionCard
+        {...props}
+        isOpen={openSections[props.section]}
+        toggleSection={toggleSection}
+        renderPreviewCard={renderPreviewCard}
+      />
     );
   }
 
