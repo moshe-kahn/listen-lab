@@ -5,8 +5,6 @@ import type {
   RecentTrack,
   MatchCounts,
   TopPlaylist,
-  FollowedArtist,
-  TopAlbum,
   ProfileResponse,
   RecentSectionResponse,
   RecentArchiveResponse,
@@ -3870,29 +3868,6 @@ export function App() {
     );
   }
 
-  function renderArtistColumn(
-    section: SectionKey,
-    items: FollowedArtist[],
-    available: boolean,
-    emptyCopy: string,
-    unavailableCopy: string,
-    unavailableAction?: ReactNode,
-  ) {
-    return (
-      <DashboardArtistColumn
-        section={section}
-        items={items}
-        available={available}
-        emptyCopy={emptyCopy}
-        unavailableCopy={unavailableCopy}
-        unavailableAction={unavailableAction}
-        sectionPage={sectionPages[section]}
-        moveSectionPage={moveSectionPage}
-        onSelectPreview={setSelectedPreview}
-      />
-    );
-  }
-
   function renderTrackColumn(
     section: SectionKey,
     items: RecentTrack[],
@@ -6705,51 +6680,6 @@ export function App() {
     );
   }
 
-  function renderAlbumColumn(
-    section: SectionKey,
-    items: TopAlbum[],
-    available: boolean,
-    emptyCopy: string,
-    unavailableCopy: string,
-    unavailableAction?: ReactNode,
-  ) {
-    return (
-      <DashboardAlbumColumn
-        section={section}
-        items={items}
-        available={available}
-        emptyCopy={emptyCopy}
-        unavailableCopy={unavailableCopy}
-        unavailableAction={unavailableAction}
-        sectionPage={sectionPages[section]}
-        moveSectionPage={moveSectionPage}
-        onSelectPreview={setSelectedPreview}
-      />
-    );
-  }
-
-  function renderDualSectionCard(props: {
-    title: ReactNode;
-    section: SectionKey;
-    anchorId: string;
-    leftTitle: ReactNode;
-    rightTitle: ReactNode;
-    leftContent: ReactNode;
-    rightContent: ReactNode;
-    previewItemsLeft: PreviewItem[];
-    previewItemsRight: PreviewItem[];
-    collapsedPreviewItems?: PreviewItem[];
-  }) {
-    return (
-      <DualSectionCard
-        {...props}
-        isOpen={openSections[props.section]}
-        toggleSection={toggleSection}
-        renderPreviewCard={renderPreviewCard}
-      />
-    );
-  }
-
   function handleCooldownRetry() {
     setReloadCooldownUntil(null);
     setReloadCooldownDurationMs(60_000);
@@ -8395,17 +8325,17 @@ export function App() {
               </div>
             ) : (
             <div className="dashboard-grid">
-              {renderDualSectionCard({
-                title: renderSectionTitle("Activity", "recent_likes"),
-                section: "recent",
-                anchorId: "activity",
-                leftTitle: (
+              <DualSectionCard
+                title={renderSectionTitle("Activity", "recent_likes")}
+                section="recent"
+                anchorId="activity"
+                leftTitle={(
                   <div className="section-column-header">
                     <h3>Recently played</h3>
                   </div>
-                ),
-                rightTitle: renderSectionTitle("Recently liked", "recent_likes"),
-                leftContent: renderTrackColumn(
+                )}
+                rightTitle={renderSectionTitle("Recently liked", "recent_likes")}
+                leftContent={renderTrackColumn(
                   "recent",
                   profile.recent_tracks,
                   profile.recent_tracks_available,
@@ -8423,8 +8353,8 @@ export function App() {
                       {loadingRecentSection ? "Refreshing..." : "Reload this section"}
                     </button>
                   ) : null,
-                ),
-                rightContent: renderTrackColumn(
+                )}
+                rightContent={renderTrackColumn(
                   "likes",
                   profile.recent_likes_tracks,
                   profile.recent_likes_available,
@@ -8442,33 +8372,36 @@ export function App() {
                       {loadingRecentSection ? "Refreshing..." : "Reload this section"}
                     </button>
                   ) : null,
-                ),
-                previewItemsLeft: previewItems(profile.recent_tracks),
-                previewItemsRight: previewItems(profile.recent_likes_tracks),
-                collapsedPreviewItems: previewItems(collapseRecentPreviewTracks(profile.recent_tracks)),
-              })}
+                )}
+                previewItemsLeft={previewItems(profile.recent_tracks)}
+                previewItemsRight={previewItems(profile.recent_likes_tracks)}
+                collapsedPreviewItems={previewItems(collapseRecentPreviewTracks(profile.recent_tracks))}
+                isOpen={openSections.recent}
+                toggleSection={toggleSection}
+                renderPreviewCard={renderPreviewCard}
+              />
 
-              {renderDualSectionCard({
-                title: renderSectionTitle("Tracks"),
-                section: "tracks",
-                anchorId: "tracks",
-                leftTitle: (
+              <DualSectionCard
+                title={renderSectionTitle("Tracks")}
+                section="tracks"
+                anchorId="tracks"
+                leftTitle={(
                   <div className="section-column-header">
                     <h3>All time</h3>
                     <div className="section-column-header-actions">
                       {renderTrackRankingToggle()}
                     </div>
                   </div>
-                ),
-                rightTitle: renderRecentRangeHeader(),
-                leftContent: renderTrackColumn(
+                )}
+                rightTitle={renderRecentRangeHeader()}
+                leftContent={renderTrackColumn(
                   "tracksAllTime",
                   profile.top_tracks,
                   profile.top_tracks_available,
                   "Spotify returned no top tracks for this account.",
                   quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
-                ),
-                rightContent: renderTrackColumn(
+                )}
+                rightContent={renderTrackColumn(
                   "tracksRecent",
                   profile.recent_top_tracks,
                   profile.recent_top_tracks_available,
@@ -8488,92 +8421,121 @@ export function App() {
                       {loadingRecentSection ? "Refreshing..." : "Reload this section"}
                     </button>
                   ) : null,
-                ),
-                previewItemsLeft: previewItems(profile.top_tracks),
-                previewItemsRight: previewItems(profile.recent_top_tracks),
-                collapsedPreviewItems: previewItems(
+                )}
+                previewItemsLeft={previewItems(profile.top_tracks)}
+                previewItemsRight={previewItems(profile.recent_top_tracks)}
+                collapsedPreviewItems={previewItems(
                   collapseTrackPreviewAlbums([
                     ...profile.top_tracks,
                     ...profile.recent_top_tracks,
                   ]),
-                ),
-              })}
+                )}
+                isOpen={openSections.tracks}
+                toggleSection={toggleSection}
+                renderPreviewCard={renderPreviewCard}
+              />
 
-              {renderDualSectionCard({
-                title: renderSectionTitle("Artists"),
-                section: "artists",
-                anchorId: "artists",
-                leftTitle: "All time",
-                rightTitle: renderRecentRangeHeader(),
-                leftContent: renderArtistColumn(
-                  "artistsAllTime",
-                  profile.followed_artists,
-                  profile.followed_artists_list_available,
-                  "Spotify returned no top artists for this account.",
-                  quickUnavailableCopy("Top artists are not available for this session yet. Log out and log back in to grant access."),
-                ),
-                rightContent: renderArtistColumn(
-                  "artistsRecent",
-                  profile.recent_top_artists,
-                  profile.recent_top_artists_available,
-                  "Spotify returned no recent top artists for this account.",
-                  recentUnavailableCopy(
-                    experienceMode === "local"
-                      ? "Recent top artists are unavailable in restricted local mode."
-                      : "Recent top artists are not available for this session yet. Log out and log back in to grant access.",
-                  ),
-                  analysisMode === "quick" && experienceMode === "full" ? (
-                    <button
-                      className="secondary-button inline-reload-button"
-                      disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection()}
-                      type="button"
-                    >
-                      {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                    </button>
-                  ) : null,
-                ),
-                previewItemsLeft: previewItems(profile.followed_artists),
-                previewItemsRight: previewItems(profile.recent_top_artists),
-              })}
+              <DualSectionCard
+                title={renderSectionTitle("Artists")}
+                section="artists"
+                anchorId="artists"
+                leftTitle="All time"
+                rightTitle={renderRecentRangeHeader()}
+                leftContent={(
+                  <DashboardArtistColumn
+                    section="artistsAllTime"
+                    items={profile.followed_artists}
+                    available={profile.followed_artists_list_available}
+                    emptyCopy="Spotify returned no top artists for this account."
+                    unavailableCopy={quickUnavailableCopy("Top artists are not available for this session yet. Log out and log back in to grant access.")}
+                    sectionPage={sectionPages.artistsAllTime}
+                    moveSectionPage={moveSectionPage}
+                    onSelectPreview={setSelectedPreview}
+                  />
+                )}
+                rightContent={(
+                  <DashboardArtistColumn
+                    section="artistsRecent"
+                    items={profile.recent_top_artists}
+                    available={profile.recent_top_artists_available}
+                    emptyCopy="Spotify returned no recent top artists for this account."
+                    unavailableCopy={recentUnavailableCopy(
+                      experienceMode === "local"
+                        ? "Recent top artists are unavailable in restricted local mode."
+                        : "Recent top artists are not available for this session yet. Log out and log back in to grant access.",
+                    )}
+                    unavailableAction={analysisMode === "quick" && experienceMode === "full" ? (
+                      <button
+                        className="secondary-button inline-reload-button"
+                        disabled={loadingRecentSection}
+                        onClick={() => void refreshRecentSection()}
+                        type="button"
+                      >
+                        {loadingRecentSection ? "Refreshing..." : "Reload this section"}
+                      </button>
+                    ) : null}
+                    sectionPage={sectionPages.artistsRecent}
+                    moveSectionPage={moveSectionPage}
+                    onSelectPreview={setSelectedPreview}
+                  />
+                )}
+                previewItemsLeft={previewItems(profile.followed_artists)}
+                previewItemsRight={previewItems(profile.recent_top_artists)}
+                isOpen={openSections.artists}
+                toggleSection={toggleSection}
+                renderPreviewCard={renderPreviewCard}
+              />
 
-              {renderDualSectionCard({
-                title: renderSectionTitle("Albums"),
-                section: "albums",
-                anchorId: "albums",
-                leftTitle: "All time",
-                rightTitle: renderRecentRangeHeader(),
-                leftContent: renderAlbumColumn(
-                  "albumsAllTime",
-                  profile.top_albums,
-                  profile.top_albums_available,
-                  "Spotify returned no top albums for this account.",
-                  quickUnavailableCopy("Top albums are not available for this session yet. Log out and log back in to grant access."),
-                ),
-                rightContent: renderAlbumColumn(
-                  "albumsRecent",
-                  profile.recent_top_albums,
-                  profile.recent_top_albums_available,
-                  "Spotify returned no recent top albums for this account.",
-                  recentUnavailableCopy(
-                    experienceMode === "local"
-                      ? "Recent top albums are unavailable in restricted local mode."
-                      : "Recent top albums are not available for this session yet. Log out and log back in to grant access.",
-                  ),
-                  analysisMode === "quick" && experienceMode === "full" ? (
-                    <button
-                      className="secondary-button inline-reload-button"
-                      disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection()}
-                      type="button"
-                    >
-                      {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                    </button>
-                  ) : null,
-                ),
-                previewItemsLeft: previewItems(profile.top_albums),
-                previewItemsRight: previewItems(profile.recent_top_albums),
-              })}
+              <DualSectionCard
+                title={renderSectionTitle("Albums")}
+                section="albums"
+                anchorId="albums"
+                leftTitle="All time"
+                rightTitle={renderRecentRangeHeader()}
+                leftContent={(
+                  <DashboardAlbumColumn
+                    section="albumsAllTime"
+                    items={profile.top_albums}
+                    available={profile.top_albums_available}
+                    emptyCopy="Spotify returned no top albums for this account."
+                    unavailableCopy={quickUnavailableCopy("Top albums are not available for this session yet. Log out and log back in to grant access.")}
+                    sectionPage={sectionPages.albumsAllTime}
+                    moveSectionPage={moveSectionPage}
+                    onSelectPreview={setSelectedPreview}
+                  />
+                )}
+                rightContent={(
+                  <DashboardAlbumColumn
+                    section="albumsRecent"
+                    items={profile.recent_top_albums}
+                    available={profile.recent_top_albums_available}
+                    emptyCopy="Spotify returned no recent top albums for this account."
+                    unavailableCopy={recentUnavailableCopy(
+                      experienceMode === "local"
+                        ? "Recent top albums are unavailable in restricted local mode."
+                        : "Recent top albums are not available for this session yet. Log out and log back in to grant access.",
+                    )}
+                    unavailableAction={analysisMode === "quick" && experienceMode === "full" ? (
+                      <button
+                        className="secondary-button inline-reload-button"
+                        disabled={loadingRecentSection}
+                        onClick={() => void refreshRecentSection()}
+                        type="button"
+                      >
+                        {loadingRecentSection ? "Refreshing..." : "Reload this section"}
+                      </button>
+                    ) : null}
+                    sectionPage={sectionPages.albumsRecent}
+                    moveSectionPage={moveSectionPage}
+                    onSelectPreview={setSelectedPreview}
+                  />
+                )}
+                previewItemsLeft={previewItems(profile.top_albums)}
+                previewItemsRight={previewItems(profile.recent_top_albums)}
+                isOpen={openSections.albums}
+                toggleSection={toggleSection}
+                renderPreviewCard={renderPreviewCard}
+              />
 
               {profile ? (
                 <DashboardPlaylistsSection
