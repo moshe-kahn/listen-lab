@@ -5,7 +5,6 @@ import type {
   RecentTrack,
   MatchCounts,
   TopPlaylist,
-  OwnedPlaylist,
   FollowedArtist,
   TopAlbum,
   ProfileResponse,
@@ -135,7 +134,7 @@ import {
 } from "./api/appApi";
 import { syncQueuePlaylist } from "./api/playbackApi";
 import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfillPage";
-import { DashboardAlbumColumn, DashboardArtistColumn, DashboardPlaylistColumn } from "./components/dashboard/DashboardColumns";
+import { DashboardAlbumColumn, DashboardArtistColumn } from "./components/dashboard/DashboardColumns";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
 import { DashboardPaging } from "./components/dashboard/DashboardPaging";
 import { DashboardPlaylistsSection } from "./components/dashboard/DashboardPlaylistsSection";
@@ -6729,29 +6728,6 @@ export function App() {
     );
   }
 
-  function renderPlaylistColumn(
-    section: SectionKey,
-    items: OwnedPlaylist[],
-    available: boolean,
-    emptyCopy: string,
-    unavailableCopy: string,
-    paged: boolean = true,
-  ) {
-    return (
-      <DashboardPlaylistColumn
-        section={section}
-        items={items}
-        available={available}
-        emptyCopy={emptyCopy}
-        unavailableCopy={unavailableCopy}
-        sectionPage={sectionPages[section]}
-        moveSectionPage={moveSectionPage}
-        onSelectPreview={setSelectedPreview}
-        paged={paged}
-      />
-    );
-  }
-
   function renderDualSectionCard(props: {
     title: ReactNode;
     section: SectionKey;
@@ -6770,27 +6746,6 @@ export function App() {
         isOpen={openSections[props.section]}
         toggleSection={toggleSection}
         renderPreviewCard={renderPreviewCard}
-      />
-    );
-  }
-
-  function renderPlaylistsSection() {
-    if (!profile) {
-      return null;
-    }
-
-    return (
-      <DashboardPlaylistsSection
-        ownedPlaylists={profile.owned_playlists}
-        ownedPlaylistsAvailable={profile.owned_playlists_available}
-        playlistsOpen={openSections.playlists}
-        toggleSection={toggleSection}
-        visibleItemsWithPageSize={visibleItemsWithPageSize}
-        renderPlaylistColumn={renderPlaylistColumn}
-        renderSectionTitle={renderSectionTitle}
-        quickUnavailableCopy={quickUnavailableCopy}
-        renderPreviewCard={renderPreviewCard}
-        renderPagingWithPageSize={renderPagingWithPageSize}
       />
     );
   }
@@ -8620,7 +8575,21 @@ export function App() {
                 previewItemsRight: previewItems(profile.recent_top_albums),
               })}
 
-              {renderPlaylistsSection()}
+              {profile ? (
+                <DashboardPlaylistsSection
+                  ownedPlaylists={profile.owned_playlists}
+                  ownedPlaylistsAvailable={profile.owned_playlists_available}
+                  playlistsOpen={openSections.playlists}
+                  toggleSection={toggleSection}
+                  sectionPage={sectionPages.playlists}
+                  moveSectionPage={moveSectionPage}
+                  onSelectPreview={setSelectedPreview}
+                  visibleItemsWithPageSize={visibleItemsWithPageSize}
+                  renderSectionTitle={renderSectionTitle}
+                  quickUnavailableCopy={quickUnavailableCopy}
+                  renderPreviewCard={renderPreviewCard}
+                />
+              ) : null}
             </div>
             )}
           </>

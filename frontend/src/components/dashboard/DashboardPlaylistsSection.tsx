@@ -2,25 +2,21 @@ import type { ReactNode } from "react";
 import type { OwnedPlaylist, PreviewItem, SectionKey } from "../../types/appTypes";
 import { PLAYLISTS_PAGE_SIZE } from "../../constants/appConstants";
 import { previewItems, splitItems } from "../../utils/dashboardUtils";
+import { DashboardPlaylistColumn } from "./DashboardColumns";
+import { DashboardPaging } from "./DashboardPaging";
 
 type DashboardPlaylistsSectionProps = {
   ownedPlaylists: OwnedPlaylist[];
   ownedPlaylistsAvailable: boolean;
   playlistsOpen: boolean;
   toggleSection: (section: SectionKey, anchorId?: string) => void;
+  sectionPage: number;
+  moveSectionPage: (section: SectionKey, direction: -1 | 1, itemCount: number, pageSize?: number) => void;
+  onSelectPreview: (preview: PreviewItem) => void;
   visibleItemsWithPageSize: <T>(section: SectionKey, items: T[], pageSize: number) => T[];
-  renderPlaylistColumn: (
-    section: SectionKey,
-    items: OwnedPlaylist[],
-    available: boolean,
-    emptyCopy: string,
-    unavailableCopy: string,
-    paged?: boolean,
-  ) => ReactNode;
   renderSectionTitle: (title: string, staleSection?: string) => ReactNode;
   quickUnavailableCopy: (defaultCopy: string) => string;
   renderPreviewCard: (item: PreviewItem, key: string) => ReactNode;
-  renderPagingWithPageSize: (section: SectionKey, itemCount: number, pageSize: number) => ReactNode;
 };
 
 export function DashboardPlaylistsSection({
@@ -28,12 +24,13 @@ export function DashboardPlaylistsSection({
   ownedPlaylistsAvailable,
   playlistsOpen,
   toggleSection,
+  sectionPage,
+  moveSectionPage,
+  onSelectPreview,
   visibleItemsWithPageSize,
-  renderPlaylistColumn,
   renderSectionTitle,
   quickUnavailableCopy,
   renderPreviewCard,
-  renderPagingWithPageSize,
 }: DashboardPlaylistsSectionProps) {
   const visiblePlaylists = visibleItemsWithPageSize(
     "playlists",
@@ -52,25 +49,33 @@ export function DashboardPlaylistsSection({
           ownedPlaylists.length > 0 ? (
             <div className="artists-grid">
               <div className="artists-column">
-                {renderPlaylistColumn(
-                  "playlists",
-                  playlistColumns.left,
-                  true,
-                  "No playlists were returned by Spotify for this account.",
-                  "",
-                  false,
-                )}
+                <DashboardPlaylistColumn
+                  section="playlists"
+                  items={playlistColumns.left}
+                  available={true}
+                  emptyCopy="No playlists were returned by Spotify for this account."
+                  unavailableCopy=""
+                  sectionPage={sectionPage}
+                  moveSectionPage={moveSectionPage}
+                  onSelectPreview={onSelectPreview}
+                  paged={false}
+                />
               </div>
               <div className="artists-column">
                 {playlistColumns.right.length > 0
-                  ? renderPlaylistColumn(
-                      "playlists",
-                      playlistColumns.right,
-                      true,
-                      "No playlists were returned by Spotify for this account.",
-                      "",
-                      false,
-                    )
+                  ? (
+                    <DashboardPlaylistColumn
+                      section="playlists"
+                      items={playlistColumns.right}
+                      available={true}
+                      emptyCopy="No playlists were returned by Spotify for this account."
+                      unavailableCopy=""
+                      sectionPage={sectionPage}
+                      moveSectionPage={moveSectionPage}
+                      onSelectPreview={onSelectPreview}
+                      paged={false}
+                    />
+                  )
                   : <p className="empty-copy">No more playlists in this column yet.</p>}
               </div>
             </div>
@@ -90,7 +95,15 @@ export function DashboardPlaylistsSection({
         </div>
       )}
       {playlistsOpen && ownedPlaylists.length > PLAYLISTS_PAGE_SIZE
-        ? renderPagingWithPageSize("playlists", ownedPlaylists.length, PLAYLISTS_PAGE_SIZE)
+        ? (
+          <DashboardPaging
+            section="playlists"
+            itemCount={ownedPlaylists.length}
+            pageSize={PLAYLISTS_PAGE_SIZE}
+            sectionPage={sectionPage}
+            moveSectionPage={moveSectionPage}
+          />
+        )
         : null}
       <button className="section-toggle section-toggle-footer" onClick={() => toggleSection("playlists", "playlists")} type="button">
         <span>{playlistsOpen ? "^" : "v"}</span>
