@@ -134,7 +134,6 @@ import { syncQueuePlaylist } from "./api/playbackApi";
 import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfillPage";
 import { DashboardAlbumColumn, DashboardArtistColumn } from "./components/dashboard/DashboardColumns";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
-import { DashboardPaging } from "./components/dashboard/DashboardPaging";
 import { DashboardPlaylistsSection } from "./components/dashboard/DashboardPlaylistsSection";
 import { DashboardTrackColumn } from "./components/dashboard/DashboardTrackColumn";
 import { DualSectionCard } from "./components/dashboard/DualSectionCard";
@@ -3443,30 +3442,6 @@ export function App() {
     return items.slice(start, start + pageSize);
   }
 
-  function renderPreviewCard(item: PreviewItem, key: string) {
-    return (
-      <button
-        className="preview-card"
-        key={key}
-        onClick={() => setSelectedPreview(item)}
-        type="button"
-      >
-        {item.image ? (
-          <img alt={item.label} className="preview-thumb" src={item.image} />
-        ) : (
-          <div className="preview-thumb preview-thumb-fallback" aria-hidden="true">
-            {item.fallbackLabel ?? item.label.slice(0, 1).toUpperCase()}
-          </div>
-        )}
-        <span className="preview-overlay">
-          <span className="preview-label">{item.label}</span>
-          {item.meta ? <span className="preview-meta">{item.meta}</span> : null}
-          {item.detail ? <span className="preview-detail">{item.detail}</span> : null}
-        </span>
-      </button>
-    );
-  }
-
   function recentUnavailableCopy(defaultCopy: string) {
     if (experienceMode === "local") {
       return "Recent sections in restricted local mode come from local history data only.";
@@ -3832,22 +3807,6 @@ export function App() {
     setIdentityAuditLastLoadedAt(null);
   }
 
-  function renderPaging(section: SectionKey, itemCount: number) {
-    return renderPagingWithPageSize(section, itemCount, PAGE_SIZE);
-  }
-
-  function renderPagingWithPageSize(section: SectionKey, itemCount: number, pageSize: number) {
-    return (
-      <DashboardPaging
-        section={section}
-        itemCount={itemCount}
-        pageSize={pageSize}
-        sectionPage={sectionPages[section]}
-        moveSectionPage={moveSectionPage}
-      />
-    );
-  }
-
   function renderDashboardListCard(props: DashboardListCardProps, key: string) {
     const previewKind: PreviewItem["kind"] = props.fallbackLabel === "T"
       ? "track"
@@ -3889,9 +3848,10 @@ export function App() {
         paged={paged}
         presorted={presorted}
         trackRankingMode={trackRankingMode}
+        sectionPage={sectionPages[section]}
+        moveSectionPage={moveSectionPage}
         visibleItems={visibleItems}
         renderDashboardListCard={renderDashboardListCard}
-        renderPaging={renderPaging}
       />
     );
   }
@@ -8378,7 +8338,7 @@ export function App() {
                 collapsedPreviewItems={previewItems(collapseRecentPreviewTracks(profile.recent_tracks))}
                 isOpen={openSections.recent}
                 toggleSection={toggleSection}
-                renderPreviewCard={renderPreviewCard}
+                onSelectPreview={setSelectedPreview}
               />
 
               <DualSectionCard
@@ -8432,7 +8392,7 @@ export function App() {
                 )}
                 isOpen={openSections.tracks}
                 toggleSection={toggleSection}
-                renderPreviewCard={renderPreviewCard}
+                onSelectPreview={setSelectedPreview}
               />
 
               <DualSectionCard
@@ -8483,7 +8443,7 @@ export function App() {
                 previewItemsRight={previewItems(profile.recent_top_artists)}
                 isOpen={openSections.artists}
                 toggleSection={toggleSection}
-                renderPreviewCard={renderPreviewCard}
+                onSelectPreview={setSelectedPreview}
               />
 
               <DualSectionCard
@@ -8534,7 +8494,7 @@ export function App() {
                 previewItemsRight={previewItems(profile.recent_top_albums)}
                 isOpen={openSections.albums}
                 toggleSection={toggleSection}
-                renderPreviewCard={renderPreviewCard}
+                onSelectPreview={setSelectedPreview}
               />
 
               {profile ? (
@@ -8549,7 +8509,6 @@ export function App() {
                   visibleItemsWithPageSize={visibleItemsWithPageSize}
                   renderSectionTitle={renderSectionTitle}
                   quickUnavailableCopy={quickUnavailableCopy}
-                  renderPreviewCard={renderPreviewCard}
                 />
               ) : null}
             </div>

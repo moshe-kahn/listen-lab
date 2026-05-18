@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { DashboardListCardProps, RecentTrack, SectionKey, TrackRankingMode } from "../../types/appTypes";
+import { PAGE_SIZE } from "../../constants/appConstants";
 import {
   capTracksPerAlbum,
   emptySlots,
@@ -9,6 +10,7 @@ import {
   formatTrackSourceBadge,
   sortedTracksForView,
 } from "../../utils/dashboardUtils";
+import { DashboardPaging } from "./DashboardPaging";
 
 type DashboardTrackColumnProps = {
   section: SectionKey;
@@ -20,9 +22,10 @@ type DashboardTrackColumnProps = {
   paged: boolean;
   presorted: boolean;
   trackRankingMode: TrackRankingMode;
+  sectionPage: number;
+  moveSectionPage: (section: SectionKey, direction: -1 | 1, itemCount: number, pageSize?: number) => void;
   visibleItems: <T>(section: SectionKey, items: T[]) => T[];
   renderDashboardListCard: (props: DashboardListCardProps, key: string) => ReactNode;
-  renderPaging: (section: SectionKey, itemCount: number) => ReactNode;
 };
 
 export function DashboardTrackColumn({
@@ -35,9 +38,10 @@ export function DashboardTrackColumn({
   paged,
   presorted,
   trackRankingMode,
+  sectionPage,
+  moveSectionPage,
   visibleItems,
   renderDashboardListCard,
-  renderPaging,
 }: DashboardTrackColumnProps) {
   if (!available) {
     return (
@@ -99,7 +103,15 @@ export function DashboardTrackColumn({
           <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
         ))}
       </div>
-      {paged ? renderPaging(section, cappedRows.length) : null}
+      {paged ? (
+        <DashboardPaging
+          section={section}
+          itemCount={cappedRows.length}
+          pageSize={PAGE_SIZE}
+          sectionPage={sectionPage}
+          moveSectionPage={moveSectionPage}
+        />
+      ) : null}
     </>
   );
 }

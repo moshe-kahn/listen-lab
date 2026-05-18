@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { PreviewItem, SectionKey } from "../../types/appTypes";
+import { PreviewCard } from "./PreviewCard";
 
 type DualSectionCardProps = {
   title: ReactNode;
@@ -14,7 +15,7 @@ type DualSectionCardProps = {
   collapsedPreviewItems?: PreviewItem[];
   isOpen: boolean;
   toggleSection: (section: SectionKey, anchorId?: string) => void;
-  renderPreviewCard: (item: PreviewItem, key: string) => ReactNode;
+  onSelectPreview: (item: PreviewItem) => void;
 };
 
 export function DualSectionCard({
@@ -30,7 +31,7 @@ export function DualSectionCard({
   collapsedPreviewItems,
   isOpen,
   toggleSection,
-  renderPreviewCard,
+  onSelectPreview,
 }: DualSectionCardProps) {
   return (
     <section className="info-card info-card-wide" id={anchorId}>
@@ -51,7 +52,11 @@ export function DualSectionCard({
       ) : (
         <div className="preview-strip">
           {(collapsedPreviewItems ?? previewItemsLeft.concat(previewItemsRight)).slice(0, 5).map((item, index) =>
-            renderPreviewCard(item, `${String(typeof title === "string" ? title : "section")}-${item.image}-${index}`),
+            <PreviewCard
+              item={item}
+              key={`${String(typeof title === "string" ? title : "section")}-${item.image}-${index}`}
+              onSelectPreview={onSelectPreview}
+            />,
           )}
         </div>
       )}

@@ -4,6 +4,7 @@ import { PLAYLISTS_PAGE_SIZE } from "../../constants/appConstants";
 import { previewItems, splitItems } from "../../utils/dashboardUtils";
 import { DashboardPlaylistColumn } from "./DashboardColumns";
 import { DashboardPaging } from "./DashboardPaging";
+import { PreviewCard } from "./PreviewCard";
 
 type DashboardPlaylistsSectionProps = {
   ownedPlaylists: OwnedPlaylist[];
@@ -16,7 +17,6 @@ type DashboardPlaylistsSectionProps = {
   visibleItemsWithPageSize: <T>(section: SectionKey, items: T[], pageSize: number) => T[];
   renderSectionTitle: (title: string, staleSection?: string) => ReactNode;
   quickUnavailableCopy: (defaultCopy: string) => string;
-  renderPreviewCard: (item: PreviewItem, key: string) => ReactNode;
 };
 
 export function DashboardPlaylistsSection({
@@ -30,7 +30,6 @@ export function DashboardPlaylistsSection({
   visibleItemsWithPageSize,
   renderSectionTitle,
   quickUnavailableCopy,
-  renderPreviewCard,
 }: DashboardPlaylistsSectionProps) {
   const visiblePlaylists = visibleItemsWithPageSize(
     "playlists",
@@ -90,7 +89,11 @@ export function DashboardPlaylistsSection({
       ) : (
         <div className="preview-strip">
           {previewItems(ownedPlaylists).map((item, index) =>
-            renderPreviewCard(item, `playlists-${item.image}-${index}`),
+            <PreviewCard
+              item={item}
+              key={`playlists-${item.image}-${index}`}
+              onSelectPreview={onSelectPreview}
+            />,
           )}
         </div>
       )}
