@@ -95,13 +95,11 @@ import {
   LIVE_PLAYBACK_POLL_INTERVAL_MS,
   LIVE_PLAYBACK_PROGRESS_TICK_MS,
   LIVE_TRACK_END_RECENT_POLL_DELAY_MS,
-  MERGED_TRACK_SOURCE_FILTER_OPTIONS,
   PAGE_SIZE,
   PLAYER_RECENT_FETCH_LIMIT,
   PREVIEW_RAMP_DURATION_MS,
   PREVIEW_RAMP_START_VOLUME,
   PREVIEW_RAMP_STEP_MS,
-  RANK_MOVEMENT_FILTER_OPTIONS,
   RECENT_RANGE_OPTIONS,
   RECENT_SECTION_FETCH_LIMIT,
   githubRepoUrl,
@@ -133,6 +131,7 @@ import {
 import { syncQueuePlaylist } from "./api/playbackApi";
 import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfillPage";
 import { DashboardAlbumColumn, DashboardArtistColumn } from "./components/dashboard/DashboardColumns";
+import { MergedTrackSourceFilterToggle, RankMovementFilterToggle, TrackRankingToggle } from "./components/dashboard/DashboardControls";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
 import { DashboardPlaylistsSection } from "./components/dashboard/DashboardPlaylistsSection";
 import { DashboardTrackColumn } from "./components/dashboard/DashboardTrackColumn";
@@ -3325,81 +3324,40 @@ export function App() {
 
   function renderTrackRankingToggle() {
     const showTrackRankingSpinner = trackRankingRefreshPending;
-    const selectTrackRankingMode = (nextMode: TrackRankingMode) => {
-      if (nextMode === trackRankingMode) {
-        return;
-      }
-      setTrackRankingRefreshPending(true);
-      setSectionPages((current) => ({
-        ...current,
-        tracksAllTime: 0,
-      }));
-      setTrackRankingMode(nextMode);
-    };
-
     return (
-      <div className="track-ranking-toggle" role="group" aria-label="Top track ranking mode">
-        {showTrackRankingSpinner ? (
-          <span className="recent-range-vinyl-spinner" aria-hidden="true">
-            <span className="recent-range-vinyl-center" />
-          </span>
-        ) : null}
-        <button
-          className={`track-ranking-chip${trackRankingMode === "plays" ? " track-ranking-chip-active" : ""}`}
-          onClick={() => selectTrackRankingMode("plays")}
-          type="button"
-        >
-          Plays
-        </button>
-        <button
-          className={`track-ranking-chip${trackRankingMode === "mix" ? " track-ranking-chip-active" : ""}`}
-          onClick={() => selectTrackRankingMode("mix")}
-          type="button"
-        >
-          Mix
-        </button>
-        <button
-          className={`track-ranking-chip${trackRankingMode === "longevity" ? " track-ranking-chip-active" : ""}`}
-          onClick={() => selectTrackRankingMode("longevity")}
-          type="button"
-        >
-          Longevity
-        </button>
-      </div>
+      <TrackRankingToggle
+        trackRankingMode={trackRankingMode}
+        showTrackRankingSpinner={showTrackRankingSpinner}
+        onSelectTrackRankingMode={(nextMode) => {
+          if (nextMode === trackRankingMode) {
+            return;
+          }
+          setTrackRankingRefreshPending(true);
+          setSectionPages((current) => ({
+            ...current,
+            tracksAllTime: 0,
+          }));
+          setTrackRankingMode(nextMode);
+        }}
+      />
     );
   }
 
   function renderMergedTrackSourceFilterToggle() {
     return (
-      <div className="track-ranking-toggle" role="group" aria-label="Merged track source filter">
-        {MERGED_TRACK_SOURCE_FILTER_OPTIONS.map((option) => (
-          <button
-            className={`track-ranking-chip${mergedTrackSourceFilter === option.value ? " track-ranking-chip-active" : ""}`}
-            key={option.value}
-            onClick={() => setMergedTrackSourceFilter(option.value)}
-            type="button"
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
+      <MergedTrackSourceFilterToggle
+        mergedTrackSourceFilter={mergedTrackSourceFilter}
+        setMergedTrackSourceFilter={setMergedTrackSourceFilter}
+      />
     );
   }
 
   function renderRankMovementFilterToggle() {
     return (
-      <div className="track-ranking-toggle" role="group" aria-label="Formula rank movement filter">
-        {RANK_MOVEMENT_FILTER_OPTIONS.map((option) => (
-          <button
-            className={`track-ranking-chip${rankMovementFilter === option.value ? " track-ranking-chip-active" : ""}`}
-            key={option.value}
-            onClick={() => setRankMovementFilter(option.value)}
-            type="button"
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
+      <RankMovementFilterToggle
+        rankMovementFilter={rankMovementFilter}
+        setRankMovementFilter={setRankMovementFilter}
+      />
     );
   }
 
