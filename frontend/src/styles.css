@@ -867,6 +867,15 @@ h1 {
   width: 100%;
 }
 
+.player-queue-controls {
+  gap: 8px;
+  margin-top: -14px;
+}
+
+.player-queue-controls .secondary-button {
+  min-width: 96px;
+}
+
 .primary-button,
 .secondary-button {
   border-radius: 999px;
@@ -2160,6 +2169,37 @@ h1 {
 .player-menu-title-button:hover {
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.player-menu-title-scroll {
+  container-type: inline-size;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.player-menu-title-scroll > span {
+  display: inline-block;
+  animation: player-title-scroll 9s ease-in-out infinite alternate;
+}
+
+.player-menu-title-scroll:hover > span,
+.player-menu-title-scroll:focus-visible > span {
+  animation-play-state: paused;
+}
+
+@keyframes player-title-scroll {
+  0%,
+  22% {
+    transform: translateX(0);
+  }
+
+  78%,
+  100% {
+    transform: translateX(min(0px, calc(100cqw - 100%)));
+  }
 }
 
 .player-menu-line {

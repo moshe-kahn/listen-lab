@@ -496,7 +496,16 @@ export function App() {
   );
   const liveSpotifyPlaybackShouldOwnQueue = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice;
   const liveReadOnlyMode = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice && !liveControlOverrideActive;
-  const shouldUseLiveSnapshotDisplay = liveReadOnlyMode || (usingLivePlaybackSnapshot && !currentTrack);
+  const liveSnapshotTrackUri = livePlaybackTrackSummary?.uri ?? null;
+  const currentTrackUri = currentTrack?.uri ?? null;
+  const liveSnapshotIsDifferentTrack = Boolean(
+    liveSnapshotTrackUri
+    && currentTrackUri
+    && liveSnapshotTrackUri !== currentTrackUri,
+  );
+  const shouldUseLiveSnapshotDisplay = liveReadOnlyMode
+    || (usingLivePlaybackSnapshot && !currentTrack)
+    || (usingLivePlaybackSnapshot && liveSnapshotIsDifferentTrack && !liveControlOverrideActive);
   const playerDisplayTrack: PlayerTrackSummary | null = shouldUseLiveSnapshotDisplay
     ? livePlaybackTrackSummary
     : currentTrack;
@@ -1204,12 +1213,6 @@ export function App() {
   }, [experienceMode, livePlaybackSnapshot?.is_playing, session?.authenticated, usingLivePlaybackSnapshot]);
 
   useEffect(() => {
-    if (usingLivePlaybackSnapshot && pendingSeekMs != null) {
-      setPendingSeekMs(null);
-    }
-  }, [pendingSeekMs, usingLivePlaybackSnapshot]);
-
-  useEffect(() => {
     if (!recentIngestCallbackPending) {
       return;
     }
@@ -1621,6 +1624,18 @@ export function App() {
     });
     if (!response.ok && response.status !== 204) {
       throw new Error(`Spotify playback request failed (${response.status}).`);
+    }
+  }
+
+  async function activatePlayerElement() {
+    const player = spotifyPlayerRef.current;
+    if (!player?.activateElement) {
+      return;
+    }
+    try {
+      await player.activateElement();
+    } catch {
+      // Browser activation is best-effort; playback calls still provide the real error.
     }
   }
 
@@ -2049,24 +2064,28 @@ export function App() {
   }, [currentTrack, hasPremiumPlayback, livePlaybackProbeComplete, profile, usingLivePlaybackSnapshot]);
 
   useEffect(() => {
-    if (!liveSpotifyPlaybackShouldOwnQueue || !livePlaybackSnapshot || !livePlaybackTrackSummary) {
+    if (!livePlaybackSnapshot || !livePlaybackTrackSummary || liveControlOverrideActive) {
       return;
     }
-    setPlayerQueueSource("spotify");
+    if (liveSpotifyPlaybackShouldOwnQueue) {
+      setPlayerQueueSource("spotify");
+    }
     setCurrentTrack(livePlaybackTrackSummary);
     setPlaybackPaused(!Boolean(livePlaybackSnapshot.is_playing));
     setPlaybackPositionMs(Math.max(0, Number(livePlaybackSnapshot.progress_ms ?? 0)));
     setPlaybackDurationMs(Math.max(0, Number(livePlaybackSnapshot.duration_ms ?? 0)));
-  }, [livePlaybackSnapshot, livePlaybackTrackSummary, liveSpotifyPlaybackShouldOwnQueue]);
+  }, [liveControlOverrideActive, livePlaybackSnapshot, livePlaybackTrackSummary, liveSpotifyPlaybackShouldOwnQueue]);
 
-  async function playTrackUri(trackUri: string | null, positionMs = 0, options?: { syncQueuePlaylist?: boolean }) {
+  async function playTrackUri(trackUri: string | null, positionMs = 0, options?: { syncQueuePlaylist?: boolean; queuePlaylistUris?: string[] | null }) {
+    await activatePlayerElement();
     if (!trackUri) {
       setPlayerError("This item does not have a playable Spotify track.");
       return false;
     }
     let syncedPlaylistUri: string | null = null;
-    if (options?.syncQueuePlaylist && playerQueueSource === "listenlab") {
-      const queuePlaylistUris = queuePlaylistTrackUris(trackUri, playerQueueTracks);
+    const explicitQueuePlaylistUris = options?.queuePlaylistUris?.filter((uri) => uri.startsWith("spotify:track:")) ?? null;
+    if (explicitQueuePlaylistUris || (options?.syncQueuePlaylist && playerQueueSource === "listenlab")) {
+      const queuePlaylistUris = explicitQueuePlaylistUris ?? queuePlaylistTrackUris(trackUri, playerQueueTracks);
       if (queuePlaylistUris.length > 0) {
         try {
           const playlist = await syncQueuePlaylist(queuePlaylistUris);
@@ -2173,6 +2192,7 @@ export function App() {
   }
 
   async function resumePlayback() {
+    await activatePlayerElement();
     if (currentTrack?.uri && (playbackDurationMs <= 0 || currentTrack.durationMs <= 0)) {
       return playTrackUri(currentTrack.uri, Math.max(0, playbackPositionMs), {
         syncQueuePlaylist: playerQueueSource === "listenlab",
@@ -2210,6 +2230,7 @@ export function App() {
   }
 
   async function togglePlayerPlayback() {
+    await activatePlayerElement();
     try {
       let updated = false;
       if (playbackPaused) {
@@ -2227,6 +2248,7 @@ export function App() {
   }
 
   async function takeOverPlaybackFromLiveSnapshot() {
+    await activatePlayerElement();
     const deviceId = spotifyDeviceIdRef.current;
 
     try {
@@ -2264,6 +2286,7 @@ export function App() {
   }
 
   async function takeOverAndPausePlayback() {
+    await activatePlayerElement();
     const deviceId = spotifyDeviceIdRef.current;
     try {
       if (deviceId) {
@@ -2281,19 +2304,21 @@ export function App() {
     }
   }
 
-  function handlePlayerPrimaryButtonClick() {
+  async function handlePlayerPrimaryButtonClick() {
+    await activatePlayerElement();
     if (!liveReadOnlyMode) {
-      void togglePlayerPlayback();
+      await togglePlayerPlayback();
       return;
     }
     if (!playerDisplayPaused) {
-      void takeOverAndPausePlayback();
+      await takeOverAndPausePlayback();
       return;
     }
-    void takeOverPlaybackFromLiveSnapshot();
+    await takeOverPlaybackFromLiveSnapshot();
   }
 
   async function handlePopupTrackPlayback(trackUri: string | null, options?: PopupTrackPlaybackOptions) {
+    await activatePlayerElement();
     clearPreviewPlaybackState();
     if (!trackUri) {
       setPlayerError("This item does not have a playable Spotify track.");
@@ -2316,7 +2341,10 @@ export function App() {
         return true;
       }
 
-      const playbackStarted = await playTrackUri(trackUri, 0, { syncQueuePlaylist: true });
+      const playbackStarted = await playTrackUri(trackUri, 0, {
+        queuePlaylistUris: options?.queuePlaylistUris,
+        syncQueuePlaylist: true,
+      });
       if (!playbackStarted) {
         return false;
       }
@@ -2346,6 +2374,11 @@ export function App() {
       setPlaybackPaused(false);
       setPlaybackPositionMs(0);
       setPlaybackDurationMs(Math.max(0, options?.optimisticTrack?.durationMs ?? 0));
+      if (options?.queueTracks) {
+        setPlayerQueueTracks(options.queueTracks);
+        setPlayerQueueSource("listenlab");
+        setPlayerQueueError(null);
+      }
       const listenEventId = await saveListenLabPlayerEvent(nextCurrentTrack, options?.sourceTrack ?? null, 0);
       setActivePlayerListenEventId(listenEventId);
       setPlayerRecentTracks((current) => {
@@ -2383,13 +2416,48 @@ export function App() {
   function handleSelectedPreviewTrackPlay(trackUri: string | null) {
     clearPreviewPlaybackState();
     setOverlayTrackPlaybackExpanded(true);
+    const albumQueue = buildAlbumPlaybackQueue(trackUri);
     void handlePopupTrackPlayback(trackUri, {
       optimisticTrack: selectedPreviewTrackOptimisticSummary,
+      queuePlaylistUris: albumQueue?.playlistUris,
+      queueTracks: albumQueue?.queueTracks,
       sourceTrack: selectedPreview?.sourceTrack ?? null,
     });
   }
 
+  function buildAlbumPlaybackQueue(selectedTrackUri: string | null) {
+    if (!selectedTrackUri || albumTrackEntries.length <= 1) {
+      return null;
+    }
+    const playableTracks = albumTrackEntries
+      .map((track) => {
+        const uri = trackUriWithFallback(track.uri, track.id);
+        if (!uri) {
+          return null;
+        }
+        return {
+          track,
+          uri,
+        };
+      })
+      .filter((item): item is { track: AlbumTrackEntry; uri: string } => Boolean(item));
+    const selectedIndex = playableTracks.findIndex(({ uri }) => uri === selectedTrackUri);
+    if (selectedIndex < 0) {
+      return null;
+    }
+    const playlistUris = playableTracks.map(({ uri }) => uri);
+    const queueTracks = playableTracks.slice(selectedIndex + 1).map(({ track, uri }) => ({
+      ...playerSummaryFromAlbumTrack(track),
+      uri,
+      durationMs: Math.max(0, track.durationMs ?? 0),
+      trackId: track.id ?? spotifyTrackIdFromUri(uri),
+      albumId: selectedPreview?.albumId ?? selectedPreview?.sourceTrack?.album_id ?? selectedPreview?.entityId ?? null,
+    }));
+    return { playlistUris, queueTracks };
+  }
+
   async function seekPlayer(positionMs: number) {
+    await activatePlayerElement();
     const safePositionMs = Math.max(0, Math.floor(positionMs));
     const player = spotifyPlayerRef.current;
     if (player) {
@@ -2419,6 +2487,62 @@ export function App() {
     } catch (error) {
       setPlayerError(error instanceof Error ? error.message : "Spotify playback position could not be updated.");
     }
+  }
+
+  async function movePlaybackQueue(direction: "previous" | "next") {
+    await activatePlayerElement();
+    const player = spotifyPlayerRef.current;
+    const deviceId = spotifyDeviceIdRef.current;
+    const query = deviceId
+      ? `/me/player/${direction}?device_id=${encodeURIComponent(deviceId)}`
+      : `/me/player/${direction}`;
+    try {
+      await spotifyApiRequest(query, { method: "POST" });
+      setPlayerError(null);
+      setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
+      updateLocalQueueAfterMove(direction);
+      schedulePlaybackSnapshotRefresh();
+      return;
+    } catch (error) {
+      const sdkMove = direction === "next" ? player?.nextTrack : player?.previousTrack;
+      if (sdkMove) {
+        try {
+          await sdkMove.call(player);
+          setPlayerError(null);
+          setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
+          updateLocalQueueAfterMove(direction);
+          schedulePlaybackSnapshotRefresh();
+          return;
+        } catch {
+          // Report the Web API error below because it is usually more specific.
+        }
+      }
+      setPlayerError(error instanceof Error ? error.message : `Spotify playback could not skip ${direction}.`);
+    }
+  }
+
+  function updateLocalQueueAfterMove(direction: "previous" | "next") {
+    if (playerQueueSource !== "listenlab" || direction !== "next") {
+      return;
+    }
+    const nextTrack = playerQueueTracks[0] ?? null;
+    if (!nextTrack) {
+      return;
+    }
+    setCurrentTrack(nextTrack);
+    setPlaybackPaused(false);
+    setPlaybackPositionMs(0);
+    setPlaybackDurationMs(Math.max(0, nextTrack.durationMs ?? 0));
+    setPlayerQueueTracks(playerQueueTracks.slice(1));
+  }
+
+  function schedulePlaybackSnapshotRefresh() {
+    window.setTimeout(() => {
+      void loadCurrentPlaybackSnapshot();
+      if (playerMenuOpen && playerQueueSource !== "listenlab") {
+        void loadPlayerQueueTracks();
+      }
+    }, 500);
   }
 
   function isTrackPlaying(trackUri: string | null) {
@@ -2654,8 +2778,11 @@ export function App() {
     }
     clearPreviewPlaybackState();
     setOverlayTrackPlaybackExpanded(true);
+    const albumQueue = buildAlbumPlaybackQueue(trackUri);
     const playbackStarted = await handlePopupTrackPlayback(trackUri, {
       optimisticTrack: playerSummaryFromAlbumTrack(track),
+      queuePlaylistUris: albumQueue?.playlistUris,
+      queueTracks: albumQueue?.queueTracks,
       sourceTrack: track.sourceTrack,
     });
     if (playbackStarted) {
@@ -7832,14 +7959,16 @@ export function App() {
                                 <h2>
                                   {usingLivePlaybackSnapshot && playerDisplayTrack ? (
                                     <button
-                                      className="player-menu-title-button single-line-ellipsis"
+                                      className="player-menu-title-button player-menu-title-scroll"
                                       onClick={() => openPlayerTrackDetails()}
                                       type="button"
                                     >
-                                      {playerDisplayTrack.name ?? "ListenLab Player"}
+                                      <span>{playerDisplayTrack.name ?? "ListenLab Player"}</span>
                                     </button>
                                   ) : (
-                                    <span className="single-line-ellipsis">{playerDisplayTrack?.name ?? "ListenLab Player"}</span>
+                                    <span className="player-menu-title-scroll">
+                                      <span>{playerDisplayTrack?.name ?? "ListenLab Player"}</span>
+                                    </span>
                                   )}
                                 </h2>
                                 {playerDisplayTrack?.uri ? (
@@ -7892,14 +8021,14 @@ export function App() {
                                 max={Math.max(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0, 1)}
                                 min={0}
                                 onChange={(event) => setPendingSeekMs(Number(event.currentTarget.value))}
-                                onMouseUp={() => {
-                                  if (canControlPlayback && pendingSeekMs != null) {
-                                    void seekPlayer(pendingSeekMs);
+                                onMouseUp={(event) => {
+                                  if (canControlPlayback) {
+                                    void seekPlayer(Number(event.currentTarget.value));
                                   }
                                 }}
-                                onTouchEnd={() => {
-                                  if (canControlPlayback && pendingSeekMs != null) {
-                                    void seekPlayer(pendingSeekMs);
+                                onTouchEnd={(event) => {
+                                  if (canControlPlayback) {
+                                    void seekPlayer(Number(event.currentTarget.value));
                                   }
                                 }}
                                 step={1000}
@@ -7919,12 +8048,33 @@ export function App() {
                               <button
                                 className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
                                 disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
-                                onClick={() => handlePlayerPrimaryButtonClick()}
+                                onClick={() => void handlePlayerPrimaryButtonClick()}
                                 type="button"
                               >
                                 {playerDisplayPaused ? "Play" : "Pause"}
                               </button>
                             </span>
+                          </div>
+
+                          <div className="actions actions-centered actions-in-card player-queue-controls">
+                            <button
+                              className="secondary-button"
+                              disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
+                              onClick={() => void movePlaybackQueue("previous")}
+                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
+                              type="button"
+                            >
+                              Back
+                            </button>
+                            <button
+                              className="secondary-button"
+                              disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
+                              onClick={() => void movePlaybackQueue("next")}
+                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
+                              type="button"
+                            >
+                              Forward
+                            </button>
                           </div>
 
                           {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? (
@@ -8587,14 +8737,14 @@ export function App() {
                             max={Math.max(selectedPreviewTrackTotalDisplayMs, 1)}
                             min={0}
                             onChange={(event) => setOverlaySeekMs(Number(event.currentTarget.value))}
-                            onMouseUp={() => {
-                              if (canSeekSelectedPreview && overlaySeekMs != null) {
-                                void seekPlayer(overlaySeekMs);
+                            onMouseUp={(event) => {
+                              if (canSeekSelectedPreview) {
+                                void seekPlayer(Number(event.currentTarget.value));
                               }
                             }}
-                            onTouchEnd={() => {
-                              if (canSeekSelectedPreview && overlaySeekMs != null) {
-                                void seekPlayer(overlaySeekMs);
+                            onTouchEnd={(event) => {
+                              if (canSeekSelectedPreview) {
+                                void seekPlayer(Number(event.currentTarget.value));
                               }
                             }}
                             step={1000}

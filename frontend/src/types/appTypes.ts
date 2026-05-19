@@ -1110,10 +1110,13 @@ export type AlbumTrackEntry = {
 };
 
 export type SpotifyPlayerInstance = {
+  activateElement?: () => Promise<void>;
   addListener: (event: string, callback: (payload: any) => void) => void;
   connect: () => Promise<boolean>;
   disconnect: () => void;
+  nextTrack?: () => Promise<void>;
   pause: () => Promise<void>;
+  previousTrack?: () => Promise<void>;
   resume: () => Promise<void>;
   seek: (positionMs: number) => Promise<void>;
   setVolume?: (volume: number) => Promise<void>;
@@ -1122,6 +1125,7 @@ export type SpotifyPlayerInstance = {
 
 export type PopupTrackPlaybackOptions = {
   optimisticTrack?: PlayerTrackSummary | null;
+  queuePlaylistUris?: string[] | null;
+  queueTracks?: PlayerQueueTrack[] | null;
   sourceTrack?: RecentTrack | null;
 };
-
