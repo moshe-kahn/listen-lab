@@ -1,5 +1,5 @@
-import type { Dispatch, SetStateAction } from "react";
-import type { PreviewItem, RecentDebugSourceFilter, RecentTrack } from "../../types/appTypes";
+import { useState, type Dispatch, type SetStateAction } from "react";
+import type { PreviewItem, RecentDebugSourceFilter, RecentPlayFilter, RecentTrack } from "../../types/appTypes";
 import {
   DEBUG_GAP_MARKER_MAX_MS,
   DEBUG_GAP_MARKER_MIN_MS,
@@ -19,7 +19,7 @@ import {
   trackEstimatedMs,
   trackPlayedAtMs,
 } from "../../utils/dashboardUtils";
-import { trackUriWithFallback } from "../../utils/playbackUtils";
+import { recentTrackCompletionRatio, trackUriWithFallback } from "../../utils/playbackUtils";
 
 type RecentDebugPageProps = {
   hasProfile: boolean;
@@ -43,7 +43,7 @@ type RecentDebugPageProps = {
   setOpenDebugSessions: Dispatch<SetStateAction<Record<string, boolean>>>;
   openDebugTracks: Record<string, boolean>;
   setOpenDebugTracks: Dispatch<SetStateAction<Record<string, boolean>>>;
-  loadListeningLogBatch: (reset?: boolean) => void | Promise<void>;
+  loadListeningLogBatch: (reset?: boolean, forceRecentSync?: boolean) => void | Promise<void>;
   onBack: () => void;
   onSelectPreview: (preview: PreviewItem) => void;
 };
@@ -74,6 +74,8 @@ export function RecentDebugPage({
   onBack,
   onSelectPreview,
 }: RecentDebugPageProps) {
+  const [listenLogPlayFilter, setListenLogPlayFilter] = useState<RecentPlayFilter>("listened");
+
   if (!hasProfile) {
     return null;
   }
@@ -83,7 +85,18 @@ export function RecentDebugPage({
     const bMs = trackPlayedAtMs(b) ?? -1;
     return bMs - aMs;
   });
-  const visibleTracks = allSortedTracks;
+  const visibleTracks = allSortedTracks.filter((track) => {
+    if (listenLogPlayFilter === "all") {
+      return true;
+    }
+    const ratio = recentTrackCompletionRatio(track);
+    if (ratio === null) {
+      return false;
+    }
+    return listenLogPlayFilter === "listened"
+      ? ratio >= 0.65
+      : ratio < 0.65;
+  });
   const sessions = buildDebugSessions(visibleTracks);
   const canTryLoadMore = listeningLogOffset === 0 || listeningLogHasMore;
   const buildSpotifyUrl = (kind: "track" | "artist" | "album", id: string | null): string =>
@@ -206,25 +219,49 @@ export function RecentDebugPage({
     </div>
   );
 
+  const renderListenLogPlayFilterToggle = () => (
+    <div className="track-ranking-toggle" role="group" aria-label="Listen Log play amount filter">
+      {[
+        ["listened", "Listened"],
+        ["all", "All"],
+        ["skipped", "Skipped"],
+      ].map(([value, label]) => (
+        <button
+          className={`track-ranking-chip${listenLogPlayFilter === value ? " track-ranking-chip-active" : ""}`}
+          key={value}
+          onClick={() => {
+            setListenLogPlayFilter(value as RecentPlayFilter);
+            setOpenDebugSessions({});
+            setOpenDebugTracks({});
+          }}
+          type="button"
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <section className="info-card info-card-wide tracks-only-card" id="recent-debug-page">
       <div className="tracks-only-header">
         <div className="section-column-header">
           <div>
-            <h2>Listening Log</h2>
+            <h2>Listen Log</h2>
             <p className="tracks-only-subtitle">
               Canonical play events from the merged fact layer.
             </p>
           </div>
           <div className="recent-debug-controls">
+            {renderListenLogPlayFilterToggle()}
             {renderRecentDebugSourceFilterToggle()}
             <button
               className="secondary-button"
               disabled={listeningLogLoading}
-              onClick={() => void loadListeningLogBatch(true)}
+              onClick={() => void loadListeningLogBatch(true, true)}
               type="button"
             >
-              {listeningLogLoading ? "Loading..." : "Reload log"}
+              {listeningLogLoading ? "Loading..." : "Reload"}
             </button>
             <label className="recent-debug-filter">
               <input
@@ -350,6 +387,17 @@ export function RecentDebugPage({
                         <div className="recent-debug-item-wrap" key={trackKey}>
                           <article className="recent-debug-item">
                           <div className="recent-debug-item-top">
+                            {track.image_url ? (
+                              <img
+                                alt=""
+                                className="recent-debug-cover"
+                                src={track.image_url}
+                              />
+                            ) : (
+                              <span className="recent-debug-cover recent-debug-cover-fallback" aria-hidden="true">
+                                {(track.track_name ?? "?").slice(0, 1).toUpperCase()}
+                              </span>
+                            )}
                             <div className="recent-debug-item-summary">
                               <p className="recent-debug-item-time" title={playedAtSummary}>
                                 {timeRangeSummary}

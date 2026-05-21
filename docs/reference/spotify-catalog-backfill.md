@@ -51,6 +51,18 @@ It is enrichment-only. It must not create, merge, promote, or repair ListenLab i
   - artist listen count
   - Spotify ID tie-break
 
+## Playback Album-Track Fallback
+The playback route `/auth/playback/album-tracks` can now fetch a Spotify album tracklist when local catalog data is missing or incomplete.
+
+Behavior:
+- use local album-track/catalog rows when sufficient
+- fall back to Spotify album tracklist fetch when local rows are insufficient
+- cache fetched album tracks/catalog rows for later opens
+- use the same fallback path for the song overlay and homepage album expansion
+- preserve album queue context when a track is started from an album row
+
+This fallback is catalog enrichment only. It must not merge, promote, or repair identity rows.
+
 ## Request Controls
 - `limit`
 - `offset`

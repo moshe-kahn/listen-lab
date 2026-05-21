@@ -8,6 +8,7 @@ import type {
   ProfileResponse,
   RecentSectionResponse,
   RecentArchiveResponse,
+  RecentPlayFilter,
   ListeningLogResponse,
   MergedTrackSourceFilter,
   RecentDebugSourceFilter,
@@ -94,7 +95,6 @@ import {
   INITIAL_SECTION_PAGES,
   LIVE_PLAYBACK_POLL_INTERVAL_MS,
   LIVE_PLAYBACK_PROGRESS_TICK_MS,
-  LIVE_TRACK_END_RECENT_POLL_DELAY_MS,
   PAGE_SIZE,
   PLAYER_RECENT_FETCH_LIMIT,
   PREVIEW_RAMP_DURATION_MS,
@@ -166,6 +166,7 @@ import {
 import {
   currentTrackFromState,
   dedupeRecentTracksForPlayer,
+  filterAndDedupeRecentTracksForActivity,
   formatPlaybackClock,
   queuePlaylistTrackUris,
   queueRepeatsTrack,
@@ -248,6 +249,10 @@ export function App() {
   const [albumTrackEntries, setAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [albumTrackEntriesLoading, setAlbumTrackEntriesLoading] = useState(false);
   const [albumTrackEntriesError, setAlbumTrackEntriesError] = useState<string | null>(null);
+  const [homeAlbumExpanded, setHomeAlbumExpanded] = useState(false);
+  const [homeAlbumTrackEntries, setHomeAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
+  const [homeAlbumTrackEntriesLoading, setHomeAlbumTrackEntriesLoading] = useState(false);
+  const [homeAlbumTrackEntriesError, setHomeAlbumTrackEntriesError] = useState<string | null>(null);
   const [representativeTrack, setRepresentativeTrack] = useState<RecentTrack | null>(null);
   const [representativeLoading, setRepresentativeLoading] = useState(false);
   const [representativeReason, setRepresentativeReason] = useState<string | null>(null);
@@ -257,7 +262,19 @@ export function App() {
   const [playerRecentTracksLoading, setPlayerRecentTracksLoading] = useState(false);
   const [playerRecentTracksError, setPlayerRecentTracksError] = useState<string | null>(null);
   const [playerQueueTracks, setPlayerQueueTracks] = useState<PlayerQueueTrack[]>([]);
+  const [playerQueueCursor, setPlayerQueueCursor] = useState<number | null>(null);
   const [playerQueueSource, setPlayerQueueSource] = useState<"listenlab" | "spotify" | null>(null);
+  const [playerQueueShuffleEnabled, setPlayerQueueShuffleEnabled] = useState(false);
+  const [playerQueueShuffleBaseTracks, setPlayerQueueShuffleBaseTracks] = useState<PlayerQueueTrack[] | null>(null);
+  const [playerQueueSettingsOpen, setPlayerQueueSettingsOpen] = useState(false);
+  const [playerQueueCleared, setPlayerQueueCleared] = useState(false);
+  const [playerQueueLoopEnabled, setPlayerQueueLoopEnabled] = useState(false);
+  const [playerTrackLoopEnabled, setPlayerTrackLoopEnabled] = useState(false);
+  const [playerQueueContext, setPlayerQueueContext] = useState<{ label: string; url?: string | null } | null>(null);
+  const [playerQueuePauseMenuOpen, setPlayerQueuePauseMenuOpen] = useState(false);
+  const [queuePauseAfterCurrentEnabled, setQueuePauseAfterCurrentEnabled] = useState(false);
+  const [queueSleepTimerUntilMs, setQueueSleepTimerUntilMs] = useState<number | null>(null);
+  const [queuePausedCursor, setQueuePausedCursor] = useState<number | null>(null);
   const [queuePlaylistUri, setQueuePlaylistUri] = useState<string | null>(null);
   const [playerQueueLoading, setPlayerQueueLoading] = useState(false);
   const [playerQueueError, setPlayerQueueError] = useState<string | null>(null);
@@ -278,6 +295,7 @@ export function App() {
   const [pendingSeekMs, setPendingSeekMs] = useState<number | null>(null);
   const [liveControlOverrideUntilMs, setLiveControlOverrideUntilMs] = useState<number | null>(null);
   const [recentRange, setRecentRange] = useState<RecentRange>("short_term");
+  const [recentPlayFilter, setRecentPlayFilter] = useState<RecentPlayFilter>("listened");
   const [trackRankingMode, setTrackRankingMode] = useState<TrackRankingMode>("plays");
   const [trackRankingRefreshPending, setTrackRankingRefreshPending] = useState(false);
   const [appPage, setAppPage] = useState<AppPage>("dashboard");
@@ -459,8 +477,10 @@ export function App() {
   const previewingTrackUriRef = useRef<string | null>(null);
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
+  const loadedHomeAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const trackMappingLineageRequestIdRef = useRef(0);
   const playbackPositionMsRef = useRef(0);
+  const autoAdvanceTrackUriRef = useRef<string | null>(null);
   const liveProgressAnchorRef = useRef<{ baseProgressMs: number; receivedAtMs: number; durationMs: number } | null>(null);
   const liveEndRefreshRequestedRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
@@ -650,6 +670,54 @@ export function App() {
   const livePlaybackControlTooltip = liveReadOnlyMode
     ? `Playing on ${livePlaybackSnapshot?.device_name ?? "another device"}. Click to control on ListenLab.`
     : undefined;
+  const listenLabQueueCursor = playerQueueSource === "listenlab" ? playerQueueCursor : null;
+  const listenLabQueueHasCursor = listenLabQueueCursor != null && listenLabQueueCursor >= 0;
+  const spotifyQueueCurrentIndex = playerQueueSource === "spotify" && playerDisplayTrack
+    ? playerQueueTracks.findIndex((track) => {
+      const queueTrackUri = trackUriWithFallback(track.uri, track.trackId);
+      const displayTrackUri = playerDisplayTrack.uri;
+      const queueTrackId = track.trackId ?? spotifyTrackIdFromUri(queueTrackUri);
+      const displayTrackId = spotifyTrackIdFromUri(displayTrackUri);
+      return Boolean(
+        (queueTrackId && displayTrackId && queueTrackId === displayTrackId)
+        || (queueTrackUri && displayTrackUri && queueTrackUri === displayTrackUri),
+      );
+    })
+    : -1;
+  const activeQueueCursor = playerQueueSource === "spotify" ? spotifyQueueCurrentIndex : listenLabQueueCursor;
+  const hasActiveQueueCursor = activeQueueCursor != null && activeQueueCursor >= 0;
+  const queueHasUnplayedTracks = playerQueueTracks.length > (hasActiveQueueCursor ? activeQueueCursor + 1 : 0);
+  const queueHasLoopShuffleTracks = playerQueueLoopEnabled && playerQueueTracks.length > 1 && hasActiveQueueCursor;
+  const queueShuffleAvailable = queueHasUnplayedTracks || queueHasLoopShuffleTracks;
+  const playerUpNextTrack = hasActiveQueueCursor
+    ? (
+        playerQueueTracks[activeQueueCursor + 1]
+        ?? (playerQueueLoopEnabled ? playerQueueTracks[0] : null)
+      )
+    : null;
+  const canMoveListenLabQueuePrevious = Boolean(
+    playerQueueSource === "listenlab"
+    && listenLabQueueHasCursor
+    && listenLabQueueCursor > 0,
+  );
+  const canMoveListenLabQueueNext = Boolean(
+    playerQueueSource === "listenlab"
+    && listenLabQueueHasCursor
+    && listenLabQueueCursor < playerQueueTracks.length - 1,
+  );
+  const playerTransportControlsAvailable = Boolean(
+    playerDisplayTrack
+    && (playerReady || usingLivePlaybackSnapshot),
+  );
+  const playerPreviousDisabled = playerQueueSource === "listenlab"
+    ? !canMoveListenLabQueuePrevious
+    : !playerTransportControlsAvailable;
+  const playerNextDisabled = playerQueueSource === "listenlab"
+    ? !canMoveListenLabQueueNext
+    : !playerTransportControlsAvailable;
+  const playerPanelVisible = Boolean(profile && (playerMenuOpen || appPage === "dashboard"));
+  const queueSleepTimerActive = queueSleepTimerUntilMs != null && queueSleepTimerUntilMs > Date.now();
+  const queueDelayActive = queuePauseAfterCurrentEnabled || queueSleepTimerActive;
 
   useEffect(() => {
     saveIdentityAuditPersistedPrefs({
@@ -760,7 +828,7 @@ export function App() {
     if (appPage !== "recentDebug" || !profile || listeningLogLoaded || listeningLogLoading) {
       return;
     }
-    void loadListeningLogBatch(true);
+    void loadListeningLogBatch(true, true);
   }, [appPage, listeningLogLoaded, listeningLogLoading, profile, recentDebugSourceFilter]);
 
   useEffect(() => {
@@ -1199,18 +1267,13 @@ export function App() {
         liveEndRefreshRequestedRef.current = true;
         setLiveAwaitingNextTrack(true);
         void loadCurrentPlaybackSnapshot();
-        window.setTimeout(() => {
-          if (session?.authenticated && experienceMode === "full") {
-            void triggerRecentIngestPollForTrackEnd();
-          }
-        }, LIVE_TRACK_END_RECENT_POLL_DELAY_MS);
       }
     }, LIVE_PLAYBACK_PROGRESS_TICK_MS);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, [experienceMode, livePlaybackSnapshot?.is_playing, session?.authenticated, usingLivePlaybackSnapshot]);
+  }, [livePlaybackSnapshot?.is_playing, usingLivePlaybackSnapshot]);
 
   useEffect(() => {
     if (!recentIngestCallbackPending) {
@@ -1454,11 +1517,12 @@ export function App() {
       };
     }
 
+    const activePreview = selectedPreview;
     const selectedTrackId = selectedPreview.kind === "track"
-      ? (selectedPreview.trackId ?? selectedPreview.entityId)
+      ? (selectedPreview.trackId ?? selectedPreview.entityId ?? spotifyTrackIdFromUri(selectedPreview.trackUri))
       : null;
-    const albumId = selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? selectedPreview.entityId ?? null;
-    if (!albumId) {
+    const initialAlbumId = albumIdFromPreview(selectedPreview);
+    if (!initialAlbumId && !selectedTrackId) {
       loadedAlbumTracksAlbumIdRef.current = null;
       setAlbumTrackEntries([]);
       setAlbumTrackEntriesLoading(false);
@@ -1467,8 +1531,7 @@ export function App() {
         cancelled = true;
       };
     }
-    const albumIdSafe = albumId;
-    const albumAlreadyLoaded = loadedAlbumTracksAlbumIdRef.current === albumIdSafe;
+    const albumAlreadyLoaded = initialAlbumId && loadedAlbumTracksAlbumIdRef.current === initialAlbumId;
     if (albumAlreadyLoaded) {
       setAlbumTrackEntries((current) => current.map((row) => ({
         ...row,
@@ -1481,68 +1544,28 @@ export function App() {
       };
     }
 
-    const normalizedTopTrackKeys = new Set(
-      [
-        ...(profile?.top_tracks ?? []),
-        ...(profile?.recent_top_tracks ?? []),
-      ].map((track) => normalizedTrackArtistKey(track.track_name, track.artist_name)),
-    );
-    const topTrackIds = new Set(
-      [
-        ...(profile?.top_tracks ?? []),
-        ...(profile?.recent_top_tracks ?? []),
-      ].map((track) => track.track_id).filter((value): value is string => Boolean(value)),
-    );
-    const knownTracksById = new Map<string, RecentTrack>();
-    const latestPlayedAtByTrackId = new Map<string, string>();
-    const knownTrackRows = [
-      ...(profile?.recent_tracks ?? []),
-      ...(profile?.top_tracks ?? []),
-      ...(profile?.recent_top_tracks ?? []),
-      ...(profile?.recent_likes_tracks ?? []),
-    ];
-    for (const knownTrack of knownTrackRows) {
-      const knownTrackId = knownTrack.track_id;
-      if (!knownTrackId) {
-        continue;
-      }
-      if (!knownTracksById.has(knownTrackId)) {
-        knownTracksById.set(knownTrackId, knownTrack);
-      }
-      for (const candidatePlayedAt of [knownTrack.spotify_played_at, knownTrack.last_played_at]) {
-        if (!candidatePlayedAt) {
-          continue;
-        }
-        const candidateMs = parseTimestampMs(candidatePlayedAt);
-        if (candidateMs == null) {
-          continue;
-        }
-        const existingPlayedAt = latestPlayedAtByTrackId.get(knownTrackId);
-        const existingMs = parseTimestampMs(existingPlayedAt);
-        if (existingMs == null || candidateMs > existingMs) {
-          latestPlayedAtByTrackId.set(knownTrackId, candidatePlayedAt);
-        }
-      }
-    }
-
     async function loadAlbumTrackEntries() {
       setAlbumTrackEntriesLoading(true);
+      setAlbumTrackEntriesError(null);
       try {
-        const token = await fetchPlaybackToken();
-        const response = await fetch(
-          `https://api.spotify.com/v1/albums/${encodeURIComponent(albumIdSafe)}/tracks?limit=50`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          },
-        );
-
+        const params = new URLSearchParams();
+        if (initialAlbumId) {
+          params.set("album_id", initialAlbumId);
+        }
+        if (selectedTrackId) {
+          params.set("track_id", selectedTrackId);
+        }
+        if (activePreview.trackUri) {
+          params.set("track_uri", activePreview.trackUri);
+        }
+        const response = await fetch(`${apiBaseUrl}/auth/playback/album-tracks?${params.toString()}`, {
+          credentials: "include",
+        });
         if (!response.ok) {
           throw new Error(`Failed to load album tracks (${response.status}).`);
         }
-
         const payload = (await response.json()) as {
+          album_id?: string | null;
           items?: Array<{
             id?: string | null;
             name?: string | null;
@@ -1551,32 +1574,27 @@ export function App() {
             artists?: Array<{ name?: string | null }>;
           }>;
         };
-        const rows = (payload.items ?? []).map((item) => {
-          const id = item.id ?? null;
-          const artistNames = (item.artists ?? []).map((artist) => artist.name ?? "").filter(Boolean).join(", ");
-          const normalizedKey = normalizedTrackArtistKey(item.name ?? null, artistNames || null);
-          const isTopTrack = Boolean((id && topTrackIds.has(id)) || normalizedTopTrackKeys.has(normalizedKey));
-          const sourceTrack = id ? (knownTracksById.get(id) ?? null) : null;
-          const lastPlayedAt = id ? (latestPlayedAtByTrackId.get(id) ?? null) : null;
-          return {
-            id,
-            name: item.name ?? "Unknown track",
-            uri: item.uri ?? null,
-            durationMs: typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) ? Math.max(0, item.duration_ms) : null,
-            artistName: artistNames || null,
-            sourceTrack,
-            lastPlayedAt,
-            isSelected: Boolean(selectedTrackId && id && selectedTrackId === id),
-            isTopTrack,
-          } satisfies AlbumTrackEntry;
-        });
+        const resolvedAlbumId = payload.album_id ?? initialAlbumId;
+        if (!resolvedAlbumId) {
+          throw new Error("Album track list is unavailable for this item.");
+        }
+        if (loadedAlbumTracksAlbumIdRef.current === resolvedAlbumId) {
+          if (!cancelled) {
+            setAlbumTrackEntries((current) => current.map((row) => ({
+              ...row,
+              isSelected: Boolean(selectedTrackId && row.id && selectedTrackId === row.id),
+            })));
+            setAlbumTrackEntriesLoading(false);
+            setAlbumTrackEntriesError(null);
+          }
+          return;
+        }
+        const rows = albumTrackRowsFromItems(payload.items ?? [], selectedTrackId);
 
         if (!cancelled) {
           setAlbumTrackEntries(rows);
-          loadedAlbumTracksAlbumIdRef.current = albumIdSafe;
-          if (rows.length === 0) {
-            setAlbumTrackEntriesError("No tracks were returned for this album.");
-          }
+          loadedAlbumTracksAlbumIdRef.current = resolvedAlbumId;
+          setAlbumTrackEntriesError(rows.length === 0 ? "No tracks were returned for this album." : null);
         }
       } catch (error) {
         if (!cancelled) {
@@ -1594,6 +1612,107 @@ export function App() {
       cancelled = true;
     };
   }, [experienceMode, profile?.recent_likes_tracks, profile?.recent_top_tracks, profile?.recent_tracks, profile?.top_tracks, selectedPreview, spotifyCooldownActive]);
+
+  useEffect(() => {
+    setHomeAlbumExpanded(false);
+    setHomeAlbumTrackEntries([]);
+    setHomeAlbumTrackEntriesError(null);
+    setHomeAlbumTrackEntriesLoading(false);
+    loadedHomeAlbumTracksAlbumIdRef.current = null;
+  }, [playerDisplayTrack?.uri, playerDisplayAlbumId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (
+      !homeAlbumExpanded
+      || experienceMode === "local"
+      || !playerDisplayTrack
+      || spotifyCooldownActive
+    ) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const activeDisplayTrack = playerDisplayTrack;
+    const selectedTrackId = spotifyTrackIdFromUri(activeDisplayTrack.uri);
+    const initialAlbumId = playerDisplayAlbumId;
+    if (!initialAlbumId && !selectedTrackId) {
+      setHomeAlbumTrackEntries([]);
+      setHomeAlbumTrackEntriesLoading(false);
+      setHomeAlbumTrackEntriesError("Album track list is unavailable for this item.");
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (initialAlbumId && loadedHomeAlbumTracksAlbumIdRef.current === initialAlbumId) {
+      setHomeAlbumTrackEntries((current) => current.map((row) => ({
+        ...row,
+        isSelected: Boolean(selectedTrackId && row.id && selectedTrackId === row.id),
+      })));
+      setHomeAlbumTrackEntriesLoading(false);
+      setHomeAlbumTrackEntriesError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadHomeAlbumTrackEntries() {
+      setHomeAlbumTrackEntriesLoading(true);
+      setHomeAlbumTrackEntriesError(null);
+      try {
+        const params = new URLSearchParams();
+        if (initialAlbumId) {
+          params.set("album_id", initialAlbumId);
+        }
+        if (selectedTrackId) {
+          params.set("track_id", selectedTrackId);
+        }
+        if (activeDisplayTrack.uri) {
+          params.set("track_uri", activeDisplayTrack.uri);
+        }
+        const response = await fetch(`${apiBaseUrl}/auth/playback/album-tracks?${params.toString()}`, {
+          credentials: "include",
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to load album tracks (${response.status}).`);
+        }
+        const payload = (await response.json()) as {
+          album_id?: string | null;
+          items?: Array<{
+            id?: string | null;
+            name?: string | null;
+            uri?: string | null;
+            duration_ms?: number | null;
+            artists?: Array<{ name?: string | null }>;
+          }>;
+        };
+        const resolvedAlbumId = payload.album_id ?? initialAlbumId;
+        if (!resolvedAlbumId) {
+          throw new Error("Album track list is unavailable for this item.");
+        }
+        if (!cancelled) {
+          const rows = albumTrackRowsFromItems(payload.items ?? [], selectedTrackId);
+          setHomeAlbumTrackEntries(rows);
+          loadedHomeAlbumTracksAlbumIdRef.current = resolvedAlbumId;
+          setHomeAlbumTrackEntriesError(rows.length === 0 ? "No tracks were returned for this album." : null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setHomeAlbumTrackEntriesError(error instanceof Error ? error.message : "Album track list could not be loaded.");
+        }
+      } finally {
+        if (!cancelled) {
+          setHomeAlbumTrackEntriesLoading(false);
+        }
+      }
+    }
+
+    void loadHomeAlbumTrackEntries();
+    return () => {
+      cancelled = true;
+    };
+  }, [experienceMode, homeAlbumExpanded, playerDisplayAlbumId, playerDisplayTrack, profile?.recent_likes_tracks, profile?.recent_top_tracks, profile?.recent_tracks, profile?.top_tracks, spotifyCooldownActive]);
 
   async function fetchPlaybackToken() {
     if (experienceMode === "local") {
@@ -1699,15 +1818,94 @@ export function App() {
     return id ? `https://open.spotify.com/${kind}/${id}` : "";
   }
 
+  function albumIdFromPreview(preview: PreviewItem | null | undefined) {
+    if (!preview) {
+      return null;
+    }
+    return preview.albumId ?? preview.sourceTrack?.album_id ?? (preview.kind === "album" ? preview.entityId : null);
+  }
+
+  function albumTrackRowsFromItems(
+    items: Array<{
+      id?: string | null;
+      name?: string | null;
+      uri?: string | null;
+      duration_ms?: number | null;
+      artists?: Array<{ name?: string | null }>;
+    }>,
+    selectedTrackId: string | null,
+  ) {
+    const normalizedTopTrackKeys = new Set(
+      [
+        ...(profile?.top_tracks ?? []),
+        ...(profile?.recent_top_tracks ?? []),
+      ].map((track) => normalizedTrackArtistKey(track.track_name, track.artist_name)),
+    );
+    const topTrackIds = new Set(
+      [
+        ...(profile?.top_tracks ?? []),
+        ...(profile?.recent_top_tracks ?? []),
+      ].map((track) => track.track_id).filter((value): value is string => Boolean(value)),
+    );
+    const knownTracksById = new Map<string, RecentTrack>();
+    const latestPlayedAtByTrackId = new Map<string, string>();
+    const knownTrackRows = [
+      ...(profile?.recent_tracks ?? []),
+      ...(profile?.top_tracks ?? []),
+      ...(profile?.recent_top_tracks ?? []),
+      ...(profile?.recent_likes_tracks ?? []),
+    ];
+    for (const knownTrack of knownTrackRows) {
+      const knownTrackId = knownTrack.track_id;
+      if (!knownTrackId) {
+        continue;
+      }
+      if (!knownTracksById.has(knownTrackId)) {
+        knownTracksById.set(knownTrackId, knownTrack);
+      }
+      for (const candidatePlayedAt of [knownTrack.spotify_played_at, knownTrack.last_played_at]) {
+        if (!candidatePlayedAt) {
+          continue;
+        }
+        const candidateMs = parseTimestampMs(candidatePlayedAt);
+        if (candidateMs == null) {
+          continue;
+        }
+        const existingPlayedAt = latestPlayedAtByTrackId.get(knownTrackId);
+        const existingMs = parseTimestampMs(existingPlayedAt);
+        if (existingMs == null || candidateMs > existingMs) {
+          latestPlayedAtByTrackId.set(knownTrackId, candidatePlayedAt);
+        }
+      }
+    }
+
+    return items.map((item) => {
+      const id = item.id ?? null;
+      const artistNames = (item.artists ?? []).map((artist) => artist.name ?? "").filter(Boolean).join(", ");
+      const normalizedKey = normalizedTrackArtistKey(item.name ?? null, artistNames || null);
+      const isTopTrack = Boolean((id && topTrackIds.has(id)) || normalizedTopTrackKeys.has(normalizedKey));
+      const sourceTrack = id ? (knownTracksById.get(id) ?? null) : null;
+      const lastPlayedAt = id ? (latestPlayedAtByTrackId.get(id) ?? null) : null;
+      return {
+        id,
+        name: item.name ?? "Unknown track",
+        uri: item.uri ?? null,
+        durationMs: typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) ? Math.max(0, item.duration_ms) : null,
+        artistName: artistNames || null,
+        sourceTrack,
+        lastPlayedAt,
+        isSelected: Boolean(selectedTrackId && id && selectedTrackId === id),
+        isTopTrack,
+      } satisfies AlbumTrackEntry;
+    });
+  }
+
   function openPlayerTrackDetails() {
-    if (!playerDisplayTrack || !usingLivePlaybackSnapshot) {
+    if (!playerDisplayTrack) {
       return;
     }
     const trackId = spotifyTrackIdFromUri(playerDisplayTrack.uri) ?? livePlaybackSnapshot?.item_id ?? null;
     const trackUrl = spotifyTrackUrl(playerDisplayTrack.uri) ?? (trackId ? `https://open.spotify.com/track/${trackId}` : "");
-    if (!trackUrl) {
-      return;
-    }
     setSelectedPreview({
       image: playerDisplayTrack.image ?? playerDisplayKnownTrack?.image_url ?? null,
       label: playerDisplayTrack.name,
@@ -1766,6 +1964,28 @@ export function App() {
       artistName: playerDisplayArtistName,
       sourceTrack: playerDisplayKnownTrack ?? null,
     });
+  }
+
+  function playerAlbumPreviewContext(): PreviewItem | null {
+    if (!playerDisplayAlbumName) {
+      return null;
+    }
+    const albumUrl = playerDisplayKnownTrack?.album_url ?? spotifyEntityUrl("album", playerDisplayAlbumId);
+    return {
+      image: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+      fallbackLabel: "L",
+      label: playerDisplayAlbumName,
+      meta: playerDisplayTrack?.artists ?? playerDisplayKnownTrack?.artist_name ?? null,
+      detail: playerDisplayAlbumYear,
+      kind: "album",
+      entityId: playerDisplayAlbumId,
+      trackUri: null,
+      url: albumUrl,
+      trackId: null,
+      albumId: playerDisplayAlbumId,
+      artistName: playerDisplayArtistName,
+      sourceTrack: playerDisplayKnownTrack ?? null,
+    };
   }
 
   function openRecentPlayerTrackDetails(track: RecentTrack) {
@@ -1964,8 +2184,99 @@ export function App() {
   }, [currentTrack, playbackDurationMs, playbackPaused]);
 
   useEffect(() => {
+    if (queueSleepTimerUntilMs == null) {
+      return;
+    }
+
+    const remainingMs = queueSleepTimerUntilMs - Date.now();
+    if (remainingMs <= 0) {
+      setQueueSleepTimerUntilMs(null);
+      void pausePlayback();
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setQueueSleepTimerUntilMs(null);
+      void pausePlayback();
+    }, remainingMs);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [queueSleepTimerUntilMs]);
+
+  function scrollQueueToRole(role: "current" | "up-next") {
+    const menu = playerMenuRef.current;
+    const queueList = menu?.querySelector<HTMLElement>(".player-queue-column .player-recent-list") ?? null;
+    const anchorRow = menu?.querySelector<HTMLElement>(`[data-player-queue-role='${role}']`) ?? null;
+    if (!queueList || !anchorRow) {
+      return;
+    }
+    const listRect = queueList.getBoundingClientRect();
+    const rowRect = anchorRow.getBoundingClientRect();
+    queueList.scrollTop += rowRect.top - listRect.top;
+  }
+
+  function scrollQueueToAutoAnchor() {
+    const menu = playerMenuRef.current;
+    const anchorRole = menu?.querySelector<HTMLElement>("[data-player-queue-role='up-next']")
+      ? "up-next"
+      : "current";
+    scrollQueueToRole(anchorRole);
+  }
+
+  useEffect(() => {
+    if (!playerMenuOpen || playerQueueSource !== "listenlab" || playerQueueCursor == null) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      scrollQueueToAutoAnchor();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [playerMenuOpen, playerQueueCursor, playerQueueSource, playerQueueTracks.length]);
+
+  useEffect(() => {
     playbackPositionMsRef.current = playbackPositionMs;
   }, [playbackPositionMs]);
+
+  useEffect(() => {
+    if (
+      !currentTrack?.uri
+      || playbackPaused
+      || playerQueueSource !== "listenlab"
+      || playerQueueCursor == null
+    ) {
+      autoAdvanceTrackUriRef.current = null;
+      return;
+    }
+    const queueAtEnd = playerQueueCursor >= playerQueueTracks.length - 1;
+    if (queueAtEnd && !playerQueueLoopEnabled && !playerTrackLoopEnabled && !queuePauseAfterCurrentEnabled) {
+      autoAdvanceTrackUriRef.current = null;
+      return;
+    }
+
+    const durationMs = playbackDurationMs || currentTrack.durationMs || 0;
+    if (durationMs <= 0 || playbackPositionMs < durationMs - 500) {
+      autoAdvanceTrackUriRef.current = null;
+      return;
+    }
+
+    if (autoAdvanceTrackUriRef.current === currentTrack.uri) {
+      return;
+    }
+    autoAdvanceTrackUriRef.current = currentTrack.uri;
+    if (queuePauseAfterCurrentEnabled) {
+      void pauseAtNextListenLabQueueTrack();
+    } else if (playerTrackLoopEnabled) {
+      void playQueueTrackAtIndex(playerQueueCursor, { markPreviousComplete: true });
+    } else if (queueAtEnd && playerQueueLoopEnabled) {
+      void playQueueTrackAtIndex(0, { markPreviousComplete: true });
+    } else {
+      void startNextListenLabQueueTrack();
+    }
+  }, [currentTrack, playbackDurationMs, playbackPaused, playbackPositionMs, playerQueueCursor, playerQueueSource, playerQueueTracks, playerQueueLoopEnabled, playerTrackLoopEnabled, queuePauseAfterCurrentEnabled]);
 
   useEffect(() => {
     if (!currentTrack || playbackPaused || activePlayerListenEventId == null) {
@@ -1990,21 +2301,32 @@ export function App() {
   }, [profile?.recent_tracks]);
 
   useEffect(() => {
-    if (!playerMenuOpen || !profile || playerRecentTracksLoading) {
+    if (!playerPanelVisible || !profile || playerRecentTracksLoading) {
+      return;
+    }
+    if ((!playbackPaused && currentTrack) || (playerRecentTracks.length > 0 && !playerRecentTracksError)) {
       return;
     }
 
     void loadPlayerRecentTracks();
-  }, [playerMenuOpen, profile, recentRange, experienceMode]);
+  }, [currentTrack, experienceMode, playbackPaused, playerPanelVisible, playerRecentTracks.length, playerRecentTracksError, playerRecentTracksLoading, profile, recentRange]);
 
   useEffect(() => {
-    if (!playerMenuOpen || !profile) {
+    if (!playerPanelVisible || !profile) {
+      return;
+    }
+
+    if (playerQueueCleared) {
       return;
     }
 
     if (usingRecentLikedStartupFallback) {
-      setPlayerQueueTracks(recentTracksToPlayerQueueTracks(profile.recent_likes_tracks.slice(1)));
+      resetQueueControls();
+      setPlayerQueueCleared(false);
+      setPlayerQueueTracks(recentTracksToPlayerQueueTracks(profile.recent_likes_tracks));
+      setPlayerQueueCursor(0);
       setPlayerQueueSource("listenlab");
+      setPlayerQueueContext({ label: "Recent likes" });
       setPlayerQueueError(null);
       return;
     }
@@ -2018,7 +2340,7 @@ export function App() {
     }
 
     void loadPlayerQueueTracks();
-  }, [playerMenuOpen, profile, experienceMode, usingRecentLikedStartupFallback, liveSpotifyPlaybackShouldOwnQueue, playerQueueSource]);
+  }, [playerPanelVisible, profile, experienceMode, usingRecentLikedStartupFallback, liveSpotifyPlaybackShouldOwnQueue, playerQueueSource, playerQueueCleared]);
 
   useEffect(() => {
     if (pendingSeekMs == null) {
@@ -2085,7 +2407,10 @@ export function App() {
     let syncedPlaylistUri: string | null = null;
     const explicitQueuePlaylistUris = options?.queuePlaylistUris?.filter((uri) => uri.startsWith("spotify:track:")) ?? null;
     if (explicitQueuePlaylistUris || (options?.syncQueuePlaylist && playerQueueSource === "listenlab")) {
-      const queuePlaylistUris = explicitQueuePlaylistUris ?? queuePlaylistTrackUris(trackUri, playerQueueTracks);
+      const listenLabUpcomingTracks = playerQueueCursor == null
+        ? playerQueueTracks
+        : playerQueueTracks.slice(playerQueueCursor + 1);
+      const queuePlaylistUris = explicitQueuePlaylistUris ?? queuePlaylistTrackUris(trackUri, listenLabUpcomingTracks);
       if (queuePlaylistUris.length > 0) {
         try {
           const playlist = await syncQueuePlaylist(queuePlaylistUris);
@@ -2194,15 +2519,20 @@ export function App() {
   async function resumePlayback() {
     await activatePlayerElement();
     if (currentTrack?.uri && (playbackDurationMs <= 0 || currentTrack.durationMs <= 0)) {
-      return playTrackUri(currentTrack.uri, Math.max(0, playbackPositionMs), {
+      const resumed = await playTrackUri(currentTrack.uri, Math.max(0, playbackPositionMs), {
         syncQueuePlaylist: playerQueueSource === "listenlab",
       });
+      if (resumed) {
+        setQueuePausedCursor(null);
+      }
+      return resumed;
     }
     const player = spotifyPlayerRef.current;
     if (player) {
       try {
         await player.resume();
         setPlaybackPaused(false);
+        setQueuePausedCursor(null);
         setPlayerError(null);
         return true;
       } catch {
@@ -2221,6 +2551,7 @@ export function App() {
         });
       }
       setPlaybackPaused(false);
+      setQueuePausedCursor(null);
       setPlayerError(null);
       return true;
     } catch (error) {
@@ -2375,8 +2706,12 @@ export function App() {
       setPlaybackPositionMs(0);
       setPlaybackDurationMs(Math.max(0, options?.optimisticTrack?.durationMs ?? 0));
       if (options?.queueTracks) {
+        resetQueueControls();
+        setPlayerQueueCleared(false);
         setPlayerQueueTracks(options.queueTracks);
+        setPlayerQueueCursor(options.queueCursor ?? 0);
         setPlayerQueueSource("listenlab");
+        setPlayerQueueContext(options.queueContext ?? null);
         setPlayerQueueError(null);
       }
       const listenEventId = await saveListenLabPlayerEvent(nextCurrentTrack, options?.sourceTrack ?? null, 0);
@@ -2419,17 +2754,23 @@ export function App() {
     const albumQueue = buildAlbumPlaybackQueue(trackUri);
     void handlePopupTrackPlayback(trackUri, {
       optimisticTrack: selectedPreviewTrackOptimisticSummary,
+      queueCursor: albumQueue?.queueCursor,
+      queueContext: albumQueue?.queueContext,
       queuePlaylistUris: albumQueue?.playlistUris,
       queueTracks: albumQueue?.queueTracks,
       sourceTrack: selectedPreview?.sourceTrack ?? null,
     });
   }
 
-  function buildAlbumPlaybackQueue(selectedTrackUri: string | null) {
-    if (!selectedTrackUri || albumTrackEntries.length <= 1) {
+  function buildAlbumPlaybackQueue(
+    selectedTrackUri: string | null,
+    entries: AlbumTrackEntry[] = albumTrackEntries,
+    contextPreview: PreviewItem | null = selectedPreview,
+  ) {
+    if (!selectedTrackUri || entries.length <= 1) {
       return null;
     }
-    const playableTracks = albumTrackEntries
+    const playableTracks = entries
       .map((track) => {
         const uri = trackUriWithFallback(track.uri, track.id);
         if (!uri) {
@@ -2446,14 +2787,28 @@ export function App() {
       return null;
     }
     const playlistUris = playableTracks.map(({ uri }) => uri);
-    const queueTracks = playableTracks.slice(selectedIndex + 1).map(({ track, uri }) => ({
-      ...playerSummaryFromAlbumTrack(track),
+    const queueTracks = playableTracks.map(({ track, uri }) => ({
+      ...playerSummaryFromAlbumTrack(track, contextPreview),
       uri,
       durationMs: Math.max(0, track.durationMs ?? 0),
       trackId: track.id ?? spotifyTrackIdFromUri(uri),
-      albumId: selectedPreview?.albumId ?? selectedPreview?.sourceTrack?.album_id ?? selectedPreview?.entityId ?? null,
+      albumId: albumIdFromPreview(contextPreview),
     }));
-    return { playlistUris, queueTracks };
+    const albumLabel = contextPreview?.kind === "album"
+      ? contextPreview.label
+      : (contextPreview?.sourceTrack?.album_name ?? contextPreview?.detail ?? "Album");
+    const albumUrl = contextPreview?.kind === "album"
+      ? contextPreview.url
+      : (contextPreview?.sourceTrack?.album_url ?? spotifyEntityUrl("album", albumIdFromPreview(contextPreview)));
+    return {
+      playlistUris,
+      queueTracks,
+      queueCursor: selectedIndex,
+      queueContext: {
+        label: albumLabel,
+        url: albumUrl || null,
+      },
+    };
   }
 
   async function seekPlayer(positionMs: number) {
@@ -2491,6 +2846,10 @@ export function App() {
 
   async function movePlaybackQueue(direction: "previous" | "next") {
     await activatePlayerElement();
+    if (playerQueueSource === "listenlab") {
+      await moveListenLabQueue(direction);
+      return;
+    }
     const player = spotifyPlayerRef.current;
     const deviceId = spotifyDeviceIdRef.current;
     const query = deviceId
@@ -2500,7 +2859,6 @@ export function App() {
       await spotifyApiRequest(query, { method: "POST" });
       setPlayerError(null);
       setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
-      updateLocalQueueAfterMove(direction);
       schedulePlaybackSnapshotRefresh();
       return;
     } catch (error) {
@@ -2510,7 +2868,6 @@ export function App() {
           await sdkMove.call(player);
           setPlayerError(null);
           setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
-          updateLocalQueueAfterMove(direction);
           schedulePlaybackSnapshotRefresh();
           return;
         } catch {
@@ -2521,19 +2878,89 @@ export function App() {
     }
   }
 
-  function updateLocalQueueAfterMove(direction: "previous" | "next") {
-    if (playerQueueSource !== "listenlab" || direction !== "next") {
+  async function moveListenLabQueue(direction: "previous" | "next", options?: { markPreviousComplete?: boolean; startPaused?: boolean }) {
+    if (playerQueueSource !== "listenlab") {
       return;
     }
-    const nextTrack = playerQueueTracks[0] ?? null;
-    if (!nextTrack) {
+    const currentIndex = playerQueueCursor ?? playerQueueTracks.findIndex((track) => (
+      Boolean(track.uri && currentTrack?.uri && track.uri === currentTrack.uri)
+    ));
+    if (currentIndex < 0) {
+      setPlayerError("ListenLab queue position could not be found.");
       return;
     }
-    setCurrentTrack(nextTrack);
-    setPlaybackPaused(false);
+    const targetIndex = direction === "next" ? currentIndex + 1 : currentIndex - 1;
+    const targetTrack = playerQueueTracks[targetIndex] ?? null;
+    if (!targetTrack?.uri) {
+      setPlayerError(direction === "next" ? "No next song is available in this queue." : "No previous song is available in this queue.");
+      return;
+    }
+    await playQueueTrackAtIndex(targetIndex, {
+      markPreviousComplete: options?.markPreviousComplete,
+      startPaused: options?.startPaused,
+    });
+  }
+
+  async function playQueueTrackAtIndex(targetIndex: number, options?: { markPreviousComplete?: boolean; startPaused?: boolean }) {
+    const targetTrack = playerQueueTracks[targetIndex] ?? null;
+    if (!targetTrack?.uri) {
+      setPlayerError("This queued song does not have a playable Spotify track.");
+      return;
+    }
+    const currentIndex = playerQueueCursor ?? playerQueueTracks.findIndex((track) => (
+      Boolean(track.uri && currentTrack?.uri && track.uri === currentTrack.uri)
+    ));
+    const upcomingTracks = playerQueueTracks.slice(targetIndex + 1);
+    const playbackStarted = await playTrackUri(targetTrack.uri, 0, {
+      queuePlaylistUris: queuePlaylistTrackUris(targetTrack.uri, upcomingTracks),
+      syncQueuePlaylist: true,
+    });
+    if (!playbackStarted) {
+      autoAdvanceTrackUriRef.current = null;
+      return;
+    }
+    if (currentIndex !== targetIndex) {
+      const previousStatus: "complete" | "in_progress" = options?.markPreviousComplete ? "complete" : "in_progress";
+      void updateListenLabPlayerEventProgress(playbackPositionMsRef.current, previousStatus);
+    }
+    setCurrentTrack(targetTrack);
+    if (options?.startPaused) {
+      await pausePlayback();
+      setPlaybackPaused(true);
+      setQueuePausedCursor(targetIndex);
+    } else {
+      setPlaybackPaused(false);
+      setQueuePausedCursor(null);
+    }
     setPlaybackPositionMs(0);
-    setPlaybackDurationMs(Math.max(0, nextTrack.durationMs ?? 0));
-    setPlayerQueueTracks(playerQueueTracks.slice(1));
+    setPlaybackDurationMs(Math.max(0, targetTrack.durationMs ?? 0));
+    setPlayerQueueCursor(targetIndex);
+    setPlayerQueueSource("listenlab");
+    setPlayerQueueCleared(false);
+    setPlayerQueueError(null);
+    setPlayerError(null);
+    setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
+    const listenEventId = await saveListenLabPlayerEvent(targetTrack, null, 0);
+    setActivePlayerListenEventId(listenEventId);
+  }
+
+  async function startNextListenLabQueueTrack() {
+    await moveListenLabQueue("next", { markPreviousComplete: true });
+  }
+
+  async function pauseAtNextListenLabQueueTrack() {
+    if (playerQueueSource !== "listenlab" || playerQueueCursor == null) {
+      return;
+    }
+    const queueAtEnd = playerQueueCursor >= playerQueueTracks.length - 1;
+    const targetIndex = queueAtEnd && playerQueueLoopEnabled ? 0 : playerQueueCursor + 1;
+    if (!playerQueueTracks[targetIndex]?.uri) {
+      setQueuePauseAfterCurrentEnabled(false);
+      void pausePlayback();
+      return;
+    }
+    setQueuePauseAfterCurrentEnabled(false);
+    await playQueueTrackAtIndex(targetIndex, { markPreviousComplete: true, startPaused: true });
   }
 
   function schedulePlaybackSnapshotRefresh() {
@@ -2549,26 +2976,191 @@ export function App() {
     return Boolean(trackUri && currentTrack?.uri === trackUri && !playbackPaused);
   }
 
-  function openAlbumTrackPreview(track: AlbumTrackEntry) {
-    if (!selectedPreview || (selectedPreview.kind !== "track" && selectedPreview.kind !== "album")) {
+  function resetQueueControls() {
+    setPlayerQueueShuffleEnabled(false);
+    setPlayerQueueShuffleBaseTracks(null);
+    setPlayerQueueSettingsOpen(false);
+    setPlayerQueuePauseMenuOpen(false);
+    setPlayerQueueLoopEnabled(false);
+    setPlayerTrackLoopEnabled(false);
+    setQueuePauseAfterCurrentEnabled(false);
+    setQueueSleepTimerUntilMs(null);
+    setQueuePausedCursor(null);
+  }
+
+  function clearQueueContext() {
+    setPlayerQueueContext(null);
+  }
+
+  function queueTrackIdentity(track: (Pick<PlayerQueueTrack, "uri" | "trackId"> | PlayerTrackSummary) | null | undefined) {
+    if (!track) {
+      return null;
+    }
+    if (track.uri) {
+      return track.uri;
+    }
+    return "trackId" in track ? track.trackId : null;
+  }
+
+  function shuffleTracks(tracks: PlayerQueueTrack[]) {
+    const shuffledTracks = [...tracks];
+    for (let index = shuffledTracks.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [shuffledTracks[index], shuffledTracks[swapIndex]] = [shuffledTracks[swapIndex], shuffledTracks[index]];
+    }
+    return shuffledTracks;
+  }
+
+  function shuffleQueueTail(tracks: PlayerQueueTrack[], cursor: number | null) {
+    if (playerQueueLoopEnabled && cursor != null && cursor >= 0) {
+      const current = tracks[cursor];
+      const shuffledTracks = shuffleTracks(tracks.filter((_track, index) => index !== cursor));
+      return current ? [current, ...shuffledTracks] : shuffledTracks;
+    }
+    const stableEnd = cursor != null && cursor >= 0 ? cursor + 1 : 0;
+    const stableTracks = tracks.slice(0, stableEnd);
+    const shuffledTracks = shuffleTracks(tracks.slice(stableEnd));
+    return [...stableTracks, ...shuffledTracks];
+  }
+
+  function restoreQueueOrder() {
+    const baseTracks = playerQueueShuffleBaseTracks;
+    if (!baseTracks) {
+      setPlayerQueueShuffleEnabled(false);
+      return;
+    }
+    setPlayerQueueTracks(baseTracks);
+    if (playerQueueSource === "listenlab") {
+      const currentIdentity = queueTrackIdentity(currentTrack);
+      const restoredCursor = currentIdentity
+        ? baseTracks.findIndex((track) => queueTrackIdentity(track) === currentIdentity)
+        : playerQueueCursor;
+      setPlayerQueueCursor(restoredCursor != null && restoredCursor >= 0 ? restoredCursor : playerQueueCursor);
+    }
+    setPlayerQueueShuffleEnabled(false);
+    setPlayerQueueShuffleBaseTracks(null);
+  }
+
+  function toggleQueueShuffle() {
+    if (playerQueueShuffleEnabled) {
+      restoreQueueOrder();
+      return;
+    }
+    if (!queueShuffleAvailable) {
+      return;
+    }
+    setPlayerQueueShuffleBaseTracks(playerQueueTracks);
+    const nextTracks = shuffleQueueTail(playerQueueTracks, hasActiveQueueCursor ? activeQueueCursor : null);
+    setPlayerQueueTracks(nextTracks);
+    if (playerQueueLoopEnabled && hasActiveQueueCursor && playerQueueSource === "listenlab") {
+      setPlayerQueueCursor(0);
+    }
+    setPlayerQueueShuffleEnabled(true);
+  }
+
+  function toggleQueueLoop() {
+    setPlayerQueueLoopEnabled((current) => !current);
+  }
+
+  function toggleTrackLoop() {
+    setPlayerTrackLoopEnabled((current) => !current);
+    setQueuePauseAfterCurrentEnabled(false);
+    setQueuePausedCursor(null);
+  }
+
+  function clearPlayerQueue() {
+    setPlayerQueueTracks([]);
+    setPlayerQueueCursor(null);
+    setPlayerQueueSource(null);
+    clearQueueContext();
+    setPlayerQueueError(null);
+    resetQueueControls();
+    setPlayerQueueCleared(true);
+  }
+
+  async function prepareQueueControlAction() {
+    if (!liveReadOnlyMode) {
+      return;
+    }
+    await takeOverPlaybackFromLiveSnapshot();
+    if (playerQueueSource === "spotify" && hasActiveQueueCursor) {
+      setPlayerQueueSource("listenlab");
+      setPlayerQueueCursor(activeQueueCursor);
+      setPlayerQueueCleared(false);
+    }
+  }
+
+  async function handleQueueShuffleClick() {
+    await prepareQueueControlAction();
+    toggleQueueShuffle();
+  }
+
+  async function handleQueueLoopClick() {
+    await prepareQueueControlAction();
+    toggleQueueLoop();
+  }
+
+  async function handleQueuePauseAfterCurrentClick() {
+    await prepareQueueControlAction();
+    setQueueSleepTimerUntilMs(null);
+    setQueuePausedCursor(null);
+    setPlayerTrackLoopEnabled(false);
+    setQueuePauseAfterCurrentEnabled((current) => !current);
+    setPlayerQueuePauseMenuOpen(false);
+  }
+
+  async function handleQueueSleepTimerClick() {
+    await prepareQueueControlAction();
+    setQueuePauseAfterCurrentEnabled(false);
+    setQueuePausedCursor(null);
+    setQueueSleepTimerUntilMs(Date.now() + 15 * 60 * 1000);
+    setPlayerQueuePauseMenuOpen(false);
+  }
+
+  function cancelQueueDelay() {
+    setQueuePauseAfterCurrentEnabled(false);
+    setQueueSleepTimerUntilMs(null);
+    setQueuePausedCursor(null);
+    setPlayerQueuePauseMenuOpen(false);
+  }
+
+  async function handleTrackLoopClick() {
+    await prepareQueueControlAction();
+    toggleTrackLoop();
+  }
+
+  function unloopCurrentTrack() {
+    setPlayerTrackLoopEnabled(false);
+  }
+
+  async function handleClearPlayerQueueClick() {
+    await prepareQueueControlAction();
+    clearPlayerQueue();
+  }
+
+  function openAlbumTrackPreview(
+    track: AlbumTrackEntry,
+    contextPreview: PreviewItem | null = selectedPreview,
+  ) {
+    if (!contextPreview || (contextPreview.kind !== "track" && contextPreview.kind !== "album")) {
       return;
     }
     const previewTrackUri = trackUriWithFallback(track.uri, track.id);
-    const previewTrackUrl = spotifyTrackUrl(previewTrackUri) ?? (track.id ? `https://open.spotify.com/track/${track.id}` : selectedPreview.url);
+    const previewTrackUrl = spotifyTrackUrl(previewTrackUri) ?? (track.id ? `https://open.spotify.com/track/${track.id}` : contextPreview.url);
     setSelectedPreview({
-      image: track.sourceTrack?.image_url ?? selectedPreview.image ?? null,
-      fallbackLabel: selectedPreview.fallbackLabel,
+      image: track.sourceTrack?.image_url ?? contextPreview.image ?? null,
+      fallbackLabel: contextPreview.fallbackLabel,
       label: track.name,
-      meta: track.artistName ?? track.sourceTrack?.artist_name ?? selectedPreview.meta ?? null,
-      detail: track.sourceTrack?.album_name ?? selectedPreview.detail,
+      meta: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview.meta ?? null,
+      detail: track.sourceTrack?.album_name ?? contextPreview.detail,
       kind: "track",
       entityId: track.id ?? null,
       trackUri: previewTrackUri,
       url: previewTrackUrl,
       trackId: track.id ?? null,
-      albumId: selectedPreview.albumId ?? selectedPreview.sourceTrack?.album_id ?? selectedPreview.entityId ?? null,
-      artistName: track.artistName ?? track.sourceTrack?.artist_name ?? selectedPreview.artistName ?? null,
-      sourceTrack: track.sourceTrack ?? selectedPreview.sourceTrack ?? null,
+      albumId: albumIdFromPreview(contextPreview),
+      artistName: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview.artistName ?? null,
+      sourceTrack: track.sourceTrack ?? contextPreview.sourceTrack ?? null,
     });
   }
 
@@ -2621,13 +3213,13 @@ export function App() {
     });
   }
 
-  function playerSummaryFromAlbumTrack(track: AlbumTrackEntry): PlayerTrackSummary {
+  function playerSummaryFromAlbumTrack(track: AlbumTrackEntry, contextPreview: PreviewItem | null = selectedPreview): PlayerTrackSummary {
     const previewTrackUri = trackUriWithFallback(track.uri, track.id);
     return {
       name: track.name,
-      artists: track.artistName ?? track.sourceTrack?.artist_name ?? selectedPreview?.artistName ?? "Unknown artist",
-      album: track.sourceTrack?.album_name ?? selectedPreview?.sourceTrack?.album_name ?? selectedPreview?.detail ?? "Unknown album",
-      image: track.sourceTrack?.image_url ?? selectedPreview?.image ?? null,
+      artists: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview?.artistName ?? "Unknown artist",
+      album: track.sourceTrack?.album_name ?? contextPreview?.sourceTrack?.album_name ?? contextPreview?.detail ?? "Unknown album",
+      image: track.sourceTrack?.image_url ?? contextPreview?.image ?? null,
       uri: previewTrackUri,
       durationMs: Math.max(0, track.durationMs ?? track.sourceTrack?.duration_ms ?? 0),
     };
@@ -2781,12 +3373,34 @@ export function App() {
     const albumQueue = buildAlbumPlaybackQueue(trackUri);
     const playbackStarted = await handlePopupTrackPlayback(trackUri, {
       optimisticTrack: playerSummaryFromAlbumTrack(track),
+      queueCursor: albumQueue?.queueCursor,
+      queueContext: albumQueue?.queueContext,
       queuePlaylistUris: albumQueue?.playlistUris,
       queueTracks: albumQueue?.queueTracks,
       sourceTrack: track.sourceTrack,
     });
     if (playbackStarted) {
       openAlbumTrackPreview(track);
+    }
+  }
+
+  async function handleHomeAlbumTrackPlay(track: AlbumTrackEntry, trackUri: string | null) {
+    if (!trackUri) {
+      return;
+    }
+    const contextPreview = playerAlbumPreviewContext();
+    clearPreviewPlaybackState();
+    const albumQueue = buildAlbumPlaybackQueue(trackUri, homeAlbumTrackEntries, contextPreview);
+    const playbackStarted = await handlePopupTrackPlayback(trackUri, {
+      optimisticTrack: playerSummaryFromAlbumTrack(track, contextPreview),
+      queueCursor: albumQueue?.queueCursor,
+      queueContext: albumQueue?.queueContext,
+      queuePlaylistUris: albumQueue?.playlistUris,
+      queueTracks: albumQueue?.queueTracks,
+      sourceTrack: track.sourceTrack,
+    });
+    if (playbackStarted) {
+      openAlbumTrackPreview(track, contextPreview);
     }
   }
 
@@ -2803,7 +3417,9 @@ export function App() {
     setSectionPages(INITIAL_SECTION_PAGES);
     setRateLimitMenuOpen(false);
     setPlayerQueueTracks([]);
+    setPlayerQueueCursor(null);
     setPlayerQueueSource(null);
+    resetQueueControls();
     setQueuePlaylistUri(null);
     setReloadCooldownUntil(null);
     setReloadCooldownDurationMs(60_000);
@@ -2970,7 +3586,10 @@ export function App() {
         setLiveControlOverrideUntilMs(null);
         setCurrentTrack(null);
         setPlayerQueueTracks([]);
+        setPlayerQueueCursor(null);
         setPlayerQueueSource(null);
+        clearQueueContext();
+        resetQueueControls();
         setQueuePlaylistUri(null);
         setPlayerReady(false);
         setStatusMessage("Not connected yet. Use Spotify login to start the auth flow.");
@@ -3003,17 +3622,6 @@ export function App() {
     } catch {
       setLivePlaybackSnapshot(null);
       setLiveAwaitingNextTrack(false);
-    }
-  }
-
-  async function triggerRecentIngestPollForTrackEnd() {
-    try {
-      await fetch(`${apiBaseUrl}/auth/recent-ingest/poll-now`, {
-        method: "POST",
-        credentials: "include",
-      });
-    } catch {
-      // Keep track-end UX resilient even if this background ingest trigger fails.
     }
   }
 
@@ -3867,7 +4475,10 @@ export function App() {
     setPlayerMenuOpen(false);
     setCurrentTrack(null);
     setPlayerQueueTracks([]);
+    setPlayerQueueCursor(null);
     setPlayerQueueSource(null);
+    clearQueueContext();
+    resetQueueControls();
     setQueuePlaylistUri(null);
     setPlayerReady(false);
     setListeningLogTracks([]);
@@ -3925,12 +4536,12 @@ export function App() {
     return (
       <DashboardTrackColumn
         section={section}
-        items={items}
+        items={section === "recent" ? filterAndDedupeRecentTracksForActivity(items, recentPlayFilter) : items}
         available={available}
-        emptyCopy={emptyCopy}
+        emptyCopy={section === "recent" && recentPlayFilter !== "all" ? `No ${recentPlayFilter} songs in this recent window.` : emptyCopy}
         unavailableCopy={unavailableCopy}
         unavailableAction={unavailableAction}
-        paged={paged}
+        paged={section === "recent" ? false : paged}
         presorted={presorted}
         trackRankingMode={trackRankingMode}
         sectionPage={sectionPages[section]}
@@ -6775,10 +7386,17 @@ export function App() {
     }
   }
 
-  async function fetchRecentSections(targetRange: RecentRange): Promise<RecentSectionResponse> {
+  async function fetchRecentSections(targetRange: RecentRange, forceRecentSync = false): Promise<RecentSectionResponse> {
     const endpoint = experienceMode === "local" ? "/me/local/recent" : "/me/recent";
+    const params = new URLSearchParams({
+      recent_range: targetRange,
+      limit: String(RECENT_SECTION_FETCH_LIMIT),
+    });
+    if (forceRecentSync && experienceMode !== "local") {
+      params.set("force_recent_sync", "true");
+    }
     const response = await fetch(
-      `${apiBaseUrl}${endpoint}?recent_range=${encodeURIComponent(targetRange)}&limit=${encodeURIComponent(String(RECENT_SECTION_FETCH_LIMIT))}`,
+      `${apiBaseUrl}${endpoint}?${params.toString()}`,
       {
         credentials: "include",
       },
@@ -6852,7 +7470,10 @@ export function App() {
   async function loadPlayerQueueTracks() {
     if (experienceMode === "local") {
       setPlayerQueueTracks([]);
+      setPlayerQueueCursor(null);
       setPlayerQueueSource(null);
+      clearQueueContext();
+      resetQueueControls();
       setQueuePlaylistUri(null);
       setPlayerQueueError(null);
       return;
@@ -6869,39 +7490,67 @@ export function App() {
       if (!response.ok) {
         throw new Error(`Spotify queue request failed (${response.status}).`);
       }
-      const payload = (await response.json()) as {
-        queue?: Array<{
-          type?: string | null;
+      type SpotifyQueueItem = {
+        type?: string | null;
+        id?: string | null;
+        name?: string | null;
+        uri?: string | null;
+        duration_ms?: number | null;
+        album?: {
           id?: string | null;
           name?: string | null;
-          uri?: string | null;
-          duration_ms?: number | null;
-          album?: {
-            id?: string | null;
-            name?: string | null;
-            images?: Array<{ url?: string | null }>;
-          } | null;
-          artists?: Array<{ name?: string | null }>;
-        }>;
+          images?: Array<{ url?: string | null }>;
+        } | null;
+        artists?: Array<{ name?: string | null }>;
       };
-      const liveQueueTracks = (payload.queue ?? [])
-        .filter((item) => item.type === "track" || item.uri?.startsWith("spotify:track:"))
-        .map((item) => ({
+      const spotifyQueueItemToTrack = (item: SpotifyQueueItem | null | undefined): PlayerQueueTrack | null => {
+        if (!item || (item.type !== "track" && !item.uri?.startsWith("spotify:track:"))) {
+          return null;
+        }
+        const uri = trackUriWithFallback(item.uri, item.id ?? null);
+        return {
           name: item.name ?? "Unknown track",
           artists: (item.artists ?? []).map((artist) => artist.name ?? "").filter(Boolean).join(", ") || "Unknown artist",
           album: item.album?.name ?? "Unknown album",
           image: item.album?.images?.find((image) => image.url)?.url ?? null,
-          uri: item.uri ?? (item.id ? `spotify:track:${item.id}` : null),
+          uri,
           durationMs: Math.max(0, Number(item.duration_ms ?? 0)),
-          trackId: item.id ?? spotifyTrackIdFromUri(item.uri ?? null),
+          trackId: item.id ?? spotifyTrackIdFromUri(uri),
           albumId: item.album?.id ?? null,
-        }))
+        };
+      };
+      const displayTrackAsQueueTrack = playerDisplayTrack
+        ? {
+          ...playerDisplayTrack,
+          trackId: spotifyTrackIdFromUri(playerDisplayTrack.uri),
+          albumId: null,
+        }
+        : null;
+      const payload = (await response.json()) as {
+        currently_playing?: SpotifyQueueItem | null;
+        queue?: SpotifyQueueItem[];
+      };
+      const currentQueueTrack = spotifyQueueItemToTrack(payload.currently_playing) ?? displayTrackAsQueueTrack;
+      const queuedTracks = (payload.queue ?? [])
+        .map(spotifyQueueItemToTrack)
+        .filter((track): track is PlayerQueueTrack => Boolean(track));
+      const liveQueueTracks = [
+        ...(currentQueueTrack ? [currentQueueTrack] : []),
+        ...(queueRepeatsTrack(queuedTracks, currentQueueTrack?.uri ?? playerDisplayTrack?.uri) ? [] : queuedTracks),
+      ]
         .slice(0, PLAYER_RECENT_FETCH_LIMIT);
-      setPlayerQueueTracks(queueRepeatsTrack(liveQueueTracks, currentTrack?.uri) ? [] : liveQueueTracks);
+      setPlayerQueueTracks(liveQueueTracks);
+      setPlayerQueueCursor(currentQueueTrack ? 0 : null);
       setPlayerQueueSource("spotify");
+      clearQueueContext();
+      setPlayerQueueCleared(false);
+      resetQueueControls();
     } catch (error) {
       setPlayerQueueTracks([]);
+      setPlayerQueueCursor(null);
       setPlayerQueueSource(null);
+      clearQueueContext();
+      resetQueueControls();
       setPlayerQueueError(formatUiErrorMessage(error, "Failed to load Spotify queue."));
     } finally {
       setPlayerQueueLoading(false);
@@ -6912,10 +7561,19 @@ export function App() {
     limit: number,
     offset: number,
     sourceFilter: RecentDebugSourceFilter,
+    forceRecentSync = false,
   ): Promise<ListeningLogResponse> {
     const endpoint = "/debug/listening-log";
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+      source_filter: sourceFilter,
+    });
+    if (forceRecentSync) {
+      params.set("force_recent_sync", "true");
+    }
     const response = await fetch(
-      `${apiBaseUrl}${endpoint}?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}&source_filter=${encodeURIComponent(sourceFilter)}`,
+      `${apiBaseUrl}${endpoint}?${params.toString()}`,
       { credentials: "include" },
     );
     if (!response.ok) {
@@ -7149,7 +7807,7 @@ export function App() {
     }
   }
 
-  async function loadListeningLogBatch(reset: boolean = false) {
+  async function loadListeningLogBatch(reset: boolean = false, forceRecentSync = false) {
     if (listeningLogLoading) {
       return;
     }
@@ -7157,7 +7815,7 @@ export function App() {
     setListeningLogError("");
     try {
       const targetOffset = reset ? 0 : listeningLogOffset;
-      const payload = await fetchListeningLog(50, targetOffset, recentDebugSourceFilter);
+      const payload = await fetchListeningLog(50, targetOffset, recentDebugSourceFilter, forceRecentSync);
       setListeningLogTracks((current) => (reset ? payload.items : [...current, ...payload.items]));
       setListeningLogOffset(targetOffset + payload.items.length);
       setListeningLogHasMore(Boolean(payload.has_more));
@@ -7545,7 +8203,7 @@ export function App() {
     }
   }
 
-  async function refreshRecentSection(targetRange: RecentRange = recentRange) {
+  async function refreshRecentSection(targetRange: RecentRange = recentRange, forceRecentSync = false) {
     if (experienceMode === "full" && spotifyCooldownActive) {
       setStatusMessage(formatCooldownCopy(reloadSecondsRemaining));
       setStatusHistory((current) => [...current, "Spotify cooldown active. Recent refresh paused."]);
@@ -7557,7 +8215,7 @@ export function App() {
     setLoadingRecentSection(true);
     setStatusMessage("Refreshing recent sections...");
     try {
-      const data = await fetchRecentSections(targetRange);
+      const data = await fetchRecentSections(targetRange, forceRecentSync);
       setProfile((current) =>
         current
           ? {
@@ -7589,6 +8247,428 @@ export function App() {
     } finally {
       setLoadingRecentSection(false);
     }
+  }
+
+  function renderQueueDelayControl() {
+    return (
+      <div className="player-queue-settings">
+        <button
+          aria-expanded={playerQueuePauseMenuOpen}
+          aria-label="Queue delay timer"
+          aria-pressed={queueDelayActive}
+          className={`player-queue-header-button${queueDelayActive ? " player-queue-header-button-active player-queue-header-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+          disabled={!playerDisplayTrack && playerQueueTracks.length === 0}
+          onClick={() => setPlayerQueuePauseMenuOpen((current) => !current)}
+          title={queueDelayActive ? "Queue delay active" : "Delay queue"}
+          type="button"
+        >
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="M10 2h4v2h-4V2Zm1 11V7h2v7h-5v-2h3Zm1-8a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm0 18a10 10 0 1 1 0-20 10 10 0 0 1 0 20Zm6.6-17.2 1.4 1.4-1.6 1.6L17 7.4l1.6-1.6Z" />
+          </svg>
+        </button>
+        {playerQueuePauseMenuOpen ? (
+          <div className="player-queue-settings-menu player-queue-delay-menu">
+            <button
+              className={queuePauseAfterCurrentEnabled ? "player-queue-settings-active" : undefined}
+              disabled={playerQueueTracks.length === 0}
+              onClick={() => void handleQueuePauseAfterCurrentClick()}
+              type="button"
+            >
+              After this song
+            </button>
+            <button
+              className={queueSleepTimerActive ? "player-queue-settings-active" : undefined}
+              disabled={!playerDisplayTrack}
+              onClick={() => void handleQueueSleepTimerClick()}
+              type="button"
+            >
+              15 minutes
+            </button>
+            {queueDelayActive ? (
+              <button onClick={cancelQueueDelay} type="button">
+                Cancel delay
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderHomePlayerPanel() {
+    if (!profile || appPage !== "dashboard") {
+      return null;
+    }
+
+    return (
+      <section className="info-card info-card-wide player-home-panel" aria-label="Playback controls">
+        <div className="player-home-layout">
+          <div className="player-current-column">
+            <div className="player-menu-summary">
+              <div className="player-menu-copy">
+                <div className="player-menu-copy-top">
+                  <h2>
+                    {playerDisplayTrack ? (
+                      <button
+                        className="player-menu-title-button player-menu-title-scroll"
+                        onClick={() => openPlayerTrackDetails()}
+                        type="button"
+                      >
+                        <span>{playerDisplayTrack.name ?? "ListenLab Player"}</span>
+                      </button>
+                    ) : (
+                      <span className="player-menu-title-scroll">
+                        <span>ListenLab Player</span>
+                      </span>
+                    )}
+                  </h2>
+                  {playerDisplayTrack?.uri ? (
+                    <a
+                      aria-label="Open in Spotify"
+                      className="player-menu-external"
+                      href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <svg aria-hidden="true" viewBox="0 0 24 24">
+                        <path d="M12 2.2a9.8 9.8 0 1 0 0 19.6 9.8 9.8 0 0 0 0-19.6Zm4.49 14.13a.72.72 0 0 1-.99.24c-2.7-1.65-6.1-2.02-10.1-1.11a.72.72 0 1 1-.32-1.4c4.38-1 8.14-.57 11.17 1.28.34.2.44.65.24.99Zm1.2-2.68a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.46-1.34a.9.9 0 1 1-.52-1.72c4.18-1.27 9.37-.66 12.92 1.52.42.26.56.82.3 1.24Zm.1-2.8c-3.7-2.2-9.8-2.4-13.34-1.33a1.08 1.08 0 1 1-.63-2.07c4.06-1.23 10.8-.99 15.07 1.55a1.08 1.08 0 0 1-1.1 1.85Z" />
+                      </svg>
+                    </a>
+                  ) : null}
+                </div>
+                {playerDisplayArtistName ? (
+                  <button className="player-menu-meta-button player-menu-line single-line-ellipsis" onClick={() => openPlayerArtistDetails()} type="button">
+                    {playerDisplayArtistName}
+                  </button>
+                ) : (
+                  <p className="player-menu-line single-line-ellipsis">{playerDisplayTrack?.artists ?? "Spotify Premium playback"}</p>
+                )}
+              </div>
+            </div>
+
+            {playerDisplayTrack ? (
+              <div className="player-progress" aria-label="Playback progress">
+                <input
+                  aria-label="Seek playback"
+                  className="player-progress-slider"
+                  disabled={!canControlPlayback}
+                  max={Math.max(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0, 1)}
+                  min={0}
+                  onChange={(event) => setPendingSeekMs(Number(event.currentTarget.value))}
+                  onMouseUp={(event) => {
+                    if (canControlPlayback) {
+                      void seekPlayer(Number(event.currentTarget.value));
+                    }
+                  }}
+                  onTouchEnd={(event) => {
+                    if (canControlPlayback) {
+                      void seekPlayer(Number(event.currentTarget.value));
+                    }
+                  }}
+                  step={1000}
+                  title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
+                  type="range"
+                  value={pendingSeekMs ?? playerDisplayPositionMs}
+                />
+                <div className="player-progress-times">
+                  <span>{formatPlaybackClock(pendingSeekMs ?? playerDisplayPositionMs)}</span>
+                  <span>{formatPlaybackClock(playerDisplayDurationMs || playerDisplayTrack.durationMs || 0)}</span>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="actions actions-centered actions-in-card player-transport-controls">
+              <button
+                aria-label="Previous track"
+                className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                disabled={playerPreviousDisabled}
+                onClick={() => void movePlaybackQueue("previous")}
+                title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Previous track"}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M7 5h2v14H7V5Zm3.7 7L19 5.8v12.4L10.7 12Z" />
+                </svg>
+              </button>
+              <span title={livePlaybackControlTooltip}>
+                <button
+                  className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
+                  disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
+                  onClick={() => void handlePlayerPrimaryButtonClick()}
+                  type="button"
+                >
+                  {playerDisplayPaused ? "Play" : "Pause"}
+                </button>
+              </span>
+              <button
+                aria-label="Next track"
+                className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                disabled={playerNextDisabled}
+                onClick={() => void movePlaybackQueue("next")}
+                title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Next track"}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M15 5h2v14h-2V5ZM5 5.8 13.3 12 5 18.2V5.8Z" />
+                </svg>
+              </button>
+              <button
+                aria-label={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
+                aria-pressed={playerTrackLoopEnabled}
+                className={`secondary-button player-icon-button player-track-loop-button${playerTrackLoopEnabled ? " player-icon-button-active player-icon-button-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                disabled={!playerDisplayTrack}
+                onClick={() => void handleTrackLoopClick()}
+                title={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M7 7h8.8L14 5.2l1.4-1.4L19.6 8l-4.2 4.2-1.4-1.4L15.8 9H7a3 3 0 0 0 0 6h1v2H7A5 5 0 0 1 7 7Zm10 10h-4v-2h4a3 3 0 0 0 0-6h-1V7h1a5 5 0 0 1 0 10Zm-6-1h2v2h-2v-2Z" />
+                </svg>
+              </button>
+            </div>
+
+            <div className={`player-home-album${homeAlbumExpanded ? " player-home-album-expanded" : ""}`}>
+              {playerDisplayTrack?.image ? (
+                <button
+                  aria-expanded={homeAlbumExpanded}
+                  className="player-home-album-art-button"
+                  disabled={!playerDisplayAlbumName}
+                  onClick={() => setHomeAlbumExpanded((current) => !current)}
+                  type="button"
+                >
+                  <img alt={`${playerDisplayAlbumName ?? playerDisplayTrack.album} cover`} className="player-menu-image player-home-album-image" src={playerDisplayTrack.image} />
+                </button>
+              ) : null}
+              {playerDisplayAlbumName ? (
+                <button
+                  aria-expanded={homeAlbumExpanded}
+                  className="player-home-album-title single-line-ellipsis"
+                  onClick={() => setHomeAlbumExpanded((current) => !current)}
+                  type="button"
+                >
+                  {playerDisplayAlbumLabel}
+                </button>
+              ) : (
+                <p className="player-home-album-title player-home-album-title-static single-line-ellipsis">{playerDisplayAlbumLabel}</p>
+              )}
+              {homeAlbumExpanded ? (
+                <div className="player-home-album-tracks detail-modal-album-tracks detail-modal-album-tracks-full">
+                  <div className="detail-modal-album-header" aria-hidden="true">
+                    <span className="detail-modal-album-preview-header">Preview</span>
+                    <span className="detail-modal-album-last-played-header">Played</span>
+                  </div>
+                  {homeAlbumTrackEntriesLoading ? (
+                    <p className="detail-modal-preview-missing">Loading album songs...</p>
+                  ) : null}
+                  {!homeAlbumTrackEntriesLoading && homeAlbumTrackEntriesError ? (
+                    <p className="detail-modal-preview-missing">{homeAlbumTrackEntriesError}</p>
+                  ) : null}
+                  {!homeAlbumTrackEntriesLoading && !homeAlbumTrackEntriesError && homeAlbumTrackEntries.length > 0 ? (
+                    <ul className="detail-album-track-list">
+                      {homeAlbumTrackEntries.map((track) => {
+                        const rowTrackUri = trackUriWithFallback(track.uri, track.id);
+                        const rowIsCurrentTrack = Boolean(rowTrackUri && currentTrack?.uri === rowTrackUri);
+                        const rowPlaying = isTrackPlaying(rowTrackUri);
+                        const rowPreviewPlaying = Boolean(rowTrackUri && previewingTrackUri === rowTrackUri);
+                        const rowPreviewActive = Boolean(rowPreviewPlaying && rowPlaying);
+                        const rowPreviewKey = albumTrackPreviewKey(track, rowTrackUri);
+                        const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
+                        const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
+                        const rowLastPlayed = formatMonthDay(track.lastPlayedAt);
+                        const rowBaseDurationMs = (
+                          track.durationMs
+                          ?? (rowIsCurrentTrack
+                            ? (playbackDurationMs > 0 ? playbackDurationMs : currentTrack?.durationMs ?? null)
+                            : null)
+                        );
+                        const rowElapsedMs = rowIsCurrentTrack
+                          ? (
+                            rowBaseDurationMs != null
+                              ? Math.min(Math.max(0, playbackPositionMs), rowBaseDurationMs)
+                              : Math.max(0, playbackPositionMs)
+                          )
+                          : null;
+                        const rowButtonTimeMs = rowIsCurrentTrack
+                          ? (
+                            rowPlaying
+                              ? rowElapsedMs
+                              : (rowPausedCurrent ? (pausedTimeFlashOn ? rowElapsedMs : rowBaseDurationMs) : rowBaseDurationMs)
+                          )
+                          : rowBaseDurationMs;
+                        return (
+                          <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}`} key={track.id ?? track.name}>
+                            {hasPremiumPlayback ? (
+                              <button
+                                aria-label={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
+                                className={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
+                                disabled={!rowTrackUri}
+                                onClick={() => {
+                                  void handleHomeAlbumTrackPlay(track, rowTrackUri);
+                                }}
+                                type="button"
+                              >
+                                {rowPlaying ? (
+                                  <span className="detail-wave-icon" aria-hidden="true">
+                                    <span />
+                                    <span />
+                                    <span />
+                                  </span>
+                                ) : (
+                                  <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
+                                )}
+                                <span className={`detail-album-track-play-time${rowPausedCurrent ? " detail-album-track-play-time-flash" : ""}`}>
+                                  {rowButtonTimeMs != null ? formatPlaybackClock(rowButtonTimeMs) : "?:??"}
+                                </span>
+                              </button>
+                            ) : null}
+                            <button
+                              className="detail-album-track-name-button single-line-ellipsis"
+                              onClick={() => openAlbumTrackPreview(track, playerAlbumPreviewContext())}
+                              type="button"
+                            >
+                              {track.name}
+                            </button>
+                            <div className="detail-album-track-actions">
+                              {hasPremiumPlayback ? (
+                                <button
+                                  aria-label={rowPreviewPlaying ? `Stop preview for ${track.name}` : `Preview ${track.name}`}
+                                  className={`detail-album-track-preview-button${rowPreviewActive ? " detail-album-track-preview-button-active" : ""}${rowPreviewPlayed ? " detail-album-track-preview-button-played" : ""}`}
+                                  disabled={!rowTrackUri}
+                                  onClick={() => {
+                                    void toggleAlbumTrackPreview(track, rowTrackUri);
+                                  }}
+                                  type="button"
+                                />
+                              ) : (
+                                <span className="detail-album-track-preview-placeholder" aria-hidden="true" />
+                              )}
+                              {rowLastPlayed ? <span className="detail-album-track-last-played">{rowLastPlayed}</span> : <span className="detail-album-track-last-played">-</span>}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? <p className="empty-copy">Track ended. Checking for the next song...</p> : null}
+            {playerError ? <p className="empty-copy">{playerError}</p> : null}
+            {!usingLivePlaybackSnapshot && !playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
+          </div>
+
+          <aside className="player-recent-column player-queue-column player-home-queue-column" aria-label={playerQueueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
+            <div className="player-recent-header">
+              {playerQueueContext?.url ? (
+                <h3>
+                  <a className="player-queue-title-link" href={playerQueueContext.url} rel="noreferrer" target="_blank">
+                    {playerQueueContext.label}
+                  </a>
+                </h3>
+              ) : (
+                <h3>{playerQueueContext?.label ?? "Queue"}</h3>
+              )}
+              <div className="player-queue-header-actions">
+                {playerQueueLoading ? <span>Loading</span> : null}
+                <button
+                  aria-label={playerQueueLoopEnabled ? "Stop looping queue" : "Loop queue"}
+                  aria-pressed={playerQueueLoopEnabled}
+                  className={`player-queue-header-button${playerQueueLoopEnabled ? " player-queue-header-button-active player-queue-header-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                  disabled={playerQueueTracks.length === 0}
+                  onClick={() => void handleQueueLoopClick()}
+                  title={playerQueueLoopEnabled ? "Stop looping queue" : "Loop queue"}
+                  type="button"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M7 7h9.2l-1.8-1.8L15.8 3.8 20 8l-4.2 4.2-1.4-1.4L16.2 9H7a3 3 0 0 0 0 6h1v2H7A5 5 0 0 1 7 7Zm10 10H7.8l1.8 1.8-1.4 1.4L4 16l4.2-4.2 1.4 1.4L7.8 15H17a3 3 0 0 0 0-6h-1V7h1a5 5 0 0 1 0 10Z" />
+                  </svg>
+                </button>
+                {renderQueueDelayControl()}
+                <button
+                  aria-label={playerQueueShuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                  aria-pressed={playerQueueShuffleEnabled}
+                  className={`player-queue-header-button${playerQueueShuffleEnabled ? " player-queue-header-button-active player-queue-shuffle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                  disabled={!queueShuffleAvailable && !playerQueueShuffleEnabled}
+                  onClick={() => void handleQueueShuffleClick()}
+                  title={playerQueueShuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                  type="button"
+                >
+                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M16.8 3.9 21 8.1l-4.2 4.2-1.4-1.4 1.8-1.8h-1.6c-2 0-3.4.8-4.5 2.4l-1.2 1.8c-1.4 2.1-3.4 3.2-5.9 3.2H3v-2h1c1.9 0 3.3-.8 4.3-2.4l1.2-1.8c1.5-2.1 3.5-3.2 6.1-3.2h1.6l-1.8-1.8 1.4-1.4ZM3 7.5h1c2.1 0 3.7.8 5 2.5l-1.2 1.8C6.8 10.3 5.6 9.5 4 9.5H3v-2Zm9.7 5.9c.8 1 1.8 1.6 3.1 1.6h1.4l-1.8-1.8 1.4-1.4L21 16l-4.2 4.2-1.4-1.4 1.8-1.8h-1.4c-2 0-3.6-.8-4.8-2.3l1.1-1.7.6.4Z" />
+                  </svg>
+                </button>
+                <div className="player-queue-settings">
+                  <button
+                    aria-expanded={playerQueueSettingsOpen}
+                    aria-label="Queue settings"
+                    className={`player-queue-header-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                    onClick={() => setPlayerQueueSettingsOpen((current) => !current)}
+                    title="Queue settings"
+                    type="button"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-2.6-1.5L14 2h-4l-.4 3a7.8 7.8 0 0 0-2.6 1.5l-2.4-1-2 3.5 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 2.6 1.5l.4 3h4l.4-3a7.8 7.8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" />
+                    </svg>
+                  </button>
+                  {playerQueueSettingsOpen ? (
+                    <div className="player-queue-settings-menu">
+                      <button className={liveReadOnlyMode ? "player-control-readonly" : undefined} disabled={playerQueueTracks.length === 0} onClick={() => void handleClearPlayerQueueClick()} type="button">
+                        Clear queue
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+            <div className="player-recent-list">
+              {playerQueueTracks.map((track, index) => {
+                const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
+                const isLoopedQueueTrack = playerTrackLoopEnabled && isCurrentQueueTrack;
+                const isPausedQueueTrack = queuePausedCursor === index && isCurrentQueueTrack && playerDisplayPaused;
+                const isUpNextQueueTrack = !playerTrackLoopEnabled && hasActiveQueueCursor && index === activeQueueCursor + 1;
+                const isQueueDimmedByTrackLoop = playerTrackLoopEnabled && !isCurrentQueueTrack;
+                return (
+                  <div
+                    className={`player-recent-row player-queue-row${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack || isPausedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
+                    data-player-queue-role={isUpNextQueueTrack ? "up-next" : (isCurrentQueueTrack ? "current" : undefined)}
+                    key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
+                  >
+                    <button aria-label={`Play ${track.name}`} className="player-queue-cover-button" disabled={!track.uri} onClick={() => void playQueueTrackAtIndex(index)} type="button">
+                      {track.image ? (
+                        <img alt="" className="player-recent-cover" src={track.image} />
+                      ) : (
+                        <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">{track.name.slice(0, 1).toUpperCase()}</span>
+                      )}
+                      <span className="player-queue-cover-play" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                          <path d="M8 5.5v13l10-6.5-10-6.5Z" />
+                        </svg>
+                      </span>
+                    </button>
+                    <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
+                      <span className="player-recent-track single-line-ellipsis">{track.name}</span>
+                      <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
+                    </button>
+                    {isPausedQueueTrack ? <span className="player-queue-status player-queue-status-next">Paused</span> : null}
+                    {isCurrentQueueTrack && !isLoopedQueueTrack && !isPausedQueueTrack ? <span className="player-queue-status">Current</span> : null}
+                    {isLoopedQueueTrack ? (
+                      <button aria-label="Unloop current song" className="player-queue-status player-queue-status-next player-queue-loop-status" onClick={unloopCurrentTrack} title="Unloop" type="button">
+                        <span className="player-queue-loop-status-default">Looped</span>
+                        <span className="player-queue-loop-status-hover">Unloop</span>
+                      </button>
+                    ) : null}
+                    {isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-next">{queuePauseAfterCurrentEnabled ? "Paused" : "Up next"}</span> : null}
+                  </div>
+                );
+              })}
+              {!playerQueueLoading && playerQueueTracks.length === 0 ? <p className="empty-copy player-recent-empty">No queued songs were returned.</p> : null}
+              {playerQueueError ? <p className="empty-copy player-recent-empty">{playerQueueError}</p> : null}
+            </div>
+          </aside>
+        </div>
+      </section>
+    );
   }
 
   const showLoadingScreen = (authTransitioning || session?.authenticated || experienceMode === "local") && !profile;
@@ -7803,6 +8883,18 @@ export function App() {
                           <h2>Experimental</h2>
                           <p className="empty-copy">Tools for inspecting the ranking and identity work in progress.</p>
                         </div>
+                        <button
+                          aria-label="Force refresh Spotify data"
+                          className="secondary-button experimental-refresh-button"
+                          disabled={spotifyCooldownActive || loadingRecentSection}
+                          onClick={() => void refreshRecentSection(recentRange, true)}
+                          title={spotifyCooldownActive ? "Spotify requests are paused by cooldown." : "Force refresh Spotify data"}
+                          type="button"
+                        >
+                          <svg aria-hidden="true" viewBox="0 0 24 24">
+                            <path d="M17.7 6.3A7.9 7.9 0 0 0 4.4 10H2.3A10 10 0 0 1 19.1 4.9L21 3v6h-6l2.7-2.7ZM6.3 17.7A7.9 7.9 0 0 0 19.6 14h2.1A10 10 0 0 1 4.9 19.1L3 21v-6h6l-2.7 2.7Z" />
+                          </svg>
+                        </button>
                       </div>
                       <div className="experimental-menu-actions">
                         <button className="secondary-button" onClick={openListeningLogPage} type="button">
@@ -7877,8 +8969,8 @@ export function App() {
                   </button>
 
                   {playerMenuOpen ? (
-                    <section className="profile-card top-profile-card profile-menu-card player-menu-card">
-                      <div className="player-menu-layout">
+                    <section className="profile-card top-profile-card profile-menu-card player-menu-card player-menu-card-basic">
+                      <div className="player-menu-layout player-menu-layout-basic">
                         <aside className="player-recent-column" aria-label="Recently played songs">
                           <div className="player-recent-header">
                             <h3>Recently played</h3>
@@ -7915,6 +9007,9 @@ export function App() {
                                   <span className="player-recent-copy">
                                     <span className="player-recent-track single-line-ellipsis">
                                       {track.track_name ?? "Unknown track"}
+                                      {Number(track.completed_play_count ?? 0) > 1 ? (
+                                        <span className="player-recent-repeat-count">x{track.completed_play_count}</span>
+                                      ) : null}
                                     </span>
                                     <span className="player-recent-artist single-line-ellipsis">
                                       {track.artist_name ?? "Unknown artist"}
@@ -7979,7 +9074,9 @@ export function App() {
                                     rel="noreferrer"
                                     target="_blank"
                                   >
-                                    {"\u2197"}
+                                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                                      <path d="M12 2.2a9.8 9.8 0 1 0 0 19.6 9.8 9.8 0 0 0 0-19.6Zm4.49 14.13a.72.72 0 0 1-.99.24c-2.7-1.65-6.1-2.02-10.1-1.11a.72.72 0 1 1-.32-1.4c4.38-1 8.14-.57 11.17 1.28.34.2.44.65.24.99Zm1.2-2.68a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.46-1.34a.9.9 0 1 1-.52-1.72c4.18-1.27 9.37-.66 12.92 1.52.42.26.56.82.3 1.24Zm.1-2.8c-3.7-2.2-9.8-2.4-13.34-1.33a1.08 1.08 0 1 1-.63-2.07c4.06-1.23 10.8-.99 15.07 1.55a1.08 1.08 0 0 1-1.1 1.85Z" />
+                                    </svg>
                                   </a>
                                 ) : null}
                               </div>
@@ -8043,7 +9140,19 @@ export function App() {
                             </div>
                           ) : null}
 
-                          <div className="actions actions-centered actions-in-card">
+                          <div className="actions actions-centered actions-in-card player-transport-controls">
+                            <button
+                              aria-label="Previous track"
+                              className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                              disabled={playerPreviousDisabled}
+                              onClick={() => void movePlaybackQueue("previous")}
+                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Previous track"}
+                              type="button"
+                            >
+                              <svg aria-hidden="true" viewBox="0 0 24 24">
+                                <path d="M7 5h2v14H7V5Zm3.7 7L19 5.8v12.4L10.7 12Z" />
+                              </svg>
+                            </button>
                             <span title={livePlaybackControlTooltip}>
                               <button
                                 className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
@@ -8054,27 +9163,86 @@ export function App() {
                                 {playerDisplayPaused ? "Play" : "Pause"}
                               </button>
                             </span>
+                            <button
+                              aria-label="Next track"
+                              className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                              disabled={playerNextDisabled}
+                              onClick={() => void movePlaybackQueue("next")}
+                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Next track"}
+                              type="button"
+                            >
+                              <svg aria-hidden="true" viewBox="0 0 24 24">
+                                <path d="M15 5h2v14h-2V5ZM5 5.8 13.3 12 5 18.2V5.8Z" />
+                              </svg>
+                            </button>
+                            <button
+                              aria-label={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
+                              aria-pressed={playerTrackLoopEnabled}
+                              className={`secondary-button player-icon-button player-track-loop-button${playerTrackLoopEnabled ? " player-icon-button-active player-icon-button-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                              disabled={!playerDisplayTrack}
+                              onClick={() => void handleTrackLoopClick()}
+                              title={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
+                              type="button"
+                            >
+                              <svg aria-hidden="true" viewBox="0 0 24 24">
+                                <path d="M7 7h8.8L14 5.2l1.4-1.4L19.6 8l-4.2 4.2-1.4-1.4L15.8 9H7a3 3 0 0 0 0 6h1v2H7A5 5 0 0 1 7 7Zm10 10h-4v-2h4a3 3 0 0 0 0-6h-1V7h1a5 5 0 0 1 0 10Zm-6-1h2v2h-2v-2Z" />
+                              </svg>
+                            </button>
                           </div>
 
-                          <div className="actions actions-centered actions-in-card player-queue-controls">
-                            <button
-                              className="secondary-button"
-                              disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
-                              onClick={() => void movePlaybackQueue("previous")}
-                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
-                              type="button"
-                            >
-                              Back
-                            </button>
-                            <button
-                              className="secondary-button"
-                              disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
-                              onClick={() => void movePlaybackQueue("next")}
-                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
-                              type="button"
-                            >
-                              Forward
-                            </button>
+                          <div className="player-overlay-up-next-panel">
+                            <div className="player-overlay-up-next-copy">
+                              <span className="player-overlay-up-next-label">Up next</span>
+                              {playerUpNextTrack ? (
+                                <button
+                                  className="player-overlay-up-next-title single-line-ellipsis"
+                                  onClick={() => openQueuePlayerTrackDetails(playerUpNextTrack)}
+                                  type="button"
+                                >
+                                  {playerUpNextTrack.name}
+                                </button>
+                              ) : (
+                                <span className="player-overlay-up-next-title single-line-ellipsis">No next song</span>
+                              )}
+                              {playerUpNextTrack ? (
+                                <button
+                                  className="player-overlay-up-next-artist single-line-ellipsis"
+                                  onClick={() => openQueuePlayerTrackDetails(playerUpNextTrack)}
+                                  type="button"
+                                >
+                                  {playerUpNextTrack.artists}
+                                </button>
+                              ) : null}
+                            </div>
+                            <div className="player-overlay-up-next-actions">
+                              <button
+                                aria-label={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
+                                aria-pressed={playerTrackLoopEnabled}
+                                className={`player-queue-header-button${playerTrackLoopEnabled ? " player-queue-header-button-active player-queue-header-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                                disabled={!playerDisplayTrack}
+                                onClick={() => void handleTrackLoopClick()}
+                                title={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
+                                type="button"
+                              >
+                                <svg aria-hidden="true" viewBox="0 0 24 24">
+                                  <path d="M7 7h8.8L14 5.2l1.4-1.4L19.6 8l-4.2 4.2-1.4-1.4L15.8 9H7a3 3 0 0 0 0 6h1v2H7A5 5 0 0 1 7 7Zm10 10h-4v-2h4a3 3 0 0 0 0-6h-1V7h1a5 5 0 0 1 0 10Zm-6-1h2v2h-2v-2Z" />
+                                </svg>
+                              </button>
+                              {renderQueueDelayControl()}
+                              <button
+                                aria-label={playerQueueShuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                                aria-pressed={playerQueueShuffleEnabled}
+                                className={`player-queue-header-button${playerQueueShuffleEnabled ? " player-queue-header-button-active player-queue-shuffle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                                disabled={!queueShuffleAvailable && !playerQueueShuffleEnabled}
+                                onClick={() => void handleQueueShuffleClick()}
+                                title={playerQueueShuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                                type="button"
+                              >
+                                <svg aria-hidden="true" viewBox="0 0 24 24">
+                                  <path d="M16.8 3.9 21 8.1l-4.2 4.2-1.4-1.4 1.8-1.8h-1.6c-2 0-3.4.8-4.5 2.4l-1.2 1.8c-1.4 2.1-3.4 3.2-5.9 3.2H3v-2h1c1.9 0 3.3-.8 4.3-2.4l1.2-1.8c1.5-2.1 3.5-3.2 6.1-3.2h1.6l-1.8-1.8 1.4-1.4ZM3 7.5h1c2.1 0 3.7.8 5 2.5l-1.2 1.8C6.8 10.3 5.6 9.5 4 9.5H3v-2Zm9.7 5.9c.8 1 1.8 1.6 3.1 1.6h1.4l-1.8-1.8 1.4-1.4L21 16l-4.2 4.2-1.4-1.4 1.8-1.8h-1.4c-2 0-3.6-.8-4.8-2.3l1.1-1.7.6.4Z" />
+                                </svg>
+                              </button>
+                            </div>
                           </div>
 
                           {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? (
@@ -8084,36 +9252,135 @@ export function App() {
                           {!usingLivePlaybackSnapshot && !playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
                         </div>
 
-                        <aside className="player-recent-column player-queue-column" aria-label="Spotify queue">
+                        <aside className="player-recent-column player-queue-column" aria-label={playerQueueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
                           <div className="player-recent-header">
-                            <h3>Queue</h3>
-                            {playerQueueLoading ? <span>Loading</span> : null}
-                          </div>
-                          <div className="player-recent-list">
-                            {playerQueueTracks.map((track, index) => (
+                            {playerQueueContext?.url ? (
+                              <h3>
+                                <a className="player-queue-title-link" href={playerQueueContext.url} rel="noreferrer" target="_blank">
+                                  {playerQueueContext.label}
+                                </a>
+                              </h3>
+                            ) : (
+                              <h3>{playerQueueContext?.label ?? "Queue"}</h3>
+                            )}
+                            <div className="player-queue-header-actions">
+                              {playerQueueLoading ? <span>Loading</span> : null}
                               <button
-                                className="player-recent-row"
-                                key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
-                                onClick={() => openQueuePlayerTrackDetails(track)}
+                                aria-label={playerQueueLoopEnabled ? "Stop looping queue" : "Loop queue"}
+                                aria-pressed={playerQueueLoopEnabled}
+                                className={`player-queue-header-button${playerQueueLoopEnabled ? " player-queue-header-button-active player-queue-header-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                                disabled={playerQueueTracks.length === 0}
+                                onClick={() => void handleQueueLoopClick()}
+                                title={playerQueueLoopEnabled ? "Stop looping queue" : "Loop queue"}
                                 type="button"
                               >
-                                {track.image ? (
-                                  <img alt="" className="player-recent-cover" src={track.image} />
-                                ) : (
-                                  <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">
-                                    {track.name.slice(0, 1).toUpperCase()}
-                                  </span>
-                                )}
-                                <span className="player-recent-copy">
-                                  <span className="player-recent-track single-line-ellipsis">
-                                    {track.name}
-                                  </span>
-                                  <span className="player-recent-artist single-line-ellipsis">
-                                    {track.artists}
-                                  </span>
-                                </span>
+                                <svg aria-hidden="true" viewBox="0 0 24 24">
+                                  <path d="M7 7h9.2l-1.8-1.8L15.8 3.8 20 8l-4.2 4.2-1.4-1.4L16.2 9H7a3 3 0 0 0 0 6h1v2H7A5 5 0 0 1 7 7Zm10 10H7.8l1.8 1.8-1.4 1.4L4 16l4.2-4.2 1.4 1.4L7.8 15H17a3 3 0 0 0 0-6h-1V7h1a5 5 0 0 1 0 10Z" />
+                                </svg>
                               </button>
-                            ))}
+                              {renderQueueDelayControl()}
+                              <button
+                                aria-label={playerQueueShuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                                aria-pressed={playerQueueShuffleEnabled}
+                                className={`player-queue-header-button${playerQueueShuffleEnabled ? " player-queue-header-button-active player-queue-shuffle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                                disabled={!queueShuffleAvailable && !playerQueueShuffleEnabled}
+                                onClick={() => void handleQueueShuffleClick()}
+                                title={playerQueueShuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                                type="button"
+                              >
+                                <svg aria-hidden="true" viewBox="0 0 24 24">
+                                  <path d="M16.8 3.9 21 8.1l-4.2 4.2-1.4-1.4 1.8-1.8h-1.6c-2 0-3.4.8-4.5 2.4l-1.2 1.8c-1.4 2.1-3.4 3.2-5.9 3.2H3v-2h1c1.9 0 3.3-.8 4.3-2.4l1.2-1.8c1.5-2.1 3.5-3.2 6.1-3.2h1.6l-1.8-1.8 1.4-1.4ZM3 7.5h1c2.1 0 3.7.8 5 2.5l-1.2 1.8C6.8 10.3 5.6 9.5 4 9.5H3v-2Zm9.7 5.9c.8 1 1.8 1.6 3.1 1.6h1.4l-1.8-1.8 1.4-1.4L21 16l-4.2 4.2-1.4-1.4 1.8-1.8h-1.4c-2 0-3.6-.8-4.8-2.3l1.1-1.7.6.4Z" />
+                                </svg>
+                              </button>
+                              <div className="player-queue-settings">
+                                <button
+                                  aria-expanded={playerQueueSettingsOpen}
+                                  aria-label="Queue settings"
+                                  className={`player-queue-header-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                                  onClick={() => setPlayerQueueSettingsOpen((current) => !current)}
+                                  title="Queue settings"
+                                  type="button"
+                                >
+                                  <svg aria-hidden="true" viewBox="0 0 24 24">
+                                    <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-2.6-1.5L14 2h-4l-.4 3a7.8 7.8 0 0 0-2.6 1.5l-2.4-1-2 3.5 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 2.6 1.5l.4 3h4l.4-3a7.8 7.8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" />
+                                  </svg>
+                                </button>
+                                {playerQueueSettingsOpen ? (
+                                  <div className="player-queue-settings-menu">
+                                    <button
+                                      className={liveReadOnlyMode ? "player-control-readonly" : undefined}
+                                      disabled={playerQueueTracks.length === 0}
+                                      onClick={() => void handleClearPlayerQueueClick()}
+                                      type="button"
+                                    >
+                                      Clear queue
+                                    </button>
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="player-recent-list">
+                            {playerQueueTracks.map((track, index) => {
+                              const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
+                              const isLoopedQueueTrack = playerTrackLoopEnabled && isCurrentQueueTrack;
+                              const isUpNextQueueTrack = !playerTrackLoopEnabled && hasActiveQueueCursor && index === activeQueueCursor + 1;
+                              const isQueueDimmedByTrackLoop = playerTrackLoopEnabled && !isCurrentQueueTrack;
+                              return (
+                                <div
+                                  className={`player-recent-row player-queue-row${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
+                                  data-player-queue-role={isUpNextQueueTrack ? "up-next" : (isCurrentQueueTrack ? "current" : undefined)}
+                                  key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
+                                >
+                                  <button
+                                    aria-label={`Play ${track.name}`}
+                                    className="player-queue-cover-button"
+                                    disabled={!track.uri}
+                                    onClick={() => void playQueueTrackAtIndex(index)}
+                                    type="button"
+                                  >
+                                    {track.image ? (
+                                      <img alt="" className="player-recent-cover" src={track.image} />
+                                    ) : (
+                                      <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">
+                                        {track.name.slice(0, 1).toUpperCase()}
+                                      </span>
+                                    )}
+                                    <span className="player-queue-cover-play" aria-hidden="true">
+                                      <svg viewBox="0 0 24 24">
+                                        <path d="M8 5.5v13l10-6.5-10-6.5Z" />
+                                      </svg>
+                                    </span>
+                                  </button>
+                                  <button
+                                    className="player-recent-copy player-queue-copy-button"
+                                    onClick={() => openQueuePlayerTrackDetails(track)}
+                                    type="button"
+                                  >
+                                    <span className="player-recent-track single-line-ellipsis">
+                                      {track.name}
+                                    </span>
+                                    <span className="player-recent-artist single-line-ellipsis">
+                                      {track.artists}
+                                    </span>
+                                  </button>
+                                  {isCurrentQueueTrack && !isLoopedQueueTrack ? <span className="player-queue-status">Current</span> : null}
+                                  {isLoopedQueueTrack ? (
+                                    <button
+                                      aria-label="Unloop current song"
+                                      className="player-queue-status player-queue-status-next player-queue-loop-status"
+                                      onClick={unloopCurrentTrack}
+                                      title="Unloop"
+                                      type="button"
+                                    >
+                                      <span className="player-queue-loop-status-default">Looped</span>
+                                      <span className="player-queue-loop-status-hover">Unloop</span>
+                                    </button>
+                                  ) : null}
+                                  {isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-next">Up next</span> : null}
+                                </div>
+                              );
+                            })}
                             {!playerQueueLoading && playerQueueTracks.length === 0 ? (
                               <p className="empty-copy player-recent-empty">No queued songs were returned.</p>
                             ) : null}
@@ -8393,13 +9660,33 @@ export function App() {
               </div>
             ) : (
             <div className="dashboard-grid">
+              {renderHomePlayerPanel()}
               <DualSectionCard
                 title={renderSectionTitle("Activity", "recent_likes")}
                 section="recent"
                 anchorId="activity"
                 leftTitle={(
                   <div className="section-column-header">
-                    <h3>Recently played</h3>
+                    <div className="section-column-header-actions">
+                      <div className="track-ranking-toggle recent-play-filter-toggle" role="group" aria-label="Recently played filter">
+                        {[
+                          ["listened", "Listened"],
+                          ["all", "All"],
+                        ].map(([value, label]) => (
+                          <button
+                            className={`track-ranking-chip${recentPlayFilter === value ? " track-ranking-chip-active" : ""}`}
+                            key={value}
+                            onClick={() => setRecentPlayFilter(value as RecentPlayFilter)}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <button className="secondary-button inline-reload-button listen-log-button" onClick={openListeningLogPage} type="button">
+                      Listen Log
+                    </button>
                   </div>
                 )}
                 rightTitle={renderSectionTitle("Recently liked", "recent_likes")}
@@ -8415,7 +9702,7 @@ export function App() {
                     <button
                       className="secondary-button inline-reload-button"
                       disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection()}
+                      onClick={() => void refreshRecentSection(recentRange)}
                       type="button"
                     >
                       {loadingRecentSection ? "Refreshing..." : "Reload this section"}
@@ -8434,7 +9721,7 @@ export function App() {
                     <button
                       className="secondary-button inline-reload-button"
                       disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection()}
+                      onClick={() => void refreshRecentSection(recentRange)}
                       type="button"
                     >
                       {loadingRecentSection ? "Refreshing..." : "Reload this section"}
@@ -8483,7 +9770,7 @@ export function App() {
                     <button
                       className="secondary-button inline-reload-button"
                       disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection()}
+                      onClick={() => void refreshRecentSection(recentRange)}
                       type="button"
                     >
                       {loadingRecentSection ? "Refreshing..." : "Reload this section"}
@@ -8536,7 +9823,7 @@ export function App() {
                       <button
                         className="secondary-button inline-reload-button"
                         disabled={loadingRecentSection}
-                        onClick={() => void refreshRecentSection()}
+                        onClick={() => void refreshRecentSection(recentRange)}
                         type="button"
                       >
                         {loadingRecentSection ? "Refreshing..." : "Reload this section"}
@@ -8587,7 +9874,7 @@ export function App() {
                       <button
                         className="secondary-button inline-reload-button"
                         disabled={loadingRecentSection}
-                        onClick={() => void refreshRecentSection()}
+                        onClick={() => void refreshRecentSection(recentRange)}
                         type="button"
                       >
                         {loadingRecentSection ? "Refreshing..." : "Reload this section"}

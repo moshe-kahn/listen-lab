@@ -10,6 +10,7 @@ import {
   formatTrackSourceBadge,
   sortedTracksForView,
 } from "../../utils/dashboardUtils";
+import { recentTrackCompletionRatio } from "../../utils/playbackUtils";
 import { DashboardPaging } from "./DashboardPaging";
 
 type DashboardTrackColumnProps = {
@@ -65,6 +66,14 @@ export function DashboardTrackColumn({
     section === "tracksAllTimeCurrent" || section === "tracksAllTimeNew"
       ? formatFormulaRankDelta(track)
       : null;
+  const completedRepeatText = (track: RecentTrack) =>
+    section === "recent" && Number(track.filtered_play_count ?? track.completed_play_count ?? 0) > 1
+      ? `x${track.filtered_play_count ?? track.completed_play_count}`
+      : null;
+  const completionRatio = (track: RecentTrack) =>
+    section === "recent"
+      ? recentTrackCompletionRatio(track)
+      : null;
 
   const cappedRows = isAllTimeTrackSection || section === "tracksRecent"
     ? capTracksPerAlbum(rankedItems, 1)
@@ -72,7 +81,7 @@ export function DashboardTrackColumn({
   const pageRows = paged ? visibleItems(section, cappedRows) : cappedRows;
   return (
     <>
-      <div className="item-list">
+      <div className={`item-list${section === "recent" ? " item-list-scroll" : ""}`}>
         {pageRows.map((row, index) =>
           renderDashboardListCard(
             {
@@ -82,10 +91,11 @@ export function DashboardTrackColumn({
               imageAlt: `${row.track.album_name ?? row.track.track_name ?? "Album"} cover`,
               fallbackLabel: "T",
               primaryText: row.track.track_name ?? "Unknown track",
-              primaryBadgeText: formulaRankDeltaText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
+              primaryBadgeText: formulaRankDeltaText(row.track) ?? completedRepeatText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
               secondaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
               secondaryText: row.track.artist_name ?? "Unknown artist",
               tertiaryText: row.track.album_name ?? "Unknown album",
+              completionRatio: completionRatio(row.track),
               metricText: isAllTimeTrackSection
                 ? (
                     section === "tracksAllTimeNew"
@@ -99,11 +109,11 @@ export function DashboardTrackColumn({
             row.track.track_id ?? `${row.track.track_name}-${index}-${section}`,
           ),
         )}
-        {Array.from({ length: emptySlots(pageRows) }).map((_, index) => (
+        {section !== "recent" ? Array.from({ length: emptySlots(pageRows) }).map((_, index) => (
           <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
-        ))}
+        )) : null}
       </div>
-      {paged ? (
+      {paged && section !== "recent" ? (
         <DashboardPaging
           section={section}
           itemCount={cappedRows.length}

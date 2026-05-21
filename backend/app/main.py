@@ -93,7 +93,7 @@ from backend.app.spotify_normalization import (
 )
 from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
 from backend.app.spotify_recent_polling import poll_recent_for_user
-from backend.app.spotify_recent_sync import sync_spotify_recent_plays
+from backend.app.spotify_recent_sync import maybe_sync_spotify_recent
 from backend.app.spotify_catalog_backfill import (
     DEFAULT_REQUEST_DELAY_SECONDS,
     discover_known_spotify_track_id,
@@ -369,11 +369,19 @@ async def _fetch_recent_tracks(access_token: str, limit: int) -> tuple[list[dict
     return results, True
 
 
-async def _sync_recent_to_db_best_effort(access_token: str, source_ref: str) -> None:
+async def _sync_recent_to_db_best_effort(
+    access_token: str,
+    source_ref: str,
+    *,
+    force: bool = False,
+    min_interval_seconds: int = 10 * 60,
+) -> None:
     try:
-        await sync_spotify_recent_plays(
+        await maybe_sync_spotify_recent(
             access_token,
             source_ref=source_ref,
+            force=force,
+            min_interval_seconds=min_interval_seconds,
             limit=50,
         )
     except Exception as exc:
@@ -2214,7 +2222,7 @@ async def auth_recent_ingest_debug_items(
 @app.post("/auth/recent-ingest/poll-now")
 async def auth_recent_ingest_poll_now(request: Request) -> dict[str, Any]:
     user_id = _require_user_id(request)
-    return await poll_recent_for_user(user_id)
+    return await poll_recent_for_user(user_id, force=True)
 
 
 @app.get("/me/progress")
@@ -2309,6 +2317,7 @@ async def me_recent(
     request: Request,
     recent_range: str = "short_term",
     limit: int = SECTION_PREVIEW_LIMIT,
+    force_recent_sync: bool = False,
 ) -> dict[str, Any]:
     token = _require_token(request)
     if recent_range not in {"short_term", "medium_term"}:
@@ -2328,7 +2337,7 @@ async def me_recent(
 
         try:
             _set_load_progress(request, "recent listening")
-            await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh")
+            await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh", force=force_recent_sync)
             db_recent_tracks_payload = build_recent_tracks_section_from_db(
                 limit=SPOTIFY_RECENT_MAX_ITEMS,
                 recent_range=recent_range,

@@ -18,6 +18,7 @@ export function DashboardListCard({
   metricText,
   primaryBadgeText,
   secondaryBadgeText,
+  completionRatio,
   trackUri,
   previewTrack,
   primaryClamp = "single-line-ellipsis",
@@ -80,6 +81,14 @@ export function DashboardListCard({
             >
               {tertiaryValue}
             </p>
+            {typeof completionRatio === "number" ? (
+              <span className="card-completion" aria-hidden="true">
+                <span
+                  className="card-completion-fill"
+                  style={{ width: `${Math.round(Math.max(0, Math.min(1, completionRatio)) * 100)}%` }}
+                />
+              </span>
+            ) : null}
           </div>
         </div>
         {metricText ? <div className="card-metric">{metricText}</div> : null}

@@ -22,7 +22,7 @@ from backend.app.spotify_rate_limit import (
     _spotify_cooldown_seconds_remaining,
     _spotify_rate_limit_detail,
 )
-from backend.app.spotify_recent_sync import sync_spotify_recent_plays
+from backend.app.spotify_recent_sync import maybe_sync_spotify_recent
 from backend.app.spotify_token_store import get_spotify_tokens, upsert_spotify_tokens
 from backend.app.utils.time_helpers import _expires_at_from_expires_in
 
@@ -168,9 +168,10 @@ async def auth_callback(request: Request, code: str | None = None, state: str | 
             "latest_api_played_at": None,
         }
         try:
-            summary = await sync_spotify_recent_plays(
+            summary = await maybe_sync_spotify_recent(
                 access_token,
                 source_ref="oauth_recent_ingest",
+                force=True,
                 limit=50,
             )
             ingest_result.update(

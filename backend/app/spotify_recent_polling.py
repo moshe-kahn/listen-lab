@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.app.db import get_spotify_auth_record, list_spotify_auth_users
-from backend.app.spotify_recent_sync import sync_spotify_recent_plays
+from backend.app.spotify_recent_sync import maybe_sync_spotify_recent
 from backend.app.spotify_token_store import (
     SpotifyTokenStoreError,
     mark_spotify_reauth_required,
@@ -34,7 +34,7 @@ def _is_permanent_poll_failure(message: str) -> bool:
     )
 
 
-async def poll_recent_for_user(user_id: str) -> dict[str, Any]:
+async def poll_recent_for_user(user_id: str, *, force: bool = False) -> dict[str, Any]:
     started_at = _utc_now_iso()
     base = {
         "user_id": str(user_id),
@@ -87,9 +87,11 @@ async def poll_recent_for_user(user_id: str) -> dict[str, Any]:
         }
 
     try:
-        summary = await sync_spotify_recent_plays(
+        summary = await maybe_sync_spotify_recent(
             str(token_row["access_token"]),
             source_ref=f"scheduled_user_poll:{user_id}",
+            force=force,
+            min_interval_seconds=30 * 60,
             limit=50,
         )
     except Exception as exc:
@@ -111,12 +113,16 @@ async def poll_recent_for_user(user_id: str) -> dict[str, Any]:
     return {
         **base,
         "completed_at": _utc_now_iso(),
-        "status": "ok",
+        "status": "skipped" if summary.get("skipped") else "ok",
         "scope_ok": True,
         "error": None,
         "error_type": None,
         "spotify_user_id": auth_row.get("spotify_user_id"),
         "run_id": summary.get("run_id"),
+        "sync_status": summary.get("status"),
+        "sync_skipped": bool(summary.get("skipped")),
+        "last_completed_at": summary.get("last_completed_at"),
+        "seconds_since_last_sync": summary.get("seconds_since_last_sync"),
         "fetched_count": int(summary.get("fetched_count") or 0),
         "row_count": int(summary.get("row_count") or 0),
         "inserted_count": int(summary.get("inserted_count") or 0),

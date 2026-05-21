@@ -41,6 +41,8 @@ class RecentTrackQueryRow(TypedDict):
     spotify_album_total_tracks: int | None
     spotify_available_markets_count: int | None
     played_at_gap_ms: int | None
+    unified_duration_ms: int | None
+    unified_ms_played_estimate: int | None
     has_recent_source: bool
     has_history_source: bool
     source_label: str
@@ -60,10 +62,18 @@ def _fetch_recent_track_provenance(raw_row_ids: list[int]) -> dict[int, dict[str
             f"""
             SELECT
               raw_spotify_recent_id,
+              canonical_ms_played,
+              COALESCE(rr.track_duration_ms, rp.track_duration_ms, stc.duration_ms) AS unified_duration_ms,
               CASE WHEN raw_spotify_recent_id IS NOT NULL THEN 1 ELSE 0 END AS recent_source_event_count,
               CASE WHEN raw_spotify_history_id IS NOT NULL THEN 1 ELSE 0 END AS history_source_event_count,
               CASE WHEN raw_spotify_recent_id IS NOT NULL AND raw_spotify_history_id IS NOT NULL THEN 1 ELSE 0 END AS matched_source_event_count
-            FROM v_fact_play_event_with_sources
+            FROM v_fact_play_event_with_sources v
+            LEFT JOIN raw_spotify_recent rr
+              ON rr.id = v.raw_spotify_recent_id
+            LEFT JOIN raw_listenlab_player_play rp
+              ON rp.id = v.raw_listenlab_player_play_id
+            LEFT JOIN spotify_track_catalog stc
+              ON stc.spotify_track_id = v.spotify_track_id
             WHERE raw_spotify_recent_id IN ({placeholders})
             """,
             normalized_ids,
@@ -75,6 +85,8 @@ def _fetch_recent_track_provenance(raw_row_ids: list[int]) -> dict[int, dict[str
         if raw_spotify_recent_id <= 0:
             continue
         provenance_by_row_id[raw_spotify_recent_id] = {
+            "unified_ms_played_estimate": int(row["canonical_ms_played"]) if isinstance(row["canonical_ms_played"], int) else None,
+            "unified_duration_ms": int(row["unified_duration_ms"]) if isinstance(row["unified_duration_ms"], int) else None,
             "recent_source_event_count": int(row["recent_source_event_count"] or 0),
             "history_source_event_count": int(row["history_source_event_count"] or 0),
             "matched_source_event_count": int(row["matched_source_event_count"] or 0),
@@ -90,6 +102,8 @@ def _attach_recent_track_provenance(rows: list[RecentTrackQueryRow]) -> list[Rec
         recent_source_event_count = max(1, int(provenance.get("recent_source_event_count") or 0))
         history_source_event_count = int(provenance.get("history_source_event_count") or 0)
         matched_source_event_count = int(provenance.get("matched_source_event_count") or 0)
+        row["unified_ms_played_estimate"] = provenance.get("unified_ms_played_estimate")
+        row["unified_duration_ms"] = provenance.get("unified_duration_ms")
         has_recent_source = recent_source_event_count > 0
         has_history_source = history_source_event_count > 0
         row["has_recent_source"] = has_recent_source
@@ -174,6 +188,8 @@ def _extract_recent_track_query_row(row: sqlite3.Row) -> RecentTrackQueryRow:
         "spotify_album_total_tracks": int(album_payload["total_tracks"]) if isinstance(album_payload.get("total_tracks"), int) else None,
         "spotify_available_markets_count": len(track_payload.get("available_markets") or []) if isinstance(track_payload.get("available_markets"), list) else None,
         "played_at_gap_ms": None,
+        "unified_duration_ms": None,
+        "unified_ms_played_estimate": None,
     }
 
 
@@ -221,8 +237,8 @@ def query_recent_track_rows(*, limit: int, offset: int = 0) -> list[RecentTrackQ
 
 
 def map_recent_track_row_to_canonical_item(row: RecentTrackQueryRow) -> CanonicalTrackSectionItem:
-    duration_ms = row.get("track_duration_ms")
-    estimated_played_ms = row.get("ms_played_estimate")
+    duration_ms = row.get("unified_duration_ms") or row.get("track_duration_ms")
+    estimated_played_ms = row.get("unified_ms_played_estimate") or row.get("ms_played_estimate")
     return {
         "track_id": row.get("spotify_track_id"),
         "track_name": row.get("track_name_raw"),

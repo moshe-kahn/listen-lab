@@ -15,6 +15,8 @@ from backend.app.cache.history_cache import (
 from backend.app.config import get_settings
 from backend.app.history_analysis import get_history_signature, load_history_insights
 from backend.app.listening_log import query_listening_log
+from backend.app.spotify_recent_sync import maybe_sync_spotify_recent
+from backend.app.spotify_token_store import refresh_access_token_if_needed
 
 router = APIRouter(tags=["admin"])
 
@@ -66,8 +68,17 @@ async def debug_listening_log(
     limit: int = 50,
     offset: int = 0,
     source_filter: str = "all",
+    force_recent_sync: bool = False,
 ) -> dict[str, Any]:
-    _require_local_data_session(request)
+    user_id = _require_local_data_session(request)
+    if force_recent_sync:
+        token_row = refresh_access_token_if_needed(user_id)
+        await maybe_sync_spotify_recent(
+            str(token_row["access_token"]),
+            source_ref="listen_log_reload",
+            force=True,
+            limit=50,
+        )
     payload = query_listening_log(
         limit=limit,
         offset=offset,

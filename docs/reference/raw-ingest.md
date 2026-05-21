@@ -380,6 +380,30 @@ This means:
 - plausible adjacent rows can improve to `api_chronology`
 - sync summaries now also report earliest/latest `played_at`, already-seen source rows, and merged duplicate members
 
+### Recent-sync throttling and force policy
+The app now routes Spotify recent-play syncing through `maybe_sync_spotify_recent(...)`.
+
+Default behavior:
+- scheduled/background polling uses a 30 minute minimum interval
+- app/profile/recent-section loads use a 10 minute minimum interval
+- duplicate concurrent sync attempts share an async lock and skip when a sync recently completed
+- skipped sync responses report status metadata rather than pretending a Spotify page was fetched
+
+Forced behavior:
+- explicit user actions can bypass the minimum interval unless Spotify rate-limit/cooldown state blocks the call
+- forced paths include:
+  - experimental overlay refresh icon
+  - opening Listen Log
+  - Listen Log `Reload`
+  - `/auth/recent-ingest/poll-now`
+  - OAuth recent-ingest flow
+- ordinary dashboard reloads/range changes are not forced
+
+Rationale:
+- Spotify recently-played returns a limited recent window, so the app still needs periodic polling.
+- The endpoint can return the same 50 rows repeatedly; throttling avoids duplicate fetch/write work on normal page loads.
+- Manual refresh remains available when the user expects immediate Spotify data refresh.
+
 ## Spotify History-Dump Ingest
 
 ### Flow
@@ -454,7 +478,7 @@ This is only a narrow sample, not a full-history benchmark.
 ## Live Playback + Durable Ingest Boundary
 - `live_playback_event` is observational evidence, not canonical play history
 - canonical durable rows still come from the existing recent-play/history ingest pipeline
-- when the UI detects a local track end, it can trigger one delayed `POST /auth/recent-ingest/poll-now`
+- local track-end no longer immediately calls `POST /auth/recent-ingest/poll-now`; durable recent ingest is handled by throttled periodic/manual sync paths
 - this keeps durable inserts in one place (recent-play ingest and dedupe logic) while still capturing richer live context
 
 ## Utilities and Validation Scripts

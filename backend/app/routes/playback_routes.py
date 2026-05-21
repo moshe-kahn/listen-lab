@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -13,11 +14,16 @@ from backend.app.db import (
     complete_ingest_run,
     insert_ingest_run,
     insert_listenlab_player_play,
+    sqlite_connection,
     update_listenlab_player_play_progress,
 )
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
+from backend.app.spotify_catalog_backfill import (
+    _upsert_album_track,
+    _upsert_track_catalog,
+)
 from backend.app.spotify_current_playback import get_current_playback_for_user
-from backend.app.spotify_http import _fetch_spotify_profile
+from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get
 from backend.app.spotify_preview import (
     _fetch_album_representative_track,
     _fetch_artist_representative_track,
@@ -29,6 +35,109 @@ from backend.app.spotify_queue_playlist import (
 from backend.app.spotify_token_store import get_spotify_tokens
 
 router = APIRouter(tags=["playback"])
+
+
+def _json_list(value: Any) -> list[Any]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _spotify_track_id_from_uri(track_uri: str | None) -> str | None:
+    if not track_uri or not track_uri.startswith("spotify:track:"):
+        return None
+    return track_uri.split(":")[-1] or None
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _cached_album_id_for_track(spotify_track_id: str) -> str | None:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        row = connection.execute(
+            """
+            SELECT album_id
+            FROM spotify_track_catalog
+            WHERE spotify_track_id = ?
+              AND album_id IS NOT NULL
+              AND trim(album_id) != ''
+              AND lower(COALESCE(last_status, '')) != 'error'
+            """,
+            (spotify_track_id,),
+        ).fetchone()
+    return str(row["album_id"]) if row and row["album_id"] else None
+
+
+def _cached_album_track_rows(album_id: str) -> tuple[list[dict[str, Any]], bool]:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        album_row = connection.execute(
+            """
+            SELECT total_tracks
+            FROM spotify_album_catalog
+            WHERE spotify_album_id = ?
+              AND lower(COALESCE(last_status, '')) != 'error'
+            """,
+            (album_id,),
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT spotify_track_id, disc_number, track_number, name, duration_ms, artists_json
+            FROM spotify_album_track
+            WHERE spotify_album_id = ?
+              AND lower(COALESCE(last_status, '')) != 'error'
+            ORDER BY COALESCE(disc_number, 0), COALESCE(track_number, 0), name, spotify_track_id
+            """,
+            (album_id,),
+        ).fetchall()
+    total_tracks = int(album_row["total_tracks"] or 0) if album_row and album_row["total_tracks"] is not None else None
+    complete = bool(rows) and (total_tracks is None or len(rows) >= total_tracks)
+    return [
+        {
+            "id": str(row["spotify_track_id"] or "") or None,
+            "name": row["name"],
+            "uri": f"spotify:track:{row['spotify_track_id']}" if row["spotify_track_id"] else None,
+            "duration_ms": row["duration_ms"],
+            "artists": _json_list(row["artists_json"]),
+            "disc_number": row["disc_number"],
+            "track_number": row["track_number"],
+        }
+        for row in rows
+    ], complete
+
+
+async def _fetch_and_cache_album_tracks(access_token: str, album_id: str, market: str) -> list[dict[str, Any]]:
+    fetched_at = _utc_now()
+    items: list[dict[str, Any]] = []
+    offset = 0
+    limit = 50
+    while True:
+        payload = await _spotify_get(
+            access_token,
+            f"https://api.spotify.com/v1/albums/{album_id}/tracks",
+            {"limit": limit, "offset": offset},
+        )
+        page_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        for item in page_items:
+            if isinstance(item, dict):
+                items.append(item)
+                _upsert_album_track(
+                    album_id=album_id,
+                    track=item,
+                    market=market,
+                    fetched_at=fetched_at,
+                    last_status="ok",
+                    last_error=None,
+                )
+        next_url = str(payload.get("next") or "")
+        if not next_url or len(page_items) < limit:
+            break
+        offset += limit
+    return items
 
 
 @router.get("/auth/current-playback")
@@ -47,6 +156,64 @@ async def auth_sync_queue_playlist(request: Request, payload: dict[str, Any] = B
         spotify_user_id=str(user_id),
         uris=uris,
     )
+
+
+@router.get("/auth/playback/album-tracks")
+async def auth_playback_album_tracks(
+    request: Request,
+    track_id: str | None = None,
+    track_uri: str | None = None,
+    album_id: str | None = None,
+) -> dict[str, Any]:
+    _require_user_id(request)
+    token = _require_token(request)
+    track_id_candidate = track_id or _spotify_track_id_from_uri(track_uri)
+    normalized_track_id = str(track_id_candidate or "").strip() or None
+    normalized_album_id = str(album_id or "").strip() or None
+    if not normalized_album_id and normalized_track_id:
+        normalized_album_id = _cached_album_id_for_track(normalized_track_id)
+
+    market = "US"
+    source = "cache"
+    if not normalized_album_id and normalized_track_id:
+        track_payload = await _spotify_get(
+            token,
+            f"https://api.spotify.com/v1/tracks/{normalized_track_id}",
+            {},
+        )
+        album_payload = track_payload.get("album") if isinstance(track_payload.get("album"), dict) else {}
+        normalized_album_id = str(album_payload.get("id") or "").strip() or None
+        if normalized_album_id:
+            _upsert_track_catalog(
+                track=track_payload,
+                market=market,
+                fetched_at=_utc_now(),
+                last_status="ok",
+                last_error=None,
+            )
+            source = "spotify_track"
+
+    if not normalized_album_id:
+        raise HTTPException(status_code=404, detail="Album track list is unavailable for this item.")
+
+    cached_items, cached_complete = _cached_album_track_rows(normalized_album_id)
+    if cached_complete:
+        return {
+            "album_id": normalized_album_id,
+            "track_id": normalized_track_id,
+            "items": cached_items,
+            "source": source,
+            "cached": True,
+        }
+
+    items = await _fetch_and_cache_album_tracks(token, normalized_album_id, market)
+    return {
+        "album_id": normalized_album_id,
+        "track_id": normalized_track_id,
+        "items": items,
+        "source": "spotify_album_tracks",
+        "cached": False,
+    }
 
 
 @router.post("/auth/player-listen-event")

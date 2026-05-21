@@ -1,11 +1,12 @@
 from __future__ import annotations
+import asyncio
 import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
 
 from backend.app.config import get_settings
-from backend.app.db import raw_play_event_exists
+from backend.app.db import get_spotify_sync_state, raw_play_event_exists
 from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
 from backend.app.spotify_recent_mapper import map_spotify_recent_play_item
 from backend.app.sync_state import get_spotify_recent_sync_start_point, ingest_spotify_recent_rows
@@ -13,6 +14,7 @@ from backend.app.sync_state import get_spotify_recent_sync_start_point, ingest_s
 logger = logging.getLogger("listenlabs.sync")
 file_logger = logging.getLogger("listenlabs.sync.file")
 settings = get_settings()
+_recent_sync_lock = asyncio.Lock()
 
 
 def _parse_played_at(value: str) -> datetime:
@@ -37,6 +39,78 @@ def _min_played_at(a: str | None, b: str | None) -> str | None:
     if b is None:
         return a
     return a if _parse_played_at(a) <= _parse_played_at(b) else b
+
+
+def _parse_sync_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+async def maybe_sync_spotify_recent(
+    access_token: str,
+    *,
+    source_ref: str | None = None,
+    force: bool = False,
+    min_interval_seconds: int = 30 * 60,
+    limit: int = 50,
+) -> dict[str, Any]:
+    async with _recent_sync_lock:
+        now = datetime.now(UTC)
+        state = get_spotify_sync_state()
+        last_completed_at = _parse_sync_timestamp(state.get("last_completed_at"))
+        bounded_min_interval = max(0, int(min_interval_seconds))
+        if not force and last_completed_at is not None and bounded_min_interval > 0:
+            seconds_since_last_sync = (now - last_completed_at).total_seconds()
+            if seconds_since_last_sync < bounded_min_interval:
+                logger.info(
+                    "Spotify recent sync skipped for %s; last completed %.1fs ago.",
+                    source_ref,
+                    seconds_since_last_sync,
+                )
+                file_logger.info(
+                    "event=spotify_recent_sync_skipped_recently_completed source_ref=%s last_completed_at=%s seconds_since_last_sync=%.3f min_interval_seconds=%s",
+                    source_ref,
+                    state.get("last_completed_at"),
+                    seconds_since_last_sync,
+                    bounded_min_interval,
+                )
+                return {
+                    "status": "skipped_recently_synced",
+                    "skipped": True,
+                    "source_ref": source_ref,
+                    "force": force,
+                    "min_interval_seconds": bounded_min_interval,
+                    "seconds_since_last_sync": seconds_since_last_sync,
+                    "last_completed_at": state.get("last_completed_at"),
+                    "last_run_id": state.get("last_run_id"),
+                    "last_successful_played_at": state.get("last_successful_played_at"),
+                    "fetched_count": 0,
+                    "row_count": 0,
+                    "inserted_count": 0,
+                    "duplicate_count": 0,
+                    "already_seen_source_row_count": 0,
+                    "merged_duplicate_row_count": 0,
+                    "collection_outcomes": {},
+                    "item_decisions": [],
+                    "row_outcomes": [],
+                }
+
+        summary = await sync_spotify_recent_plays(
+            access_token,
+            source_ref=source_ref,
+            limit=limit,
+        )
+        return {
+            **summary,
+            "status": "synced",
+            "skipped": False,
+            "force": force,
+            "min_interval_seconds": bounded_min_interval,
+        }
 
 
 def _apply_api_chronology_estimates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -431,8 +505,9 @@ async def manual_sync_spotify_recent_plays(
     if not resolved_access_token:
         raise RuntimeError("Set SPOTIFY_ACCESS_TOKEN or pass access_token explicitly.")
 
-    return await sync_spotify_recent_plays(
+    return await maybe_sync_spotify_recent(
         resolved_access_token,
         source_ref=source_ref or "manual_spotify_recent_sync",
+        force=True,
         limit=limit,
     )

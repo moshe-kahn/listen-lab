@@ -1,5 +1,5 @@
 import { PLAYER_RECENT_FETCH_LIMIT } from "../constants/appConstants";
-import type { PlayerQueueTrack, PlayerTrackSummary, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
+import type { PlayerQueueTrack, PlayerTrackSummary, RecentPlayFilter, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
 
 export const QUEUE_PLAYLIST_URI_LIMIT = 100;
 
@@ -43,16 +43,118 @@ function playerRecentTrackKey(track: RecentTrack) {
   return `text:${(track.track_name ?? "").trim().toLocaleLowerCase()}::${(track.artist_name ?? "").trim().toLocaleLowerCase()}`;
 }
 
-export function dedupeRecentTracksForPlayer(tracks: RecentTrack[], limit = PLAYER_RECENT_FETCH_LIMIT) {
-  const seen = new Set<string>();
-  const unique: RecentTrack[] = [];
+function recentTrackIsComplete(track: RecentTrack) {
+  if (typeof track.estimated_completion_ratio === "number" && track.estimated_completion_ratio >= 0.98) {
+    return true;
+  }
+  const estimatedPlayedMs = Number(track.estimated_played_ms ?? 0);
+  const durationMs = Number(track.duration_ms ?? 0);
+  return durationMs > 0 && estimatedPlayedMs >= durationMs * 0.98;
+}
+
+export function recentTrackCompletionRatio(track: RecentTrack) {
+  if (typeof track.estimated_completion_ratio === "number" && Number.isFinite(track.estimated_completion_ratio)) {
+    return Math.max(0, Math.min(1, track.estimated_completion_ratio));
+  }
+  const estimatedPlayedMs = Number(track.estimated_played_ms ?? 0);
+  const durationMs = Number(track.duration_ms ?? 0);
+  if (durationMs > 0 && Number.isFinite(estimatedPlayedMs)) {
+    return Math.max(0, Math.min(1, estimatedPlayedMs / durationMs));
+  }
+  return null;
+}
+
+function recentTrackMatchesFilter(track: RecentTrack, filter: RecentPlayFilter) {
+  if (filter === "all") {
+    return true;
+  }
+  const ratio = recentTrackCompletionRatio(track);
+  if (ratio === null) {
+    return false;
+  }
+  return filter === "listened"
+    ? ratio >= 0.65
+    : ratio < 0.65;
+}
+
+export function filterAndDedupeRecentTracksForActivity(
+  tracks: RecentTrack[],
+  filter: RecentPlayFilter,
+  limit = tracks.length,
+) {
+  const groups = new Map<string, RecentTrack[]>();
+  const orderedKeys: string[] = [];
   for (const track of tracks) {
-    const key = playerRecentTrackKey(track);
-    if (seen.has(key)) {
+    if (!recentTrackMatchesFilter(track, filter)) {
       continue;
     }
-    seen.add(key);
-    unique.push(track);
+    const key = playerRecentTrackKey(track);
+    const group = groups.get(key);
+    if (group) {
+      group.push(track);
+    } else {
+      groups.set(key, [track]);
+      orderedKeys.push(key);
+    }
+  }
+
+  const unique: RecentTrack[] = [];
+  for (const key of orderedKeys) {
+    const group = groups.get(key) ?? [];
+    if (group.length === 0) {
+      continue;
+    }
+    const representative = group.reduce((best, candidate) => {
+      const bestRatio = recentTrackCompletionRatio(best);
+      const candidateRatio = recentTrackCompletionRatio(candidate);
+      if (candidateRatio === null) {
+        return best;
+      }
+      if (bestRatio === null || candidateRatio > bestRatio) {
+        return candidate;
+      }
+      return best;
+    }, group[0]);
+    unique.push({
+      ...representative,
+      filtered_play_count: group.length,
+    });
+    if (unique.length >= limit) {
+      break;
+    }
+  }
+  return unique;
+}
+
+export function dedupeRecentTracksForPlayer(tracks: RecentTrack[], limit = PLAYER_RECENT_FETCH_LIMIT) {
+  const groups = new Map<string, RecentTrack[]>();
+  const orderedKeys: string[] = [];
+  for (const track of tracks) {
+    const key = playerRecentTrackKey(track);
+    const group = groups.get(key);
+    if (group) {
+      group.push(track);
+    } else {
+      groups.set(key, [track]);
+      orderedKeys.push(key);
+    }
+  }
+
+  const unique: RecentTrack[] = [];
+  for (const key of orderedKeys) {
+    const group = groups.get(key) ?? [];
+    if (group.length === 0) {
+      continue;
+    }
+    const completedTracks = group.filter(recentTrackIsComplete);
+    const representative = completedTracks[0] ?? group[0];
+    unique.push({
+      ...representative,
+      estimated_completion_ratio: completedTracks.length > 0
+        ? Math.max(1, Number(representative.estimated_completion_ratio ?? 0))
+        : representative.estimated_completion_ratio,
+      completed_play_count: completedTracks.length,
+    });
     if (unique.length >= limit) {
       break;
     }

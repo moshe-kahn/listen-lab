@@ -58,6 +58,8 @@ export type RecentTrack = {
   estimated_played_ms?: number | null;
   estimated_played_seconds?: number | null;
   estimated_completion_ratio?: number | null;
+  completed_play_count?: number | null;
+  filtered_play_count?: number | null;
   play_count?: number | null;
   all_time_play_count?: number | null;
   recent_play_count?: number | null;
@@ -958,6 +960,8 @@ export type SectionKey =
   | "recent"
   | "likes";
 
+export type RecentPlayFilter = "listened" | "all" | "skipped";
+
 export type DashboardListCardProps = {
   href?: string | null;
   entityId?: string | null;
@@ -970,6 +974,7 @@ export type DashboardListCardProps = {
   metricText?: string | null;
   primaryBadgeText?: string | null;
   secondaryBadgeText?: string | null;
+  completionRatio?: number | null;
   trackUri?: string | null;
   previewTrack?: RecentTrack | null;
   primaryClamp?: "single-line-ellipsis" | "two-line-clamp";
@@ -1125,6 +1130,11 @@ export type SpotifyPlayerInstance = {
 
 export type PopupTrackPlaybackOptions = {
   optimisticTrack?: PlayerTrackSummary | null;
+  queueCursor?: number | null;
+  queueContext?: {
+    label: string;
+    url?: string | null;
+  } | null;
   queuePlaylistUris?: string[] | null;
   queueTracks?: PlayerQueueTrack[] | null;
   sourceTrack?: RecentTrack | null;

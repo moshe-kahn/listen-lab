@@ -209,3 +209,37 @@ Frontend verification already passed earlier in this branch:
 Recommended next frontend step:
 - Review and commit the existing extraction if satisfied.
 - If extracting more first, take one large Identity Audit view at a time, starting with Track Mapping or Review Queue.
+
+## Playback/Homepage UI State
+Current uncommitted playback UI behavior:
+- Homepage playback is the full-control surface above Activity.
+- The compact popup remains intentionally smaller and omits queue loop/settings.
+- Homepage song title opens the song popup.
+- Homepage no longer shows an `Up next` text line under the album area.
+- Homepage album art lives below play controls, with album name below the art.
+- Clicking homepage album art/name expands only the left player column and renders album tracks using the same row actions as the song overlay.
+- Album expansion must not stretch the queue column.
+- Queue item text opens the track overlay; queue item art starts playback at that queue item.
+- Back/Forward and track-end auto-advance use the ListenLab queue cursor and explicitly start the target track.
+- Delay menu behavior:
+  - `After this song` advances to the next queued song at 0:00 and pauses it.
+  - `15 minutes` is an exact sleep timer.
+
+Manual QA still required with an active Spotify device/Web Playback SDK session.
+
+## Activity and Listen Log UI State
+Current uncommitted recent-listening behavior:
+- Activity recent list scrolls instead of paginating.
+- Activity shows progress bars for listened amount.
+- Activity filter options are `Listened` and `All`; default is `Listened`.
+- `Listened` means at least 65% of the track was played.
+- Activity applies the filter before repeat/dedupe counting.
+- Activity removed the visible `Recently played` label and the `Skipped` option.
+- Activity places the `Listen Log` button at the far right of the header.
+
+Listen Log behavior:
+- Title is `Listen Log`.
+- Rows include album art and listened progress.
+- Play amount toggle options are `Listened`, `All`, and `Skipped`; default is `Listened`.
+- `Reload` forces Spotify recent sync before reloading the log.
+- Loading more rows does not force Spotify sync.
