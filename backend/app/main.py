@@ -20,6 +20,7 @@ from backend.app.auth.session import (
     _session_user_id,
 )
 from backend.app.auth.token import _refresh_spotify_access_token, _require_token
+from backend.app.artwork import resolve_track_artwork
 from backend.app.cache.file_cache import _read_json_file
 from backend.app.cache.history_cache import (
     CACHE_VERSION,
@@ -78,6 +79,7 @@ from backend.app.recent_tracks_db import (
     map_recent_track_row_to_canonical_item,
     query_recent_track_rows,
 )
+from backend.app.release_track_metadata import release_track_metadata_for_spotify_ids
 from backend.app.routes.admin_routes import router as admin_router
 from backend.app.routes.auth_routes import router as auth_router
 from backend.app.routes.audit_routes import router as identity_audit_router
@@ -2327,7 +2329,25 @@ async def me_liked_tracks(
     active_only: bool = True,
 ) -> dict[str, Any]:
     user_id = _require_local_data_session(request)
-    return list_cached_liked_tracks(str(user_id), limit=limit, offset=offset, active_only=active_only)
+    payload = list_cached_liked_tracks(str(user_id), limit=limit, offset=offset, active_only=active_only)
+    access_token: str | None = None
+    needs_spotify_artwork = any(
+        not item.get("image_url")
+        or any(
+            isinstance(artist, dict)
+            and not artist.get("image_url")
+            and (artist.get("artist_id") or artist.get("id"))
+            for artist in (item.get("artists") or [])
+        )
+        for item in payload["items"]
+    )
+    if needs_spotify_artwork:
+        try:
+            access_token = _require_token(request)
+        except HTTPException:
+            access_token = None
+    payload["items"] = await resolve_track_artwork(payload["items"], access_token=access_token)
+    return payload
 
 
 @app.get("/me/liked-tracks/contains")
@@ -2343,6 +2363,25 @@ async def me_liked_tracks_contains(
         "spotify_track_id": normalized_track_id,
         "is_liked": is_liked_track_cached(str(user_id), normalized_track_id),
     }
+
+
+@app.post("/tracks/release-track-metadata")
+async def tracks_release_track_metadata(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    _require_local_data_session(request)
+    raw_track_ids = body.get("spotify_track_ids") if isinstance(body, dict) else None
+    if not isinstance(raw_track_ids, list):
+        raise HTTPException(status_code=400, detail="spotify_track_ids must be a list.")
+    track_ids: list[str] = []
+    seen: set[str] = set()
+    for value in raw_track_ids:
+        track_id = str(value or "").strip()
+        if not track_id or track_id in seen:
+            continue
+        seen.add(track_id)
+        track_ids.append(track_id)
+        if len(track_ids) >= 1000:
+            break
+    return {"items": release_track_metadata_for_spotify_ids(track_ids)}
 
 
 @app.post("/me/liked-tracks/sync")

@@ -8,6 +8,7 @@ import type {
   ProfileResponse,
   RecentSectionResponse,
   LikedTracksResponse,
+  ReleaseTrackMetadataItem,
   RecentArchiveResponse,
   RecentPlayFilter,
   ListeningLogResponse,
@@ -94,6 +95,9 @@ import {
   IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP,
   INITIAL_OPEN_SECTIONS,
   INITIAL_SECTION_PAGES,
+  LIKED_TRACKS_FETCH_LIMIT,
+  LIKED_TRACKS_RECENT_DISPLAY_LIMIT,
+  LIKED_TRACKS_SHUFFLE_POOL_LIMIT,
   LIVE_PLAYBACK_POLL_INTERVAL_MS,
   LIVE_PLAYBACK_PROGRESS_TICK_MS,
   PAGE_SIZE,
@@ -128,11 +132,14 @@ import {
   fetchIdentityAuditSavedSubmissions,
   fetchIdentityAuditSavedSubmissionById,
   fetchIdentityAuditSavedSubmissionDryRun,
-  fetchLikedTracks,
+  fetchAllLikedTracks,
+  fetchReleaseTrackMetadata,
   postLikedTracksSync
 } from "./api/appApi";
 import { syncQueuePlaylist } from "./api/playbackApi";
 import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfillPage";
+import { LikedBadge } from "./components/common/LikedBadge";
+import { ReleaseSiblingBadge } from "./components/common/ReleaseSiblingBadge";
 import { DashboardAlbumColumn, DashboardArtistColumn } from "./components/dashboard/DashboardColumns";
 import { MergedTrackSourceFilterToggle, RankMovementFilterToggle, TrackRankingToggle } from "./components/dashboard/DashboardControls";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
@@ -240,6 +247,12 @@ export function App() {
   const [likedTracksSyncing, setLikedTracksSyncing] = useState(false);
   const [likedTracksError, setLikedTracksError] = useState<string | null>(null);
   const [likedTracksLoadAttempted, setLikedTracksLoadAttempted] = useState(false);
+  const [likedTracksCountMode, setLikedTracksCountMode] = useState<"100" | "all">("100");
+  const [likedTracksSortMode, setLikedTracksSortMode] = useState<"recent" | "older">("recent");
+  const [likedTracksShuffleEnabled, setLikedTracksShuffleEnabled] = useState(false);
+  const [likedTracksShuffleNonce, setLikedTracksShuffleNonce] = useState(0);
+  const [releaseTrackMetadataById, setReleaseTrackMetadataById] = useState<Record<string, ReleaseTrackMetadataItem>>({});
+  const [releaseTrackMetadataCheckedIds, setReleaseTrackMetadataCheckedIds] = useState<Record<string, true>>({});
   const [loadingHistoryRecompute, setLoadingHistoryRecompute] = useState(false);
   const [profileLoadAttempted, setProfileLoadAttempted] = useState(false);
   const [reloadCooldownUntil, setReloadCooldownUntil] = useState<number | null>(null);
@@ -590,8 +603,14 @@ export function App() {
       ?? null
     )
     : null;
+  const selectedPreviewPrimaryArtist = selectedPreview?.kind === "track"
+    ? firstArtistFromRecentTrack(selectedPreview.sourceTrack)
+    : null;
   const selectedPreviewArtistImageUrl = selectedPreview && selectedPreview.kind === "track"
-    ? findArtistImageUrl(selectedPreviewPrimaryArtistName ?? selectedPreview.artistName ?? selectedPreview.meta)
+    ? (
+      selectedPreviewPrimaryArtist?.image_url
+      ?? findArtistImageUrl(selectedPreviewPrimaryArtistName ?? selectedPreview.artistName ?? selectedPreview.meta)
+    )
     : null;
   const selectedPreviewCanOpenArtist = Boolean(selectedPreview?.kind === "track" && selectedPreviewPrimaryArtistName);
   const selectedPreviewCanOpenAlbum = Boolean(
@@ -644,6 +663,10 @@ export function App() {
   const selectedPreviewTrackProgressPercent = selectedPreviewTrackBaseDurationMs != null && selectedPreviewTrackBaseDurationMs > 0
     ? Math.max(0, Math.min(100, (selectedPreviewTrackElapsedMs / selectedPreviewTrackBaseDurationMs) * 100))
     : 0;
+  const selectedPreviewIsKnownLiked = Boolean(
+    selectedPreview?.kind === "track"
+    && (selectedPreview.sourceTrack?.is_liked ?? (selectedPreview.sourceTrack?.source_label === "liked_cache" ? true : null)),
+  );
   const selectedPreviewTrackOptimisticSummary: PlayerTrackSummary | null = selectedPreview?.kind === "track"
     ? {
       name: selectedPreview.label,
@@ -678,9 +701,12 @@ export function App() {
     )
     : null;
   const playerDisplayArtist = firstArtistFromRecentTrack(playerDisplayKnownTrack);
+  const playerDisplayKnownLiked = Boolean(
+    playerDisplayKnownTrack?.is_liked ?? (playerDisplayKnownTrack?.source_label === "liked_cache" ? true : null),
+  );
   const playerDisplayArtistName = playerDisplayArtist?.name ?? playerDisplayPrimaryArtistFromDisplay ?? null;
   const playerDisplayArtistId = playerDisplayArtist?.artist_id ?? playerDisplayArtist?.id ?? null;
-  const playerDisplayArtistImageUrl = playerDisplayArtistName ? findArtistImageUrl(playerDisplayArtistName) : null;
+  const playerDisplayArtistImageUrl = playerDisplayArtist?.image_url ?? (playerDisplayArtistName ? findArtistImageUrl(playerDisplayArtistName) : null);
   const playerDisplayAlbumName = playerDisplayKnownTrack?.album_name ?? playerDisplayTrack?.album ?? null;
   const playerDisplayAlbumId = playerDisplayKnownTrack?.album_id ?? null;
   const playerDisplayAlbumYear = playerDisplayKnownTrack?.album_release_year ?? null;
@@ -1641,6 +1667,10 @@ export function App() {
             uri?: string | null;
             duration_ms?: number | null;
             artists?: Array<{ name?: string | null }>;
+            release_track_id?: number | null;
+            release_track_name?: string | null;
+            release_track_source_count?: number | null;
+            has_release_track_siblings?: boolean | null;
           }>;
         };
         const resolvedAlbumId = payload.album_id ?? initialAlbumId;
@@ -1754,6 +1784,10 @@ export function App() {
             uri?: string | null;
             duration_ms?: number | null;
             artists?: Array<{ name?: string | null }>;
+            release_track_id?: number | null;
+            release_track_name?: string | null;
+            release_track_source_count?: number | null;
+            has_release_track_siblings?: boolean | null;
           }>;
         };
         const resolvedAlbumId = payload.album_id ?? initialAlbumId;
@@ -1901,6 +1935,10 @@ export function App() {
       uri?: string | null;
       duration_ms?: number | null;
       artists?: Array<{ name?: string | null }>;
+      release_track_id?: number | null;
+      release_track_name?: string | null;
+      release_track_source_count?: number | null;
+      has_release_track_siblings?: boolean | null;
     }>,
     selectedTrackId: string | null,
   ) {
@@ -1965,6 +2003,10 @@ export function App() {
         lastPlayedAt,
         isSelected: Boolean(selectedTrackId && id && selectedTrackId === id),
         isTopTrack,
+        releaseTrackId: typeof item.release_track_id === "number" ? item.release_track_id : null,
+        releaseTrackName: item.release_track_name ?? null,
+        releaseTrackSourceCount: typeof item.release_track_source_count === "number" ? item.release_track_source_count : 0,
+        hasReleaseTrackSiblings: Boolean(item.has_release_track_siblings),
       } satisfies AlbumTrackEntry;
     });
   }
@@ -1997,7 +2039,7 @@ export function App() {
     }
     const artistUrl = playerDisplayArtist?.url ?? spotifyEntityUrl("artist", playerDisplayArtistId);
     setSelectedPreview({
-      image: findArtistImageUrl(playerDisplayArtistName) ?? null,
+      image: playerDisplayArtist?.image_url ?? findArtistImageUrl(playerDisplayArtistName) ?? null,
       fallbackLabel: "A",
       label: playerDisplayArtistName,
       meta: null,
@@ -3399,7 +3441,7 @@ export function App() {
     const artist = firstArtistFromRecentTrack(sourceTrack);
     const artistId = artist?.artist_id ?? artist?.id ?? null;
     setSelectedPreview({
-      image: findArtistImageUrl(selectedPreviewPrimaryArtistName) ?? selectedPreviewArtistImageUrl ?? selectedPreview.image ?? null,
+      image: artist?.image_url ?? selectedPreviewArtistImageUrl ?? findArtistImageUrl(selectedPreviewPrimaryArtistName) ?? selectedPreview.image ?? null,
       fallbackLabel: "A",
       label: selectedPreviewPrimaryArtistName,
       meta: null,
@@ -4823,7 +4865,7 @@ export function App() {
     return (
       <DashboardTrackColumn
         section={section}
-        items={section === "recent" ? filterAndDedupeRecentTracksForActivity(items, recentPlayFilter) : items}
+        items={section === "recent" ? filterAndDedupeRecentTracksForActivity(items, recentPlayFilter, items.length, likedTrackIdsForDisplay) : items}
         available={available}
         emptyCopy={section === "recent" && recentPlayFilter !== "all" ? `No ${recentPlayFilter} songs in this recent window.` : emptyCopy}
         unavailableCopy={unavailableCopy}
@@ -4831,6 +4873,8 @@ export function App() {
         paged={section === "recent" ? false : paged}
         presorted={presorted}
         trackRankingMode={trackRankingMode}
+        likedTrackIds={likedTrackIdsForDisplay}
+        releaseTrackSiblingById={releaseTrackSiblingById}
         sectionPage={sectionPages[section]}
         moveSectionPage={moveSectionPage}
         visibleItems={visibleItems}
@@ -7717,7 +7761,7 @@ export function App() {
     setLikedTracksLoading(true);
     setLikedTracksError(null);
     try {
-      const payload = await fetchLikedTracks(RECENT_SECTION_FETCH_LIMIT);
+      const payload = await fetchAllLikedTracks(LIKED_TRACKS_FETCH_LIMIT);
       setLikedTracksCache(payload);
       if (payload.items.length > 0) {
         setProfile((current) => current
@@ -7739,17 +7783,17 @@ export function App() {
     const detail = result.errors?.find((entry) => entry.trim().length > 0) ?? "";
     switch (result.stopped_reason) {
       case "auth_error":
-        return "Liked tracks sync needs a valid Spotify session. Log out and log back in to reconnect Spotify.";
+        return "Liked tracks refresh needs a valid Spotify session. Log out and log back in to reconnect Spotify.";
       case "forbidden":
       case "missing_scope":
-        return "Liked tracks sync needs Spotify library access. Log out and log back in to grant library access.";
+        return "Liked tracks refresh needs Spotify library access. Log out and log back in to grant library access.";
       case "rate_limited":
-        return "Spotify is rate-limiting liked tracks sync right now. Try again later.";
+        return "Spotify is rate-limiting liked tracks refresh right now. Try again later.";
       case "network_error":
-        return detail || "Liked tracks sync could not reach Spotify. Try again later.";
+        return detail || "Liked tracks refresh could not reach Spotify. Try again later.";
       case "parse_error":
       case "unexpected_response":
-        return detail || "Liked tracks sync received an unexpected Spotify response. Try again later.";
+        return detail || "Liked tracks refresh received an unexpected Spotify response. Try again later.";
       default:
         return null;
     }
@@ -7761,17 +7805,17 @@ export function App() {
     }
     setLikedTracksSyncing(true);
     setLikedTracksError(null);
-    setStatusMessage("Syncing liked tracks...");
+    setStatusMessage("Refreshing liked tracks...");
     try {
-      const result = await postLikedTracksSync("quick");
+      const result = await postLikedTracksSync("full");
       const failureMessage = likedTracksSyncFailureMessage(result);
       if (failureMessage) {
         setLikedTracksError(failureMessage);
         setStatusMessage(failureMessage);
-        setStatusHistory((current) => [...current, `Liked tracks sync ${result.stopped_reason}: ${failureMessage}`]);
+        setStatusHistory((current) => [...current, `Liked tracks refresh ${result.stopped_reason}: ${failureMessage}`]);
         return;
       }
-      const payload = await fetchLikedTracks(RECENT_SECTION_FETCH_LIMIT);
+      const payload = await fetchAllLikedTracks(LIKED_TRACKS_FETCH_LIMIT);
       setLikedTracksCache(payload);
       setProfile((current) => current
         ? {
@@ -7783,13 +7827,13 @@ export function App() {
       setStatusMessage("");
       setStatusHistory((current) => [
         ...current,
-        `Liked tracks sync ${result.stopped_reason}: ${result.tracks_seen} seen, ${result.active_likes} active.`,
+        `Liked tracks refresh ${result.stopped_reason}: ${result.tracks_seen} seen, ${result.active_likes} active.`,
       ]);
     } catch (error) {
-      const message = formatUiErrorMessage(error, "Failed to sync liked tracks.");
+      const message = formatUiErrorMessage(error, "Failed to refresh liked tracks.");
       setLikedTracksError(message);
       setStatusMessage(message);
-      setStatusHistory((current) => [...current, `Liked tracks sync error: ${message}`]);
+      setStatusHistory((current) => [...current, `Liked tracks refresh error: ${message}`]);
     } finally {
       setLikedTracksSyncing(false);
     }
@@ -8690,7 +8734,13 @@ export function App() {
                         onClick={() => openPlayerTrackDetails()}
                         type="button"
                       >
-                        <span>{playerDisplayTrack.name ?? "ListenLab Player"}</span>
+                        <span>
+                          {playerDisplayKnownLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                          {hasReleaseSiblingForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri)) ? (
+                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri))} />
+                          ) : null}
+                          {playerDisplayTrack.name ?? "ListenLab Player"}
+                        </span>
                       </button>
                     ) : (
                       <span className="player-menu-title-scroll">
@@ -8841,6 +8891,7 @@ export function App() {
                       <span aria-hidden="true" />
                     )}
                     <span aria-hidden="true" />
+                    <span className="detail-modal-album-liked-header">Liked</span>
                     <span className="detail-modal-album-preview-header">Preview</span>
                     <span className="detail-modal-album-last-played-header">Played</span>
                   </div>
@@ -8862,6 +8913,7 @@ export function App() {
                         const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
                         const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                         const rowLastPlayed = formatMonthDay(track.lastPlayedAt);
+                        const rowIsLiked = Boolean(track.id && likedTrackIdsForDisplay.has(track.id));
                         const rowBaseDurationMs = (
                           track.durationMs
                           ?? (rowIsCurrentTrack
@@ -8916,8 +8968,16 @@ export function App() {
                               }}
                               type="button"
                             >
-                              {track.name}
+                              <span className="detail-album-track-badges">
+                                {track.hasReleaseTrackSiblings ? (
+                                  <ReleaseSiblingBadge sourceCount={track.releaseTrackSourceCount} />
+                                ) : null}
+                              </span>
+                              <span className="single-line-ellipsis">{track.name}</span>
                             </button>
+                            <span className="detail-album-track-liked-cell">
+                              {rowIsLiked ? <LikedBadge className="detail-album-track-liked-badge" /> : null}
+                            </span>
                             <div className="detail-album-track-actions">
                               {hasPremiumPlayback ? (
                                 <button
@@ -9097,12 +9157,24 @@ export function App() {
                     )}
                     {playerQueueOrganizeMode ? (
                       <div className="player-recent-copy player-queue-drag-copy">
-                        <span className="player-recent-track single-line-ellipsis">{track.name}</span>
+                        <span className="player-recent-track single-line-ellipsis">
+                          {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                          {hasReleaseSiblingForTrackId(track.trackId) ? (
+                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                          ) : null}
+                          {track.name}
+                        </span>
                         <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
                       </div>
                     ) : (
                       <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
-                        <span className="player-recent-track single-line-ellipsis">{track.name}</span>
+                        <span className="player-recent-track single-line-ellipsis">
+                          {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                          {hasReleaseSiblingForTrackId(track.trackId) ? (
+                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                          ) : null}
+                          {track.name}
+                        </span>
                         <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
                       </button>
                     )}
@@ -9130,8 +9202,173 @@ export function App() {
 
   const cachedLikedTracks = likedTracksCache?.items ?? [];
   const usingLikedTracksFallback = cachedLikedTracks.length === 0 && Boolean(profile?.recent_likes_tracks.length);
-  const likedTracksForActivity = cachedLikedTracks.length > 0 ? cachedLikedTracks : (profile?.recent_likes_tracks ?? []);
-  const likedTracksAvailableForActivity = cachedLikedTracks.length > 0 || Boolean(profile?.recent_likes_available);
+  const likedTracksForActivitySource = cachedLikedTracks.length > 0 ? cachedLikedTracks : (profile?.recent_likes_tracks ?? []);
+  const likedTracksForActivity = useMemo(() => {
+    const likedAtMs = (track: RecentTrack) => {
+      const timestamp = parseTimestampMs(track.liked_at ?? track.spotify_played_at ?? null);
+      return timestamp ?? 0;
+    };
+    const ordered = [...likedTracksForActivitySource].sort((left, right) => {
+      const delta = likedAtMs(right) - likedAtMs(left);
+      return likedTracksSortMode === "recent" ? delta : -delta;
+    });
+    const baseRows = likedTracksCountMode === "all"
+      ? ordered
+      : ordered.slice(0, LIKED_TRACKS_RECENT_DISPLAY_LIMIT);
+    if (!likedTracksShuffleEnabled) {
+      return baseRows;
+    }
+    const shufflePool = likedTracksCountMode === "all"
+      ? ordered
+      : ordered.slice(0, LIKED_TRACKS_SHUFFLE_POOL_LIMIT);
+    const shuffled = [...shufflePool];
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+    }
+    return likedTracksCountMode === "all"
+      ? shuffled
+      : shuffled.slice(0, LIKED_TRACKS_RECENT_DISPLAY_LIMIT);
+  }, [
+    likedTracksCountMode,
+    likedTracksForActivitySource,
+    likedTracksShuffleEnabled,
+    likedTracksShuffleNonce,
+    likedTracksSortMode,
+  ]);
+  const likedTracksAvailableForActivity = likedTracksForActivitySource.length > 0 || Boolean(profile?.recent_likes_available);
+  const likedTrackIdsForDisplay = useMemo(() => {
+    const ids = new Set<string>();
+    for (const track of likedTracksForActivitySource) {
+      if (track.track_id) {
+        ids.add(track.track_id);
+      }
+    }
+    return ids;
+  }, [likedTracksForActivitySource]);
+  const releaseTrackMetadataIds = useMemo(() => {
+    const ids = new Set<string>();
+    const addRecentTrack = (track: RecentTrack | null | undefined) => {
+      if (track?.track_id) {
+        ids.add(track.track_id);
+      }
+    };
+    [
+      ...(profile?.recent_tracks ?? []),
+      ...(profile?.top_tracks ?? []),
+      ...(profile?.recent_top_tracks ?? []),
+      ...(profile?.recent_likes_tracks ?? []),
+      ...cachedLikedTracks,
+      ...likedTracksForActivitySource,
+      ...mergedTracks,
+    ].forEach(addRecentTrack);
+    albumTrackEntries.forEach((track) => {
+      if (track.id) {
+        ids.add(track.id);
+      }
+    });
+    homeAlbumTrackEntries.forEach((track) => {
+      if (track.id) {
+        ids.add(track.id);
+      }
+    });
+    playerQueueTracks.forEach((track) => {
+      if (track.trackId) {
+        ids.add(track.trackId);
+      }
+    });
+    addRecentTrack(playerDisplayKnownTrack);
+    return Array.from(ids).sort();
+  }, [
+    albumTrackEntries,
+    cachedLikedTracks,
+    homeAlbumTrackEntries,
+    likedTracksForActivitySource,
+    mergedTracks,
+    playerDisplayKnownTrack,
+    playerQueueTracks,
+    profile?.recent_likes_tracks,
+    profile?.recent_top_tracks,
+    profile?.recent_tracks,
+    profile?.top_tracks,
+  ]);
+  const releaseTrackMetadataKey = releaseTrackMetadataIds.join("|");
+  useEffect(() => {
+    if (!releaseTrackMetadataIds.length || !profile) {
+      return;
+    }
+    const missingIds = releaseTrackMetadataIds.filter((trackId) => !releaseTrackMetadataCheckedIds[trackId]);
+    if (!missingIds.length) {
+      return;
+    }
+    const requestIds = missingIds.slice(0, 500);
+    let cancelled = false;
+    fetchReleaseTrackMetadata(requestIds)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setReleaseTrackMetadataById((current) => ({
+          ...current,
+          ...payload.items,
+        }));
+        setReleaseTrackMetadataCheckedIds((current) => {
+          const next = { ...current };
+          for (const trackId of requestIds) {
+            next[trackId] = true;
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          console.warn("Release-track metadata lookup failed.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profile, releaseTrackMetadataCheckedIds, releaseTrackMetadataIds, releaseTrackMetadataKey]);
+  const releaseTrackSiblingById = useMemo(() => {
+    const byId = new Map<string, number>();
+    for (const [trackId, metadata] of Object.entries(releaseTrackMetadataById)) {
+      if (metadata.has_release_track_siblings) {
+        byId.set(trackId, metadata.release_track_source_count);
+      }
+    }
+    for (const track of [...albumTrackEntries, ...homeAlbumTrackEntries]) {
+      if (track.id && track.hasReleaseTrackSiblings) {
+        byId.set(track.id, track.releaseTrackSourceCount);
+      }
+    }
+    return byId;
+  }, [albumTrackEntries, homeAlbumTrackEntries, releaseTrackMetadataById]);
+  const releaseSiblingSourceCountForTrackId = (trackId: string | null | undefined) =>
+    trackId ? (releaseTrackSiblingById.get(trackId) ?? 0) : 0;
+  const hasReleaseSiblingForTrackId = (trackId: string | null | undefined) =>
+    releaseSiblingSourceCountForTrackId(trackId) > 1;
+  const allTimeLikedMatchCount = (profile?.top_tracks ?? []).filter((track) => track.track_id && likedTrackIdsForDisplay.has(track.track_id)).length;
+  const allTimeTrackIdCount = (profile?.top_tracks ?? []).filter((track) => Boolean(track.track_id)).length;
+  const likedTracksTotalCount = Number(likedTracksCache?.metadata?.last_active_count ?? (cachedLikedTracks.length > 0 ? cachedLikedTracks.length : likedTracksForActivitySource.length));
+  const likedTracksTotalLabel = likedTracksTotalCount > 0 ? likedTracksTotalCount.toLocaleString() : "All";
+  const likedTracksCacheStatus = (() => {
+    const metadata = likedTracksCache?.metadata ?? null;
+    const cachedCount = cachedLikedTracks.length;
+    if (!metadata) {
+      return cachedCount > 0 ? `${cachedCount.toLocaleString()} cached liked songs` : null;
+    }
+    const activeCount = Number(metadata.last_active_count ?? cachedCount);
+    const countLabel = `${activeCount.toLocaleString()} cached liked songs`;
+    if (metadata.last_full_completed) {
+      const completedLabel = formatRelativeSyncTime(parseTimestampMs(metadata.last_completed_full_sync_at));
+      return `${countLabel} · full refresh complete${completedLabel ? ` ${completedLabel}` : ""}`;
+    }
+    if (metadata.last_stopped_reason) {
+      const attemptedLabel = formatRelativeSyncTime(parseTimestampMs(metadata.last_attempted_sync_at));
+      return `${countLabel} · partial cache, stopped: ${metadata.last_stopped_reason}${attemptedLabel ? ` ${attemptedLabel}` : ""}`;
+    }
+    return countLabel;
+  })();
   const showLoadingScreen = (authTransitioning || session?.authenticated || experienceMode === "local") && !profile;
   const heroTitle = "ListenLab";
   const heroCopy =
@@ -9467,6 +9704,10 @@ export function App() {
                                   )}
                                   <span className="player-recent-copy">
                                     <span className="player-recent-track single-line-ellipsis">
+                                      {track.is_liked ? <LikedBadge className="player-liked-badge" /> : null}
+                                      {hasReleaseSiblingForTrackId(track.track_id) ? (
+                                        <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.track_id)} />
+                                      ) : null}
                                       {track.track_name ?? "Unknown track"}
                                       {Number(track.completed_play_count ?? 0) > 1 ? (
                                         <span className="player-recent-repeat-count">x{track.completed_play_count}</span>
@@ -9519,11 +9760,23 @@ export function App() {
                                       onClick={() => openPlayerTrackDetails()}
                                       type="button"
                                     >
-                                      <span>{playerDisplayTrack.name ?? "ListenLab Player"}</span>
+                                      <span>
+                                        {playerDisplayKnownLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                                        {hasReleaseSiblingForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri)) ? (
+                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri))} />
+                                        ) : null}
+                                        {playerDisplayTrack.name ?? "ListenLab Player"}
+                                      </span>
                                     </button>
                                   ) : (
                                     <span className="player-menu-title-scroll">
-                                      <span>{playerDisplayTrack?.name ?? "ListenLab Player"}</span>
+                                      <span>
+                                        {playerDisplayKnownLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                                        {hasReleaseSiblingForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack?.uri ?? null)) ? (
+                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack?.uri ?? null))} />
+                                        ) : null}
+                                        {playerDisplayTrack?.name ?? "ListenLab Player"}
+                                      </span>
                                     </span>
                                   )}
                                 </h2>
@@ -9881,6 +10134,10 @@ export function App() {
                                   {playerQueueOrganizeMode ? (
                                     <div className="player-recent-copy player-queue-drag-copy">
                                       <span className="player-recent-track single-line-ellipsis">
+                                        {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                                        {hasReleaseSiblingForTrackId(track.trackId) ? (
+                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                                        ) : null}
                                         {track.name}
                                       </span>
                                       <span className="player-recent-artist single-line-ellipsis">
@@ -9894,6 +10151,10 @@ export function App() {
                                       type="button"
                                     >
                                       <span className="player-recent-track single-line-ellipsis">
+                                        {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                                        {hasReleaseSiblingForTrackId(track.trackId) ? (
+                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                                        ) : null}
                                         {track.name}
                                       </span>
                                       <span className="player-recent-artist single-line-ellipsis">
@@ -10204,11 +10465,13 @@ export function App() {
                 section="recent"
                 anchorId="activity"
                 leftTitle={(
-                  <div className="section-column-header">
+                  <div className="section-column-header activity-liked-header">
+                    <span className="activity-column-heading">Listened</span>
                     <div className="section-column-header-actions">
                       <div className="track-ranking-toggle recent-play-filter-toggle" role="group" aria-label="Recently played filter">
                         {[
-                          ["listened", "Listened"],
+                          ["listened", "Completed"],
+                          ["liked", "Liked"],
                           ["all", "All"],
                         ].map(([value, label]) => (
                           <button
@@ -10228,8 +10491,69 @@ export function App() {
                   </div>
                 )}
                 rightTitle={(
-                  <div className="section-column-header">
-                    {renderSectionTitle("Recently liked", "recent_likes")}
+                  <div className="section-column-header activity-liked-header">
+                    <span className="activity-column-heading">Liked</span>
+                    <div className="track-ranking-toggle liked-tracks-display-toggle" aria-label="Liked tracks display">
+                      {[
+                        ["100", String(LIKED_TRACKS_RECENT_DISPLAY_LIMIT)],
+                        ["all", likedTracksTotalLabel],
+                      ].map(([value, label]) => (
+                        <button
+                          className={`track-ranking-chip${likedTracksCountMode === value ? " track-ranking-chip-active" : ""}`}
+                          key={value}
+                          onClick={() => setLikedTracksCountMode(value as "100" | "all")}
+                          type="button"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="track-ranking-toggle liked-tracks-sort-toggle" aria-label="Liked tracks sort">
+                      {[
+                        ["recent", "Recent"],
+                        ["older", "Older"],
+                      ].map(([value, label]) => (
+                        <button
+                          className={`track-ranking-chip${likedTracksSortMode === value ? " track-ranking-chip-active" : ""}`}
+                          key={value}
+                          onClick={() => setLikedTracksSortMode(value as "recent" | "older")}
+                          type="button"
+                        >
+                          {label}
+                        </button>
+                        ))}
+                    </div>
+                    <div className="track-ranking-toggle liked-tracks-shuffle-toggle" aria-label="Liked tracks order">
+                      <button
+                        aria-label="Show liked tracks in order"
+                        aria-pressed={!likedTracksShuffleEnabled}
+                        className={`track-ranking-chip liked-tracks-icon-chip${!likedTracksShuffleEnabled ? " track-ranking-chip-active" : ""}`}
+                        disabled={likedTracksForActivitySource.length === 0}
+                        onClick={() => setLikedTracksShuffleEnabled(false)}
+                        title="In order"
+                        type="button"
+                      >
+                        <svg aria-hidden="true" viewBox="0 0 24 24">
+                          <path d="M4 7h12.6l-2.4-2.4L15.6 3 21 8.4l-5.4 5.4-1.4-1.6 2.4-2.2H4V7Zm0 8h12.6l-2.4-2.4 1.4-1.6 5.4 5.4-5.4 5.4-1.4-1.6 2.4-2.2H4v-3Z" fill="currentColor" />
+                        </svg>
+                      </button>
+                      <button
+                        aria-label="Shuffle liked tracks"
+                        aria-pressed={likedTracksShuffleEnabled}
+                        className={`track-ranking-chip liked-tracks-icon-chip${likedTracksShuffleEnabled ? " track-ranking-chip-active" : ""}`}
+                        disabled={likedTracksForActivitySource.length === 0}
+                        onClick={() => {
+                          setLikedTracksShuffleEnabled(true);
+                          setLikedTracksShuffleNonce((current) => current + 1);
+                        }}
+                        title="Shuffle"
+                        type="button"
+                      >
+                        <svg aria-hidden="true" viewBox="0 0 24 24">
+                          <path d="M16.5 3.8 21 8.3l-4.5 4.5-1.4-1.4 2.1-2.1h-1.5c-2.3 0-3.6.9-5.1 3.4-1.8 3.1-3.8 4.5-7.1 4.5H2v-2h1.5c2.4 0 3.7-.9 5.3-3.5 1.8-3 3.7-4.4 6.9-4.4h1.5l-2.1-2.1 1.4-1.4ZM2 6.3h1.5c2.3 0 4 .7 5.4 2.3l-1.3 1.6C6.5 8.9 5.3 8.3 3.5 8.3H2v-2Zm12.8 7.4 1.4-1.4 4.8 4.8-4.8 4.8-1.4-1.4 2.1-2.1h-1.2c-2 0-3.6-.6-4.9-1.9l1.2-1.7c1.1 1.1 2.2 1.6 3.7 1.6h1.2l-2.1-2.1Z" fill="currentColor" />
+                        </svg>
+                      </button>
+                    </div>
                     {experienceMode === "full" ? (
                       <button
                         className="secondary-button inline-reload-button"
@@ -10237,7 +10561,7 @@ export function App() {
                         onClick={() => void syncLikedTracks()}
                         type="button"
                       >
-                        {likedTracksSyncing ? "Syncing..." : "Sync Likes"}
+                        {likedTracksSyncing ? "Refreshing..." : "Refresh"}
                       </button>
                     ) : null}
                   </div>
@@ -10265,15 +10589,16 @@ export function App() {
                   <>
                     {usingLikedTracksFallback ? (
                       <p className="empty-copy liked-tracks-cache-note">
-                        Latest from Spotify. Sync Likes to populate the local cache.
+                        Latest from Spotify. Refresh to populate the local cache.
                       </p>
                     ) : null}
                     {!usingLikedTracksFallback && cachedLikedTracks.length === 0 && !likedTracksLoading ? (
                       <p className="empty-copy liked-tracks-cache-note">
-                        Liked tracks cache is empty. Sync Likes to load saved songs.
+                        Liked tracks cache is empty. Refresh to load saved songs.
                       </p>
                     ) : null}
                     {likedTracksLoading ? <p className="empty-copy liked-tracks-cache-note">Loading liked tracks cache...</p> : null}
+                    {likedTracksCacheStatus ? <p className="liked-tracks-cache-status">{likedTracksCacheStatus}</p> : null}
                     {likedTracksError ? <p className="empty-copy liked-tracks-cache-note">{likedTracksError}</p> : null}
                     {renderTrackColumn(
                       "likes",
@@ -10293,6 +10618,8 @@ export function App() {
                           {loadingRecentSection ? "Refreshing..." : "Reload this section"}
                         </button>
                       ) : null,
+                      false,
+                      true,
                     )}
                   </>
                 )}
@@ -10311,6 +10638,9 @@ export function App() {
                 leftTitle={(
                   <div className="section-column-header">
                     <h3>All time</h3>
+                    <span className="liked-match-diagnostic">
+                      {allTimeLikedMatchCount} / {allTimeTrackIdCount} liked matches
+                    </span>
                     <div className="section-column-header-actions">
                       {renderTrackRankingToggle()}
                     </div>
@@ -10509,7 +10839,13 @@ export function App() {
               )}
             </div>
             <div className="detail-modal-copy">
-              <h2>{selectedPreview.label}</h2>
+              <h2>
+                {selectedPreviewIsKnownLiked ? <LikedBadge className="detail-liked-badge" /> : null}
+                {hasReleaseSiblingForTrackId(selectedPreview.trackId ?? selectedPreview.sourceTrack?.track_id) ? (
+                  <ReleaseSiblingBadge className="detail-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(selectedPreview.trackId ?? selectedPreview.sourceTrack?.track_id)} />
+                ) : null}
+                {selectedPreview.label}
+              </h2>
               {selectedPreview.meta ? (
                 <div className="detail-modal-meta detail-modal-meta-with-image">
                   {selectedPreview.kind === "track" && selectedPreviewArtistImageUrl ? (
@@ -10654,6 +10990,7 @@ export function App() {
                     <span aria-hidden="true" />
                   )}
                   <span aria-hidden="true" />
+                  <span className="detail-modal-album-liked-header">Liked</span>
                   <span className="detail-modal-album-preview-header">Preview</span>
                   <span className="detail-modal-album-last-played-header">Played</span>
                 </div>
@@ -10675,6 +11012,7 @@ export function App() {
                       const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
                       const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                       const rowLastPlayed = formatMonthDay(track.lastPlayedAt);
+                      const rowIsLiked = Boolean(track.id && likedTrackIdsForDisplay.has(track.id));
                       const rowBaseDurationMs = (
                         track.durationMs
                         ?? (rowIsCurrentTrack
@@ -10726,8 +11064,16 @@ export function App() {
                             onClick={() => openAlbumTrackPreview(track)}
                             type="button"
                           >
-                            {track.name}
+                            <span className="detail-album-track-badges">
+                              {track.hasReleaseTrackSiblings ? (
+                                <ReleaseSiblingBadge sourceCount={track.releaseTrackSourceCount} />
+                              ) : null}
+                            </span>
+                            <span className="single-line-ellipsis">{track.name}</span>
                           </button>
+                          <span className="detail-album-track-liked-cell">
+                            {rowIsLiked ? <LikedBadge className="detail-album-track-liked-badge" /> : null}
+                          </span>
                           <div className="detail-album-track-actions">
                             {hasPremiumPlayback ? (
                               <button

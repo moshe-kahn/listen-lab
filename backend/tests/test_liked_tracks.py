@@ -9,7 +9,8 @@ from unittest.mock import patch
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
-from backend.app.db import apply_pending_migrations, ensure_sqlite_db
+from backend.app.artwork import resolve_track_artwork
+from backend.app.db import apply_pending_migrations, ensure_sqlite_db, sqlite_connection
 from backend.app.liked_tracks import (
     is_liked_track_cached,
     list_cached_liked_tracks,
@@ -27,8 +28,12 @@ def _saved_item(track_id: str, added_at: str) -> dict[str, Any]:
             "id": track_id,
             "uri": f"spotify:track:{track_id}",
             "name": f"Track {track_id}",
-            "artists": [{"name": "Artist"}],
-            "album": {"id": f"album-{track_id}", "name": f"Album {track_id}"},
+            "artists": [{"id": f"artist-{track_id}", "name": "Artist"}],
+            "album": {
+                "id": f"album-{track_id}",
+                "name": f"Album {track_id}",
+                "images": [{"url": f"https://images.example/{track_id}.jpg"}],
+            },
             "duration_ms": 180000,
             "popularity": 50,
             "explicit": False,
@@ -91,6 +96,168 @@ class LikedTracksSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, result["tracks_upserted"])
         cached = list_cached_liked_tracks("user-1")
         self.assertEqual(["b", "a"], [item["track_id"] for item in cached["items"]])
+        self.assertEqual("https://images.example/b.jpg", cached["items"][0]["image_url"])
+        self.assertEqual("artist-b", cached["items"][0]["artists"][0]["artist_id"])
+
+    async def test_artwork_resolver_uses_catalog_before_spotify_fetch(self) -> None:
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, images_json, raw_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "album-a",
+                    '[{"url": "https://images.example/catalog-a.jpg"}]',
+                    "{}",
+                    "2026-05-01T00:00:00Z",
+                    "ok",
+                ),
+            )
+
+        with patch(
+            "backend.app.artwork._spotify_get",
+            side_effect=AssertionError("catalog artwork should avoid Spotify fetch"),
+        ):
+            resolved = await resolve_track_artwork(
+                [
+                    {
+                        "track_id": "track-a",
+                        "track_name": "Track A",
+                        "artist_name": "Artist",
+                        "album_name": "Album A",
+                        "album_id": "album-a",
+                        "image_url": None,
+                    }
+                ],
+                access_token="token",
+            )
+
+        self.assertEqual("https://images.example/catalog-a.jpg", resolved[0]["image_url"])
+
+    async def test_artwork_resolver_fetches_missing_album_art_from_spotify(self) -> None:
+        async def spotify_get(_token: str, url: str, _params: dict[str, Any] | None = None) -> dict[str, Any]:
+            self.assertEqual("https://api.spotify.com/v1/albums/album-spotify", url)
+            return {
+                "id": "album-spotify",
+                "name": "Album Spotify",
+                "images": [{"url": "https://images.example/spotify-a.jpg"}],
+            }
+
+        with patch("backend.app.artwork._spotify_get", side_effect=spotify_get):
+            resolved = await resolve_track_artwork(
+                [
+                    {
+                        "track_id": "track-spotify",
+                        "track_name": "Track Spotify",
+                        "artist_name": "Artist",
+                        "album_name": "Album Spotify",
+                        "album_id": "album-spotify",
+                        "image_url": None,
+                    }
+                ],
+                access_token="token",
+            )
+
+        self.assertEqual("https://images.example/spotify-a.jpg", resolved[0]["image_url"])
+        with sqlite_connection() as connection:
+            row = connection.execute(
+                "SELECT images_json FROM spotify_album_catalog WHERE spotify_album_id = ?",
+                ("album-spotify",),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIn("https://images.example/spotify-a.jpg", row[0])
+
+    async def test_artwork_resolver_fetches_missing_artist_art_from_spotify(self) -> None:
+        async def spotify_get(_token: str, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            self.assertEqual("https://api.spotify.com/v1/artists", url)
+            self.assertEqual({"ids": "artist-spotify"}, params)
+            return {
+                "artists": [
+                    {
+                        "id": "artist-spotify",
+                        "name": "Artist Spotify",
+                        "external_urls": {"spotify": "https://open.spotify.com/artist/artist-spotify"},
+                        "images": [{"url": "https://images.example/artist-spotify.jpg"}],
+                    }
+                ]
+            }
+
+        with patch("backend.app.artwork._spotify_get", side_effect=spotify_get):
+            resolved = await resolve_track_artwork(
+                [
+                    {
+                        "track_id": "track-spotify",
+                        "track_name": "Track Spotify",
+                        "artist_name": "Artist Spotify",
+                        "album_name": "Album Spotify",
+                        "album_id": "album-spotify",
+                        "image_url": "https://images.example/album-present.jpg",
+                        "artists": [
+                            {
+                                "artist_id": "artist-spotify",
+                                "id": "artist-spotify",
+                                "name": "Artist Spotify",
+                            }
+                        ],
+                    }
+                ],
+                access_token="token",
+            )
+
+        artist = resolved[0]["artists"][0]
+        self.assertEqual("https://images.example/artist-spotify.jpg", artist["image_url"])
+        self.assertEqual("https://open.spotify.com/artist/artist-spotify", artist["url"])
+
+    async def test_liked_tracks_endpoint_fetches_artist_art_when_album_art_exists(self) -> None:
+        upsert_liked_tracks(
+            "user-1",
+            [
+                {
+                    "spotify_track_id": "track-route",
+                    "uri": "spotify:track:track-route",
+                    "name": "Track Route",
+                    "artist_names": ["Route Artist"],
+                    "artist_ids": ["route-artist"],
+                    "album_name": "Route Album",
+                    "album_spotify_id": "route-album",
+                    "album_image_url": "https://images.example/route-album.jpg",
+                    "duration_ms": 120000,
+                    "popularity": None,
+                    "explicit": None,
+                    "liked_at": "2026-05-01T00:00:00Z",
+                }
+            ],
+            "2026-05-01T00:00:00Z",
+        )
+
+        async def spotify_get(_token: str, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            self.assertEqual("https://api.spotify.com/v1/artists", url)
+            self.assertEqual({"ids": "route-artist"}, params)
+            return {
+                "artists": [
+                    {
+                        "id": "route-artist",
+                        "name": "Route Artist",
+                        "external_urls": {"spotify": "https://open.spotify.com/artist/route-artist"},
+                        "images": [{"url": "https://images.example/route-artist.jpg"}],
+                    }
+                ]
+            }
+
+        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.main._require_token",
+            return_value="token",
+        ) as require_token, patch("backend.app.artwork._spotify_get", side_effect=spotify_get):
+            client = TestClient(app)
+            response = client.get("/me/liked-tracks")
+
+        self.assertEqual(200, response.status_code)
+        require_token.assert_called_once()
+        item = response.json()["items"][0]
+        self.assertEqual("https://images.example/route-album.jpg", item["image_url"])
+        self.assertEqual("https://images.example/route-artist.jpg", item["artists"][0]["image_url"])
 
     async def test_quick_sync_does_not_mark_missing_existing_rows_unliked(self) -> None:
         upsert_liked_tracks(

@@ -909,6 +909,12 @@ h1 {
   border: 1px solid rgba(255, 255, 255, 0.14);
 }
 
+.secondary-button-active {
+  background: rgba(125, 255, 172, 0.18);
+  border-color: rgba(125, 255, 172, 0.32);
+  color: #f7f8f2;
+}
+
 .player-icon-button {
   align-items: center;
   display: inline-flex;
@@ -999,6 +1005,7 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .section-column-header-actions {
@@ -1947,8 +1954,149 @@ h1 {
   color: #f7f8f2;
 }
 
+.liked-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border-color: rgba(255, 209, 102, 0.38);
+  border: 1px solid rgba(255, 209, 102, 0.38);
+  background: rgba(255, 209, 102, 0.14);
+  color: #ffd166;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.card-liked-badge {
+  flex-shrink: 0;
+}
+
+.player-liked-badge {
+  min-width: 18px;
+  padding: 1px 4px;
+  margin-right: 5px;
+  font-size: 0.66rem;
+  vertical-align: 1px;
+}
+
+.player-release-sibling-badge {
+  min-width: 20px;
+  padding: 1px 4px;
+  margin-right: 5px;
+  font-size: 0.6rem;
+  vertical-align: 1px;
+}
+
+.detail-liked-badge {
+  min-width: 22px;
+  margin-right: 8px;
+  vertical-align: 4px;
+}
+
+.detail-release-sibling-badge {
+  margin-right: 8px;
+  vertical-align: 4px;
+}
+
+.detail-album-track-liked-badge {
+  min-width: 18px;
+  padding: 1px 4px;
+  font-size: 0.64rem;
+}
+
+.detail-album-track-liked-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
+.release-sibling-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 1px 5px;
+  border: 1px solid rgba(157, 193, 255, 0.4);
+  border-radius: 999px;
+  background: rgba(157, 193, 255, 0.14);
+  color: #d7e4ff;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.activity-column-heading {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 3px 0;
+  color: #f7f8f2;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.activity-column-heading::before {
+  content: "";
+  width: 4px;
+  height: 18px;
+  border-radius: 999px;
+  background: #1ed760;
+  margin-right: 8px;
+}
+
+.activity-liked-header {
+  gap: 6px;
+}
+
+.activity-liked-header .activity-column-heading {
+  min-height: 28px;
+}
+
+.activity-liked-header .track-ranking-toggle {
+  gap: 2px;
+  padding: 2px;
+}
+
+.activity-liked-header .track-ranking-chip {
+  font-size: 0.72rem;
+  padding: 4px 7px;
+}
+
+.activity-liked-header .inline-reload-button {
+  min-height: 30px;
+  padding: 6px 9px;
+}
+
 .recent-play-filter-toggle {
   flex-shrink: 0;
+}
+
+.liked-tracks-display-toggle,
+.liked-tracks-sort-toggle,
+.liked-tracks-shuffle-toggle {
+  flex-shrink: 0;
+}
+
+.liked-tracks-icon-chip {
+  align-items: center;
+  display: inline-flex;
+  height: 26px;
+  justify-content: center;
+  min-width: 30px;
+  padding: 4px 7px;
+}
+
+.liked-tracks-icon-chip svg {
+  display: block;
+  height: 16px;
+  width: 16px;
 }
 
 .listen-log-button {
@@ -1959,6 +2107,20 @@ h1 {
 
 .liked-tracks-cache-note {
   margin: 0 0 8px;
+}
+
+.liked-tracks-cache-status {
+  margin: 0 0 8px;
+  color: #b8d7c2;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.liked-match-diagnostic {
+  color: #b8d7c2;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 @keyframes recent-vinyl-spin {
@@ -3329,17 +3491,19 @@ h1 {
 
 .detail-modal-album-header {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) 56px 44px;
+  grid-template-columns: 72px minmax(0, 1fr) 44px 56px 44px;
   align-items: center;
   gap: 10px;
   padding: 0 8px;
 }
 
+.detail-modal-album-liked-header,
 .detail-modal-album-last-played-header {
   font-size: 0.7rem;
   color: #8fb6a0;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  text-align: center;
 }
 
 .detail-modal-album-preview-header {
@@ -3384,9 +3548,9 @@ h1 {
 }
 
 .detail-album-track-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 44px 56px 44px;
   align-items: center;
-  justify-content: flex-start;
   gap: 10px;
   min-height: 24px;
   min-width: 0;
@@ -3412,12 +3576,21 @@ h1 {
   text-align: left;
   font: inherit;
   cursor: pointer;
-  flex: 1 1 auto;
   min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .detail-album-track-name-button:hover {
   color: #7dffac;
+}
+
+.detail-album-track-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .detail-album-track-actions {
@@ -3425,8 +3598,6 @@ h1 {
   grid-template-columns: 56px 44px;
   align-items: center;
   gap: 12px;
-  flex-shrink: 0;
-  margin-left: auto;
   justify-items: center;
 }
 
@@ -3808,8 +3979,8 @@ h1 {
 .dashboard-card-layout {
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr) minmax(44px, auto);
+  align-items: stretch;
   gap: 10px;
 }
 
@@ -3830,7 +4001,6 @@ h1 {
 .card-primary-line {
   display: flex;
   align-items: center;
-  gap: 8px;
   min-width: 0;
 }
 
@@ -3854,6 +4024,23 @@ h1 {
   font-weight: 700;
   line-height: 1.2;
   white-space: nowrap;
+}
+
+.card-right-stack {
+  align-self: start;
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  min-width: 0;
+}
+
+.card-badge-stack {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 5px;
+  max-width: 100%;
 }
 
 .card-secondary,

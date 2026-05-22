@@ -23,6 +23,8 @@ type DashboardTrackColumnProps = {
   paged: boolean;
   presorted: boolean;
   trackRankingMode: TrackRankingMode;
+  likedTrackIds?: Set<string>;
+  releaseTrackSiblingById?: Map<string, number>;
   sectionPage: number;
   moveSectionPage: (section: SectionKey, direction: -1 | 1, itemCount: number, pageSize?: number) => void;
   visibleItems: <T>(section: SectionKey, items: T[]) => T[];
@@ -39,6 +41,8 @@ export function DashboardTrackColumn({
   paged,
   presorted,
   trackRankingMode,
+  likedTrackIds,
+  releaseTrackSiblingById,
   sectionPage,
   moveSectionPage,
   visibleItems,
@@ -74,6 +78,14 @@ export function DashboardTrackColumn({
     section === "recent"
       ? recentTrackCompletionRatio(track)
       : null;
+  const trackIsKnownLiked = (track: RecentTrack) =>
+    Boolean(
+      track.is_liked
+      ?? (track.source_label === "liked_cache" ? true : null)
+      ?? (track.track_id && likedTrackIds?.has(track.track_id) ? true : null),
+    );
+  const releaseSiblingSourceCount = (track: RecentTrack) =>
+    track.track_id ? (releaseTrackSiblingById?.get(track.track_id) ?? 0) : 0;
 
   const cappedRows = isAllTimeTrackSection || section === "tracksRecent"
     ? capTracksPerAlbum(rankedItems, 1)
@@ -81,7 +93,7 @@ export function DashboardTrackColumn({
   const pageRows = paged ? visibleItems(section, cappedRows) : cappedRows;
   return (
     <>
-      <div className={`item-list${section === "recent" ? " item-list-scroll" : ""}`}>
+      <div className={`item-list${section === "recent" || section === "likes" ? " item-list-scroll" : ""}`}>
         {pageRows.map((row, index) =>
           renderDashboardListCard(
             {
@@ -91,6 +103,9 @@ export function DashboardTrackColumn({
               imageAlt: `${row.track.album_name ?? row.track.track_name ?? "Album"} cover`,
               fallbackLabel: "T",
               primaryText: row.track.track_name ?? "Unknown track",
+              liked: trackIsKnownLiked(row.track),
+              releaseSibling: releaseSiblingSourceCount(row.track) > 1,
+              releaseSiblingSourceCount: releaseSiblingSourceCount(row.track),
               primaryBadgeText: formulaRankDeltaText(row.track) ?? completedRepeatText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
               secondaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
               secondaryText: row.track.artist_name ?? "Unknown artist",

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -18,6 +17,7 @@ from backend.app.db import (
     update_listenlab_player_play_progress,
 )
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
+from backend.app.release_track_metadata import enrich_album_track_rows_with_release_metadata
 from backend.app.spotify_catalog_backfill import (
     _upsert_album_track,
     _upsert_track_catalog,
@@ -201,7 +201,7 @@ async def auth_playback_album_tracks(
         return {
             "album_id": normalized_album_id,
             "track_id": normalized_track_id,
-            "items": cached_items,
+            "items": enrich_album_track_rows_with_release_metadata(cached_items),
             "source": source,
             "cached": True,
         }
@@ -210,7 +210,7 @@ async def auth_playback_album_tracks(
     return {
         "album_id": normalized_album_id,
         "track_id": normalized_track_id,
-        "items": items,
+        "items": enrich_album_track_rows_with_release_metadata(items),
         "source": "spotify_album_tracks",
         "cached": False,
     }

@@ -1,4 +1,6 @@
 import type { DashboardListCardProps, PreviewItem } from "../../types/appTypes";
+import { LikedBadge } from "../common/LikedBadge";
+import { ReleaseSiblingBadge } from "../common/ReleaseSiblingBadge";
 
 type DashboardListCardComponentProps = DashboardListCardProps & {
   previewKind: PreviewItem["kind"];
@@ -17,6 +19,9 @@ export function DashboardListCard({
   tertiaryText,
   metricText,
   primaryBadgeText,
+  liked,
+  releaseSibling,
+  releaseSiblingSourceCount,
   secondaryBadgeText,
   completionRatio,
   trackUri,
@@ -30,6 +35,7 @@ export function DashboardListCard({
   const tertiaryValue = tertiaryText && tertiaryText.trim().length > 0 ? tertiaryText : "\u00A0";
   const secondaryPlaceholder = !(secondaryText && secondaryText.trim().length > 0);
   const tertiaryPlaceholder = !(tertiaryText && tertiaryText.trim().length > 0);
+  const hasTopRightContent = Boolean(liked || releaseSibling || primaryBadgeText || secondaryBadgeText || metricText);
 
   return (
     <button
@@ -66,8 +72,6 @@ export function DashboardListCard({
           <div className="card-copy">
             <div className="card-primary-line">
               <strong className={`card-primary ${primaryClamp}`}>{primaryText}</strong>
-              {primaryBadgeText ? <span className="card-inline-badge">{primaryBadgeText}</span> : null}
-              {secondaryBadgeText ? <span className="card-inline-badge">{secondaryBadgeText}</span> : null}
             </div>
             <p
               aria-hidden={secondaryPlaceholder}
@@ -91,7 +95,19 @@ export function DashboardListCard({
             ) : null}
           </div>
         </div>
-        {metricText ? <div className="card-metric">{metricText}</div> : null}
+        {hasTopRightContent ? (
+          <div className="card-right-stack">
+            {liked || releaseSibling || primaryBadgeText || secondaryBadgeText ? (
+              <div className="card-badge-stack">
+                {liked ? <LikedBadge className="card-liked-badge" /> : null}
+                {releaseSibling ? <ReleaseSiblingBadge className="card-release-sibling-badge" sourceCount={releaseSiblingSourceCount} /> : null}
+                {primaryBadgeText ? <span className="card-inline-badge">{primaryBadgeText}</span> : null}
+                {secondaryBadgeText ? <span className="card-inline-badge">{secondaryBadgeText}</span> : null}
+              </div>
+            ) : null}
+            {metricText ? <div className="card-metric">{metricText}</div> : null}
+          </div>
+        ) : null}
       </div>
     </button>
   );

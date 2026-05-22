@@ -81,11 +81,16 @@ export function filterAndDedupeRecentTracksForActivity(
   tracks: RecentTrack[],
   filter: RecentPlayFilter,
   limit = tracks.length,
+  likedTrackIds?: Set<string>,
 ) {
   const groups = new Map<string, RecentTrack[]>();
   const orderedKeys: string[] = [];
   for (const track of tracks) {
-    if (!recentTrackMatchesFilter(track, filter)) {
+    if (filter === "liked") {
+      if (!track.track_id || !likedTrackIds?.has(track.track_id)) {
+        continue;
+      }
+    } else if (!recentTrackMatchesFilter(track, filter)) {
       continue;
     }
     const key = playerRecentTrackKey(track);
@@ -174,6 +179,8 @@ export function recentTracksToPlayerQueueTracks(tracks: RecentTrack[]): PlayerQu
       durationMs: Math.max(0, Number(track.duration_ms ?? 0)),
       trackId: track.track_id ?? spotifyTrackIdFromUri(uri),
       albumId: track.album_id ?? null,
+      isLiked: track.is_liked ?? (track.source_label === "liked_cache" ? true : null),
+      likedAt: track.liked_at ?? null,
     };
   });
 }

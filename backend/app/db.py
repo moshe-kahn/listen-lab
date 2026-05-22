@@ -1399,6 +1399,14 @@ CREATE TABLE IF NOT EXISTS spotify_liked_track_sync_state (
   PRIMARY KEY (user_id, sync_key)
 );
 """,
+    28: """
+ALTER TABLE spotify_liked_track_cache
+  ADD COLUMN album_image_url TEXT;
+""",
+    29: """
+ALTER TABLE spotify_liked_track_cache
+  ADD COLUMN artist_ids TEXT;
+""",
 }
 
 

@@ -14,6 +14,7 @@ import type {
   LikedTracksResponse,
   LikedTracksSyncResponse,
   MergedTrackAggregateResponse,
+  ReleaseTrackMetadataResponse,
   ReleaseAlbumMergeDryRunResponse,
   ReleaseAlbumMergePreviewResponse,
   SuggestedGroupsResponse,
@@ -53,6 +54,32 @@ export async function fetchLikedTracks(limit: number = 50, offset: number = 0): 
     return (await response.json()) as LikedTracksResponse;
   }
 
+export async function fetchAllLikedTracks(pageLimit: number = 200): Promise<LikedTracksResponse> {
+    const firstPage = await fetchLikedTracks(pageLimit, 0);
+    const items = [...firstPage.items];
+    let nextOffset = firstPage.offset + firstPage.items.length;
+    let hasMore = firstPage.has_more;
+    let metadata = firstPage.metadata;
+    while (hasMore) {
+      const page = await fetchLikedTracks(pageLimit, nextOffset);
+      items.push(...page.items);
+      metadata = page.metadata ?? metadata;
+      hasMore = page.has_more;
+      nextOffset = page.offset + page.items.length;
+      if (page.items.length === 0) {
+        break;
+      }
+    }
+    return {
+      ...firstPage,
+      items,
+      has_more: false,
+      limit: pageLimit,
+      offset: 0,
+      metadata,
+    };
+  }
+
 export async function postLikedTracksSync(mode: "quick" | "full" = "quick"): Promise<LikedTracksSyncResponse> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const body: { mode: "quick" | "full"; simulate_failure_reason?: string } = { mode };
@@ -89,6 +116,28 @@ export async function postLikedTracksSync(mode: "quick" | "full" = "quick"): Pro
       throw new Error("Liked Tracks Sync: backend returned an empty response.");
     }
     return payload as LikedTracksSyncResponse;
+  }
+
+export async function fetchReleaseTrackMetadata(spotifyTrackIds: string[]): Promise<ReleaseTrackMetadataResponse> {
+    const response = await fetch(`${apiBaseUrl}/tracks/release-track-metadata`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spotify_track_ids: spotifyTrackIds }),
+    });
+    if (!response.ok) {
+      let detail = "Failed to load release track metadata.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      throw new Error(`Release Track Metadata (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ReleaseTrackMetadataResponse;
   }
 
 export async function fetchCatalogBackfillCoverage(): Promise<CatalogBackfillCoverageResponse> {

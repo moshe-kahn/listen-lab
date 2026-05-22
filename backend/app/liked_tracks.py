@@ -78,20 +78,36 @@ def _normalize_saved_track_item(item: Any, warnings: list[str]) -> dict[str, Any
         return None
 
     album = track.get("album") if isinstance(track.get("album"), dict) else {}
+    album_images = album.get("images") if isinstance(album.get("images"), list) else []
+    album_image_url = next(
+        (
+            str(image.get("url")).strip()
+            for image in album_images
+            if isinstance(image, dict) and str(image.get("url") or "").strip()
+        ),
+        None,
+    )
     artists_payload = track.get("artists") if isinstance(track.get("artists"), list) else []
-    artist_names = [
-        str(artist.get("name")).strip()
-        for artist in artists_payload
-        if isinstance(artist, dict) and str(artist.get("name") or "").strip()
-    ]
+    artist_names = []
+    artist_ids = []
+    for artist in artists_payload:
+        if not isinstance(artist, dict):
+            continue
+        artist_name = str(artist.get("name") or "").strip()
+        artist_id = str(artist.get("id") or "").strip()
+        if artist_name:
+            artist_names.append(artist_name)
+            artist_ids.append(artist_id)
 
     return {
         "spotify_track_id": track_id,
         "uri": track.get("uri"),
         "name": name,
         "artist_names": artist_names,
+        "artist_ids": artist_ids,
         "album_name": album.get("name") if isinstance(album, dict) else None,
         "album_spotify_id": album.get("id") if isinstance(album, dict) else None,
+        "album_image_url": album_image_url,
         "duration_ms": int(track["duration_ms"]) if isinstance(track.get("duration_ms"), int) else None,
         "popularity": int(track["popularity"]) if isinstance(track.get("popularity"), int) else None,
         "explicit": 1 if track.get("explicit") is True else 0 if track.get("explicit") is False else None,
@@ -141,8 +157,10 @@ def upsert_liked_tracks(user_id: str, tracks: list[dict[str, Any]], observed_at:
               uri,
               name,
               artist_names,
+              artist_ids,
               album_name,
               album_spotify_id,
+              album_image_url,
               duration_ms,
               popularity,
               explicit,
@@ -152,13 +170,15 @@ def upsert_liked_tracks(user_id: str, tracks: list[dict[str, Any]], observed_at:
               last_seen_at,
               unliked_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
             ON CONFLICT(user_id, spotify_track_id) DO UPDATE SET
               uri = excluded.uri,
               name = excluded.name,
               artist_names = excluded.artist_names,
+              artist_ids = excluded.artist_ids,
               album_name = excluded.album_name,
               album_spotify_id = excluded.album_spotify_id,
+              album_image_url = excluded.album_image_url,
               duration_ms = excluded.duration_ms,
               popularity = excluded.popularity,
               explicit = excluded.explicit,
@@ -174,8 +194,10 @@ def upsert_liked_tracks(user_id: str, tracks: list[dict[str, Any]], observed_at:
                     track.get("uri"),
                     track["name"],
                     json.dumps(track.get("artist_names") or []),
+                    json.dumps(track.get("artist_ids") or []),
                     track.get("album_name"),
                     track.get("album_spotify_id"),
+                    track.get("album_image_url"),
                     track.get("duration_ms"),
                     track.get("popularity"),
                     track.get("explicit"),
@@ -350,8 +372,10 @@ def list_cached_liked_tracks(user_id: str, *, limit: int = 50, offset: int = 0, 
               uri,
               name,
               artist_names,
+              artist_ids,
               album_name,
               album_spotify_id,
+              album_image_url,
               duration_ms,
               popularity,
               explicit,
@@ -377,24 +401,43 @@ def list_cached_liked_tracks(user_id: str, *, limit: int = 50, offset: int = 0, 
             artist_names = json.loads(row[3] or "[]")
         except ValueError:
             artist_names = []
+        try:
+            artist_ids = json.loads(row[4] or "[]")
+        except ValueError:
+            artist_ids = []
         artist_text = ", ".join(str(name) for name in artist_names if str(name).strip())
+        artists = []
+        for index, name in enumerate(artist_names):
+            artist_name = str(name).strip()
+            artist_id = str(artist_ids[index]).strip() if index < len(artist_ids) else ""
+            if artist_name or artist_id:
+                artists.append(
+                    {
+                        "artist_id": artist_id or None,
+                        "id": artist_id or None,
+                        "name": artist_name or None,
+                        "url": f"https://open.spotify.com/artist/{artist_id}" if artist_id else None,
+                    }
+                )
         items.append(
             {
                 "track_id": row[0],
                 "uri": row[1],
                 "track_name": row[2],
                 "artist_name": artist_text or None,
-                "album_name": row[4],
-                "album_id": row[5],
-                "duration_ms": row[6],
-                "popularity": row[7],
-                "spotify_explicit": bool(row[8]) if row[8] is not None else None,
-                "liked_at": row[9],
-                "spotify_played_at": row[9],
-                "is_liked": bool(row[10]),
-                "first_seen_at": row[11],
-                "last_seen_at": row[12],
-                "unliked_at": row[13],
+                "artists": artists,
+                "album_name": row[5],
+                "album_id": row[6],
+                "image_url": row[7],
+                "duration_ms": row[8],
+                "popularity": row[9],
+                "spotify_explicit": bool(row[10]) if row[10] is not None else None,
+                "liked_at": row[11],
+                "spotify_played_at": row[11],
+                "is_liked": bool(row[12]),
+                "first_seen_at": row[13],
+                "last_seen_at": row[14],
+                "unliked_at": row[15],
                 "source_label": "liked_cache",
             }
         )

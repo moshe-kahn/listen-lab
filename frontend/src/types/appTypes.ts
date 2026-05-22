@@ -30,6 +30,7 @@ export type RecentTrack = {
     name?: string | null;
     uri?: string | null;
     url?: string | null;
+    image_url?: string | null;
   }> | null;
   duration_ms?: number | null;
   duration_seconds?: number | null;
@@ -125,6 +126,17 @@ export type LikedTracksSyncResponse = {
   warnings: string[];
   errors: string[];
   metadata: LikedTracksSyncMetadata | null;
+};
+
+export type ReleaseTrackMetadataItem = {
+  release_track_id: number;
+  release_track_name: string;
+  release_track_source_count: number;
+  has_release_track_siblings: boolean;
+};
+
+export type ReleaseTrackMetadataResponse = {
+  items: Record<string, ReleaseTrackMetadataItem>;
 };
 
 export type MatchCounts = {
@@ -1000,7 +1012,7 @@ export type SectionKey =
   | "recent"
   | "likes";
 
-export type RecentPlayFilter = "listened" | "all" | "skipped";
+export type RecentPlayFilter = "listened" | "liked" | "all" | "skipped";
 
 export type DashboardListCardProps = {
   href?: string | null;
@@ -1013,6 +1025,9 @@ export type DashboardListCardProps = {
   tertiaryText?: string | null;
   metricText?: string | null;
   primaryBadgeText?: string | null;
+  liked?: boolean;
+  releaseSibling?: boolean;
+  releaseSiblingSourceCount?: number | null;
   secondaryBadgeText?: string | null;
   completionRatio?: number | null;
   trackUri?: string | null;
@@ -1125,6 +1140,8 @@ export type PlayerTrackSummary = {
 export type PlayerQueueTrack = PlayerTrackSummary & {
   trackId: string | null;
   albumId: string | null;
+  isLiked?: boolean | null;
+  likedAt?: string | null;
 };
 
 export type SpotifyPlayerState = {
@@ -1152,6 +1169,10 @@ export type AlbumTrackEntry = {
   lastPlayedAt: string | null;
   isSelected: boolean;
   isTopTrack: boolean;
+  releaseTrackId: number | null;
+  releaseTrackName: string | null;
+  releaseTrackSourceCount: number;
+  hasReleaseTrackSiblings: boolean;
 };
 
 export type SpotifyPlayerInstance = {
