@@ -11,6 +11,8 @@ import type {
   IdentityAuditSavedSubmissionListResponse,
   IdentityAuditSavedSubmissionReadResponse,
   IdentityAuditSubmissionDryRunResponse,
+  LikedTracksResponse,
+  LikedTracksSyncResponse,
   MergedTrackAggregateResponse,
   ReleaseAlbumMergeDryRunResponse,
   ReleaseAlbumMergePreviewResponse,
@@ -25,6 +27,69 @@ import type {
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const TRACK_MAPPING_FETCH_TIMEOUT_MS = 20000;
 const TRACKS_FORMULA_FETCH_LIMIT = 100;
+const LIKED_TRACKS_SYNC_FAILURE_SIMULATION_KEY = "listenlab.simulateLikedSyncFailure";
+const LIKED_TRACKS_SYNC_FAILURE_SIMULATION_QUERY = "simulate_liked_sync_failure";
+
+export async function fetchLikedTracks(limit: number = 50, offset: number = 0): Promise<LikedTracksResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/me/liked-tracks?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load liked tracks cache.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Liked Tracks (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as LikedTracksResponse;
+  }
+
+export async function postLikedTracksSync(mode: "quick" | "full" = "quick"): Promise<LikedTracksSyncResponse> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const body: { mode: "quick" | "full"; simulate_failure_reason?: string } = { mode };
+    if (import.meta.env.DEV) {
+      const simulatedReason = (
+        new URLSearchParams(window.location.search).get(LIKED_TRACKS_SYNC_FAILURE_SIMULATION_QUERY)
+        ?? window.localStorage.getItem(LIKED_TRACKS_SYNC_FAILURE_SIMULATION_KEY)
+      )?.trim();
+      if (simulatedReason) {
+        body.simulate_failure_reason = simulatedReason;
+        headers["X-ListenLab-Debug-Sync-Failure"] = "1";
+      }
+    }
+    const response = await fetch(`${apiBaseUrl}/me/liked-tracks/sync`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify(body),
+    });
+    let payload: LikedTracksSyncResponse | { detail?: string } | null = null;
+    try {
+      payload = (await response.json()) as LikedTracksSyncResponse | { detail?: string };
+    } catch {
+      // ignore invalid error payloads
+    }
+    if (!response.ok) {
+      let detail = "Failed to sync liked tracks.";
+      if (payload && "detail" in payload && payload.detail) {
+        detail = payload.detail;
+      }
+      throw new Error(`Liked Tracks Sync (${response.status}): ${detail}`);
+    }
+    if (!payload) {
+      throw new Error("Liked Tracks Sync: backend returned an empty response.");
+    }
+    return payload as LikedTracksSyncResponse;
+  }
 
 export async function fetchCatalogBackfillCoverage(): Promise<CatalogBackfillCoverageResponse> {
     const response = await fetch(`${apiBaseUrl}/debug/spotify/catalog-backfill/coverage`, {
@@ -544,4 +609,3 @@ export async function fetchIdentityAuditSavedSubmissionDryRun(submissionId: numb
     }
     return (await response.json()) as IdentityAuditSubmissionDryRunResponse;
   }
-

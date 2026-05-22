@@ -59,9 +59,11 @@ Current note:
 - that dashboard is being used as product calibration and UX groundwork, not as the final overlooked-artist MVP experience
 - the dashboard now includes a loading handoff after Spotify auth plus a persistent top navigation bar for jumping between sections
 - the dashboard also supports a restricted local mode so saved history- and cache-backed sections remain usable when Spotify is unavailable or rate-limited
+- Recent Likes is moving from direct latest-likes display toward a user-scoped read-only saved-track cache; cached rows are preferred, direct Spotify latest-likes rows are labeled as fallback, and `Sync Likes` does a bounded quick sync
+- liked-track sync failure simulation exists only for local/dev QA and requires both `LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE=1` and `X-ListenLab-Debug-Sync-Failure: 1`
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
-- the dashboard now also includes a track-detail overlay iteration with same-album in-place switching, preview playback, richer player controls, and a merged-event `Listening Log` page for chronology/source inspection
+- the dashboard now also includes a track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, and a merged-event `Listening Log` page for chronology/source inspection
 - track identity work now also includes a conservative three-layer model:
   - `source_track`
   - `release_track`

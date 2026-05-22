@@ -7,6 +7,7 @@ import type {
   TopPlaylist,
   ProfileResponse,
   RecentSectionResponse,
+  LikedTracksResponse,
   RecentArchiveResponse,
   RecentPlayFilter,
   ListeningLogResponse,
@@ -126,7 +127,9 @@ import {
   fetchIdentityAuditAmbiguousReview,
   fetchIdentityAuditSavedSubmissions,
   fetchIdentityAuditSavedSubmissionById,
-  fetchIdentityAuditSavedSubmissionDryRun
+  fetchIdentityAuditSavedSubmissionDryRun,
+  fetchLikedTracks,
+  postLikedTracksSync
 } from "./api/appApi";
 import { syncQueuePlaylist } from "./api/playbackApi";
 import { CatalogBackfillPage } from "./components/catalogBackfill/CatalogBackfillPage";
@@ -232,6 +235,11 @@ export function App() {
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [loadingExtendedProfile, setLoadingExtendedProfile] = useState(false);
   const [loadingRecentSection, setLoadingRecentSection] = useState(false);
+  const [likedTracksCache, setLikedTracksCache] = useState<LikedTracksResponse | null>(null);
+  const [likedTracksLoading, setLikedTracksLoading] = useState(false);
+  const [likedTracksSyncing, setLikedTracksSyncing] = useState(false);
+  const [likedTracksError, setLikedTracksError] = useState<string | null>(null);
+  const [likedTracksLoadAttempted, setLikedTracksLoadAttempted] = useState(false);
   const [loadingHistoryRecompute, setLoadingHistoryRecompute] = useState(false);
   const [profileLoadAttempted, setProfileLoadAttempted] = useState(false);
   const [reloadCooldownUntil, setReloadCooldownUntil] = useState<number | null>(null);
@@ -267,10 +275,15 @@ export function App() {
   const [playerQueueShuffleEnabled, setPlayerQueueShuffleEnabled] = useState(false);
   const [playerQueueShuffleBaseTracks, setPlayerQueueShuffleBaseTracks] = useState<PlayerQueueTrack[] | null>(null);
   const [playerQueueSettingsOpen, setPlayerQueueSettingsOpen] = useState(false);
+  const [playerQueueOrganizeMode, setPlayerQueueOrganizeMode] = useState(false);
+  const [playerQueueSortMode, setPlayerQueueSortMode] = useState<"custom" | "length" | "az" | "recent">("custom");
+  const [playerQueueGroupMode, setPlayerQueueGroupMode] = useState<"custom" | "artist" | "album">("custom");
+  const [playerQueueDragIndex, setPlayerQueueDragIndex] = useState<number | null>(null);
   const [playerQueueCleared, setPlayerQueueCleared] = useState(false);
   const [playerQueueLoopEnabled, setPlayerQueueLoopEnabled] = useState(false);
   const [playerTrackLoopEnabled, setPlayerTrackLoopEnabled] = useState(false);
   const [playerQueueContext, setPlayerQueueContext] = useState<{ label: string; url?: string | null } | null>(null);
+  const [playerQueuePlayedKeys, setPlayerQueuePlayedKeys] = useState<Set<string>>(() => new Set());
   const [playerQueuePauseMenuOpen, setPlayerQueuePauseMenuOpen] = useState(false);
   const [queuePauseAfterCurrentEnabled, setQueuePauseAfterCurrentEnabled] = useState(false);
   const [queueSleepTimerUntilMs, setQueueSleepTimerUntilMs] = useState<number | null>(null);
@@ -287,6 +300,13 @@ export function App() {
   const [overlaySeekMs, setOverlaySeekMs] = useState<number | null>(null);
   const [pausedTimeFlashOn, setPausedTimeFlashOn] = useState(true);
   const [previewingTrackUri, setPreviewingTrackUri] = useState<string | null>(null);
+  const [previewPlaybackSession, setPreviewPlaybackSessionState] = useState<{
+    baseTrack: PlayerTrackSummary | null;
+    basePositionMs: number;
+    baseDurationMs: number;
+    basePaused: boolean;
+    previewTrack: PlayerTrackSummary;
+  } | null>(null);
   const [previewPlayedTrackKeys, setPreviewPlayedTrackKeys] = useState<Set<string>>(new Set());
   const [livePlaybackSnapshot, setLivePlaybackSnapshot] = useState<CurrentPlaybackSnapshot | null>(null);
   const [liveDerivedProgressMs, setLiveDerivedProgressMs] = useState(0);
@@ -469,12 +489,20 @@ export function App() {
   const brandMenuRef = useRef<HTMLDivElement | null>(null);
   const experimentalMenuRef = useRef<HTMLDivElement | null>(null);
   const playerMenuRef = useRef<HTMLDivElement | null>(null);
+  const homeQueueListRef = useRef<HTMLDivElement | null>(null);
   const rateLimitMenuRef = useRef<HTMLDivElement | null>(null);
   const spotifyPlayerRef = useRef<SpotifyPlayerInstance | null>(null);
   const spotifyDeviceIdRef = useRef<string | null>(null);
   const previewStopTimerRef = useRef<number | null>(null);
   const previewVolumeRampTimerRef = useRef<number | null>(null);
   const previewingTrackUriRef = useRef<string | null>(null);
+  const previewPlaybackSessionRef = useRef<{
+    baseTrack: PlayerTrackSummary | null;
+    basePositionMs: number;
+    baseDurationMs: number;
+    basePaused: boolean;
+    previewTrack: PlayerTrackSummary;
+  } | null>(null);
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const loadedHomeAlbumTracksAlbumIdRef = useRef<string | null>(null);
@@ -526,18 +554,34 @@ export function App() {
   const shouldUseLiveSnapshotDisplay = liveReadOnlyMode
     || (usingLivePlaybackSnapshot && !currentTrack)
     || (usingLivePlaybackSnapshot && liveSnapshotIsDifferentTrack && !liveControlOverrideActive);
-  const playerDisplayTrack: PlayerTrackSummary | null = shouldUseLiveSnapshotDisplay
+  const basePlayerDisplayTrack: PlayerTrackSummary | null = shouldUseLiveSnapshotDisplay
     ? livePlaybackTrackSummary
     : currentTrack;
-  const playerDisplayPaused = shouldUseLiveSnapshotDisplay
+  const basePlayerDisplayPaused = shouldUseLiveSnapshotDisplay
     ? !Boolean(livePlaybackSnapshot?.is_playing)
     : playbackPaused;
-  const playerDisplayPositionMs = shouldUseLiveSnapshotDisplay
+  const basePlayerDisplayPositionMs = shouldUseLiveSnapshotDisplay
     ? Math.max(0, liveDerivedProgressMs)
     : playbackPositionMs;
-  const playerDisplayDurationMs = shouldUseLiveSnapshotDisplay
+  const basePlayerDisplayDurationMs = shouldUseLiveSnapshotDisplay
     ? Math.max(0, Number(livePlaybackSnapshot?.duration_ms ?? 0))
     : playbackDurationMs;
+  const previewInProgress = Boolean(previewingTrackUri && previewPlaybackSession);
+  const previewStatusTooltip = previewInProgress
+    ? `preview of ${previewPlaybackSession?.previewTrack.name ?? "song"} in progress`
+    : undefined;
+  const playerDisplayTrack: PlayerTrackSummary | null = previewInProgress
+    ? previewPlaybackSession?.baseTrack ?? basePlayerDisplayTrack
+    : basePlayerDisplayTrack;
+  const playerDisplayPaused = previewInProgress
+    ? previewPlaybackSession?.basePaused ?? basePlayerDisplayPaused
+    : basePlayerDisplayPaused;
+  const playerDisplayPositionMs = previewInProgress
+    ? previewPlaybackSession?.basePositionMs ?? basePlayerDisplayPositionMs
+    : basePlayerDisplayPositionMs;
+  const playerDisplayDurationMs = previewInProgress
+    ? previewPlaybackSession?.baseDurationMs ?? basePlayerDisplayDurationMs
+    : basePlayerDisplayDurationMs;
   const selectedPreviewPrimaryArtistName = selectedPreview?.kind === "track"
     ? (
       firstArtistFromRecentTrack(selectedPreview.sourceTrack)?.name
@@ -636,6 +680,7 @@ export function App() {
   const playerDisplayArtist = firstArtistFromRecentTrack(playerDisplayKnownTrack);
   const playerDisplayArtistName = playerDisplayArtist?.name ?? playerDisplayPrimaryArtistFromDisplay ?? null;
   const playerDisplayArtistId = playerDisplayArtist?.artist_id ?? playerDisplayArtist?.id ?? null;
+  const playerDisplayArtistImageUrl = playerDisplayArtistName ? findArtistImageUrl(playerDisplayArtistName) : null;
   const playerDisplayAlbumName = playerDisplayKnownTrack?.album_name ?? playerDisplayTrack?.album ?? null;
   const playerDisplayAlbumId = playerDisplayKnownTrack?.album_id ?? null;
   const playerDisplayAlbumYear = playerDisplayKnownTrack?.album_release_year ?? null;
@@ -660,7 +705,8 @@ export function App() {
       || (currentTrack.uri && recentLikedStartupTrackUri && currentTrack.uri === recentLikedStartupTrackUri)
     ),
   );
-  const canControlPlayback = !liveReadOnlyMode || livePlaybackOnListenLabDevice;
+  const canControlPlayback = !previewInProgress && (!liveReadOnlyMode || livePlaybackOnListenLabDevice);
+  const playerTransportReadOnly = liveReadOnlyMode || previewInProgress;
   const canSeekSelectedPreview = Boolean(
     canControlPlayback
     && selectedPreviewTrackIsCurrent
@@ -670,6 +716,7 @@ export function App() {
   const livePlaybackControlTooltip = liveReadOnlyMode
     ? `Playing on ${livePlaybackSnapshot?.device_name ?? "another device"}. Click to control on ListenLab.`
     : undefined;
+  const playerTransportTooltip = previewStatusTooltip ?? livePlaybackControlTooltip;
   const listenLabQueueCursor = playerQueueSource === "listenlab" ? playerQueueCursor : null;
   const listenLabQueueHasCursor = listenLabQueueCursor != null && listenLabQueueCursor >= 0;
   const spotifyQueueCurrentIndex = playerQueueSource === "spotify" && playerDisplayTrack
@@ -710,11 +757,11 @@ export function App() {
     && (playerReady || usingLivePlaybackSnapshot),
   );
   const playerPreviousDisabled = playerQueueSource === "listenlab"
-    ? !canMoveListenLabQueuePrevious
-    : !playerTransportControlsAvailable;
+    ? (previewInProgress || !canMoveListenLabQueuePrevious)
+    : (previewInProgress || !playerTransportControlsAvailable);
   const playerNextDisabled = playerQueueSource === "listenlab"
-    ? !canMoveListenLabQueueNext
-    : !playerTransportControlsAvailable;
+    ? (previewInProgress || !canMoveListenLabQueueNext)
+    : (previewInProgress || !playerTransportControlsAvailable);
   const playerPanelVisible = Boolean(profile && (playerMenuOpen || appPage === "dashboard"));
   const queueSleepTimerActive = queueSleepTimerUntilMs != null && queueSleepTimerUntilMs > Date.now();
   const queueDelayActive = queuePauseAfterCurrentEnabled || queueSleepTimerActive;
@@ -1355,6 +1402,13 @@ export function App() {
   ]);
 
   useEffect(() => {
+    if (!profile || experienceMode !== "full" || !session?.authenticated || likedTracksCache || likedTracksLoading || likedTracksLoadAttempted) {
+      return;
+    }
+    void loadLikedTracksCache();
+  }, [experienceMode, likedTracksCache, likedTracksLoadAttempted, likedTracksLoading, profile, session?.authenticated]);
+
+  useEffect(() => {
     quickRecentAutoAttemptRef.current = null;
   }, [session?.spotify_user_id]);
 
@@ -1422,6 +1476,21 @@ export function App() {
       }
       if (!rateLimitMenuRef.current?.contains(event.target as Node)) {
         setRateLimitMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target;
+      if (!(target instanceof Element) || !target.closest(".player-queue-settings")) {
+        setPlayerQueueSettingsOpen(false);
+        setPlayerQueuePauseMenuOpen(false);
       }
     }
 
@@ -2109,6 +2178,9 @@ export function App() {
             return;
           }
           setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
+          if (previewingTrackUriRef.current) {
+            return;
+          }
           setCurrentTrack(currentTrackFromState(state));
           setPlaybackPaused(state.paused);
           setPlaybackPositionMs(state.position ?? 0);
@@ -2167,7 +2239,7 @@ export function App() {
   }, [profile, session]);
 
   useEffect(() => {
-    if (!currentTrack || playbackPaused) {
+    if (!currentTrack || playbackPaused || previewingTrackUri) {
       return;
     }
 
@@ -2181,7 +2253,7 @@ export function App() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [currentTrack, playbackDurationMs, playbackPaused]);
+  }, [currentTrack, playbackDurationMs, playbackPaused, previewingTrackUri]);
 
   useEffect(() => {
     if (queueSleepTimerUntilMs == null) {
@@ -2204,10 +2276,8 @@ export function App() {
     };
   }, [queueSleepTimerUntilMs]);
 
-  function scrollQueueToRole(role: "current" | "up-next") {
-    const menu = playerMenuRef.current;
-    const queueList = menu?.querySelector<HTMLElement>(".player-queue-column .player-recent-list") ?? null;
-    const anchorRow = menu?.querySelector<HTMLElement>(`[data-player-queue-role='${role}']`) ?? null;
+  function scrollQueueListToRole(queueList: HTMLElement | null, role: "current" | "up-next") {
+    const anchorRow = queueList?.querySelector<HTMLElement>(`[data-player-queue-role='${role}']`) ?? null;
     if (!queueList || !anchorRow) {
       return;
     }
@@ -2216,16 +2286,22 @@ export function App() {
     queueList.scrollTop += rowRect.top - listRect.top;
   }
 
-  function scrollQueueToAutoAnchor() {
-    const menu = playerMenuRef.current;
-    const anchorRole = menu?.querySelector<HTMLElement>("[data-player-queue-role='up-next']")
+  function scrollQueueListToAutoAnchor(queueList: HTMLElement | null) {
+    const anchorRole = queueList?.querySelector<HTMLElement>("[data-player-queue-role='up-next']")
       ? "up-next"
       : "current";
-    scrollQueueToRole(anchorRole);
+    scrollQueueListToRole(queueList, anchorRole);
+  }
+
+  function scrollQueueToAutoAnchor() {
+    const menu = playerMenuRef.current;
+    const popupQueueList = menu?.querySelector<HTMLElement>(".player-queue-column .player-recent-list") ?? null;
+    scrollQueueListToAutoAnchor(popupQueueList);
+    scrollQueueListToAutoAnchor(homeQueueListRef.current);
   }
 
   useEffect(() => {
-    if (!playerMenuOpen || playerQueueSource !== "listenlab" || playerQueueCursor == null) {
+    if (playerQueueSource !== "listenlab" || playerQueueCursor == null) {
       return;
     }
 
@@ -2235,7 +2311,7 @@ export function App() {
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [playerMenuOpen, playerQueueCursor, playerQueueSource, playerQueueTracks.length]);
+  }, [appPage, playerMenuOpen, playerQueueCursor, playerQueueSource, playerQueueTracks.length]);
 
   useEffect(() => {
     playbackPositionMsRef.current = playbackPositionMs;
@@ -2245,6 +2321,7 @@ export function App() {
     if (
       !currentTrack?.uri
       || playbackPaused
+      || previewingTrackUri
       || playerQueueSource !== "listenlab"
       || playerQueueCursor == null
     ) {
@@ -2276,10 +2353,10 @@ export function App() {
     } else {
       void startNextListenLabQueueTrack();
     }
-  }, [currentTrack, playbackDurationMs, playbackPaused, playbackPositionMs, playerQueueCursor, playerQueueSource, playerQueueTracks, playerQueueLoopEnabled, playerTrackLoopEnabled, queuePauseAfterCurrentEnabled]);
+  }, [currentTrack, playbackDurationMs, playbackPaused, playbackPositionMs, playerQueueCursor, playerQueueSource, playerQueueTracks, playerQueueLoopEnabled, playerTrackLoopEnabled, queuePauseAfterCurrentEnabled, previewingTrackUri]);
 
   useEffect(() => {
-    if (!currentTrack || playbackPaused || activePlayerListenEventId == null) {
+    if (!currentTrack || playbackPaused || previewingTrackUri || activePlayerListenEventId == null) {
       return;
     }
 
@@ -2293,7 +2370,7 @@ export function App() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activePlayerListenEventId, currentTrack, playbackDurationMs, playbackPaused]);
+  }, [activePlayerListenEventId, currentTrack, playbackDurationMs, playbackPaused, previewingTrackUri]);
 
   useEffect(() => {
     setPlayerRecentTracks(dedupeRecentTracksForPlayer(profile?.recent_tracks ?? []));
@@ -2326,7 +2403,8 @@ export function App() {
       setPlayerQueueTracks(recentTracksToPlayerQueueTracks(profile.recent_likes_tracks));
       setPlayerQueueCursor(0);
       setPlayerQueueSource("listenlab");
-      setPlayerQueueContext({ label: "Recent likes" });
+      setPlayerQueueContext({ label: "Recent Likes" });
+      setPlayerQueuePlayedKeys(new Set());
       setPlayerQueueError(null);
       return;
     }
@@ -2637,6 +2715,10 @@ export function App() {
 
   async function handlePlayerPrimaryButtonClick() {
     await activatePlayerElement();
+    if (previewingTrackUriRef.current) {
+      await stopTrackPreviewPlayback(true);
+      return;
+    }
     if (!liveReadOnlyMode) {
       await togglePlayerPlayback();
       return;
@@ -2712,6 +2794,7 @@ export function App() {
         setPlayerQueueCursor(options.queueCursor ?? 0);
         setPlayerQueueSource("listenlab");
         setPlayerQueueContext(options.queueContext ?? null);
+        resetQueuePlayedKeys(nextCurrentTrack);
         setPlayerQueueError(null);
       }
       const listenEventId = await saveListenLabPlayerEvent(nextCurrentTrack, options?.sourceTrack ?? null, 0);
@@ -2922,6 +3005,9 @@ export function App() {
     if (currentIndex !== targetIndex) {
       const previousStatus: "complete" | "in_progress" = options?.markPreviousComplete ? "complete" : "in_progress";
       void updateListenLabPlayerEventProgress(playbackPositionMsRef.current, previousStatus);
+      if (options?.markPreviousComplete) {
+        markQueueTrackPlayed(playerQueueTracks[currentIndex] ?? currentTrack);
+      }
     }
     setCurrentTrack(targetTrack);
     if (options?.startPaused) {
@@ -2937,6 +3023,7 @@ export function App() {
     setPlayerQueueCursor(targetIndex);
     setPlayerQueueSource("listenlab");
     setPlayerQueueCleared(false);
+    markQueueTrackPlayed(targetTrack);
     setPlayerQueueError(null);
     setPlayerError(null);
     setLiveControlOverrideUntilMs(Date.now() + LIVE_PLAYBACK_POLL_INTERVAL_MS);
@@ -2973,7 +3060,13 @@ export function App() {
   }
 
   function isTrackPlaying(trackUri: string | null) {
-    return Boolean(trackUri && currentTrack?.uri === trackUri && !playbackPaused);
+    return Boolean(
+      trackUri
+      && (
+        (previewingTrackUriRef.current && previewingTrackUriRef.current === trackUri)
+        || (currentTrack?.uri === trackUri && !playbackPaused)
+      ),
+    );
   }
 
   function resetQueueControls() {
@@ -2981,6 +3074,10 @@ export function App() {
     setPlayerQueueShuffleBaseTracks(null);
     setPlayerQueueSettingsOpen(false);
     setPlayerQueuePauseMenuOpen(false);
+    setPlayerQueueOrganizeMode(false);
+    setPlayerQueueSortMode("custom");
+    setPlayerQueueGroupMode("custom");
+    setPlayerQueueDragIndex(null);
     setPlayerQueueLoopEnabled(false);
     setPlayerTrackLoopEnabled(false);
     setQueuePauseAfterCurrentEnabled(false);
@@ -3000,6 +3097,134 @@ export function App() {
       return track.uri;
     }
     return "trackId" in track ? track.trackId : null;
+  }
+
+  function resetQueuePlayedKeys(track?: PlayerQueueTrack | PlayerTrackSummary | null) {
+    const identity = queueTrackIdentity(track);
+    setPlayerQueuePlayedKeys(identity ? new Set([identity]) : new Set());
+  }
+
+  function markQueueTrackPlayed(track: PlayerQueueTrack | PlayerTrackSummary | null | undefined) {
+    const identity = queueTrackIdentity(track);
+    if (!identity) {
+      return;
+    }
+    setPlayerQueuePlayedKeys((current) => {
+      if (current.has(identity)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(identity);
+      return next;
+    });
+  }
+
+  function queueTrackRecentTime(track: PlayerQueueTrack) {
+    const identity = queueTrackIdentity(track);
+    const trackKey = normalizedTrackArtistKey(track.name, track.artists);
+    const match = knownPlayerTracks.find((candidate) => {
+      const candidateUri = trackUriWithFallback(candidate.uri, candidate.track_id);
+      if (identity && candidateUri === identity) {
+        return true;
+      }
+      if (track.trackId && candidate.track_id === track.trackId) {
+        return true;
+      }
+      return normalizedTrackArtistKey(candidate.track_name, candidate.artist_name) === trackKey;
+    });
+    const timeText = match?.last_played_at ?? match?.spotify_played_at ?? null;
+    return timeText ? Date.parse(timeText) || 0 : 0;
+  }
+
+  function setQueueTracksPreservingCurrent(nextTracks: PlayerQueueTrack[]) {
+    const currentIdentity = queueTrackIdentity(currentTrack);
+    const nextCursor = currentIdentity
+      ? nextTracks.findIndex((track) => queueTrackIdentity(track) === currentIdentity)
+      : -1;
+    setPlayerQueueTracks(nextTracks);
+    if (playerQueueSource === "listenlab") {
+      setPlayerQueueCursor(nextCursor >= 0 ? nextCursor : null);
+    }
+    setPlayerQueueShuffleEnabled(false);
+    setPlayerQueueShuffleBaseTracks(null);
+  }
+
+  function removeQueueTrackAtIndex(index: number) {
+    const removedTrack = playerQueueTracks[index] ?? null;
+    const removedIsCurrent = playerQueueSource === "listenlab" && index === playerQueueCursor;
+    const nextTracks = playerQueueTracks.filter((_track, trackIndex) => trackIndex !== index);
+    setPlayerQueueTracks(nextTracks);
+    if (playerQueueSource === "listenlab") {
+      if (removedIsCurrent) {
+        setPlayerQueueCursor(null);
+      } else if (playerQueueCursor != null && index < playerQueueCursor) {
+        setPlayerQueueCursor(playerQueueCursor - 1);
+      }
+    }
+    const removedIdentity = queueTrackIdentity(removedTrack);
+    if (removedIdentity) {
+      setPlayerQueuePlayedKeys((current) => {
+        if (!current.has(removedIdentity)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.delete(removedIdentity);
+        return next;
+      });
+    }
+    setPlayerQueueSortMode("custom");
+    setPlayerQueueGroupMode("custom");
+    setPlayerQueueShuffleEnabled(false);
+    setPlayerQueueShuffleBaseTracks(null);
+  }
+
+  function moveQueueTrack(fromIndex: number, toIndex: number) {
+    if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= playerQueueTracks.length || toIndex >= playerQueueTracks.length) {
+      return;
+    }
+    const nextTracks = [...playerQueueTracks];
+    const [movedTrack] = nextTracks.splice(fromIndex, 1);
+    if (!movedTrack) {
+      return;
+    }
+    nextTracks.splice(toIndex, 0, movedTrack);
+    setQueueTracksPreservingCurrent(nextTracks);
+    setPlayerQueueSortMode("custom");
+    setPlayerQueueGroupMode("custom");
+  }
+
+  function sortPlayerQueue(mode: "custom" | "length" | "az" | "recent") {
+    setPlayerQueueSortMode(mode);
+    if (mode === "custom") {
+      return;
+    }
+    setPlayerQueueGroupMode("custom");
+    const nextTracks = [...playerQueueTracks].sort((a, b) => {
+      if (mode === "length") {
+        return (a.durationMs ?? 0) - (b.durationMs ?? 0);
+      }
+      if (mode === "recent") {
+        return queueTrackRecentTime(b) - queueTrackRecentTime(a);
+      }
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+    setQueueTracksPreservingCurrent(nextTracks);
+  }
+
+  function groupPlayerQueue(mode: "custom" | "artist" | "album") {
+    setPlayerQueueGroupMode(mode);
+    if (mode === "custom") {
+      return;
+    }
+    setPlayerQueueSortMode("custom");
+    const keyForTrack = (track: PlayerQueueTrack) => (
+      mode === "artist" ? track.artists : track.album
+    ).toLocaleLowerCase();
+    const nextTracks = [...playerQueueTracks].sort((a, b) => {
+      const groupCompare = keyForTrack(a).localeCompare(keyForTrack(b), undefined, { sensitivity: "base" });
+      return groupCompare || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+    setQueueTracksPreservingCurrent(nextTracks);
   }
 
   function shuffleTracks(tracks: PlayerQueueTrack[]) {
@@ -3073,6 +3298,7 @@ export function App() {
     setPlayerQueueCursor(null);
     setPlayerQueueSource(null);
     clearQueueContext();
+    setPlayerQueuePlayedKeys(new Set());
     setPlayerQueueError(null);
     resetQueueControls();
     setPlayerQueueCleared(true);
@@ -3087,6 +3313,7 @@ export function App() {
       setPlayerQueueSource("listenlab");
       setPlayerQueueCursor(activeQueueCursor);
       setPlayerQueueCleared(false);
+      markQueueTrackPlayed(playerQueueTracks[activeQueueCursor] ?? currentTrack);
     }
   }
 
@@ -3275,19 +3502,48 @@ export function App() {
     setPreviewingTrackUri(nextUri);
   }
 
+  function setPreviewPlaybackSession(nextSession: typeof previewPlaybackSessionRef.current) {
+    previewPlaybackSessionRef.current = nextSession;
+    setPreviewPlaybackSessionState(nextSession);
+  }
+
   function clearPreviewPlaybackState() {
     if (previewStopTimerRef.current != null) {
       window.clearTimeout(previewStopTimerRef.current);
       previewStopTimerRef.current = null;
     }
     setPreviewingTrackUriState(null);
+    setPreviewPlaybackSession(null);
     restoreDefaultPlayerVolume();
   }
 
-  async function stopTrackPreviewPlayback() {
+  async function resumeFromPreviewSession(session: typeof previewPlaybackSessionRef.current) {
+    if (!session?.baseTrack?.uri) {
+      setPlaybackPaused(true);
+      return;
+    }
+    const resumed = await playTrackUri(session.baseTrack.uri, Math.max(0, session.basePositionMs), {
+      syncQueuePlaylist: playerQueueSource === "listenlab",
+    });
+    if (!resumed) {
+      return;
+    }
+    setCurrentTrack(session.baseTrack);
+    setPlaybackPaused(false);
+    setPlaybackPositionMs(Math.max(0, session.basePositionMs));
+    setPlaybackDurationMs(Math.max(0, session.baseDurationMs || session.baseTrack.durationMs || 0));
+    setQueuePausedCursor(null);
+  }
+
+  async function stopTrackPreviewPlayback(resumeBase = true) {
     const hasActivePreview = Boolean(previewingTrackUriRef.current);
+    const session = previewPlaybackSessionRef.current;
     clearPreviewPlaybackState();
     if (!hasActivePreview) {
+      return;
+    }
+    if (resumeBase) {
+      await resumeFromPreviewSession(session);
       return;
     }
     const player = spotifyPlayerRef.current;
@@ -3324,6 +3580,11 @@ export function App() {
       await stopTrackPreviewPlayback();
       return;
     }
+    const existingPreviewSession = previewPlaybackSessionRef.current;
+    const baseTrack = existingPreviewSession?.baseTrack ?? playerDisplayTrack;
+    const basePositionMs = existingPreviewSession?.basePositionMs ?? playerDisplayPositionMs;
+    const baseDurationMs = existingPreviewSession?.baseDurationMs ?? (playerDisplayDurationMs || playerDisplayTrack?.durationMs || 0);
+    const basePaused = existingPreviewSession?.basePaused ?? playerDisplayPaused;
     clearPreviewPlaybackState();
     const durationMs = Math.max(0, track.durationMs ?? track.sourceTrack?.duration_ms ?? 0);
     if (durationMs < 60_000) {
@@ -3338,6 +3599,11 @@ export function App() {
     }
     const randomStartMs = Math.floor(Math.random() * (maxStartMs - minStartMs + 1)) + minStartMs;
     await setPlayerVolumeSafe(PREVIEW_RAMP_START_VOLUME);
+    const previewTrack = {
+      ...playerSummaryFromAlbumTrack(track),
+      uri: rowTrackUri,
+      durationMs,
+    };
     const playbackStarted = await playTrackUri(rowTrackUri, randomStartMs);
     if (!playbackStarted) {
       restoreDefaultPlayerVolume();
@@ -3349,18 +3615,17 @@ export function App() {
       next.add(previewKey);
       return next;
     });
-    setCurrentTrack({
-      ...playerSummaryFromAlbumTrack(track),
-      uri: rowTrackUri,
-      durationMs,
+    setPreviewPlaybackSession({
+      baseTrack,
+      basePositionMs: Math.max(0, basePositionMs),
+      baseDurationMs: Math.max(0, baseDurationMs),
+      basePaused,
+      previewTrack,
     });
-    setPlaybackPaused(false);
-    setPlaybackPositionMs(randomStartMs);
-    setPlaybackDurationMs(durationMs);
     setPreviewingTrackUriState(rowTrackUri);
     startPreviewVolumeRamp();
     previewStopTimerRef.current = window.setTimeout(() => {
-      void stopTrackPreviewPlayback();
+      void stopTrackPreviewPlayback(true);
     }, 20_000);
   }
 
@@ -3400,8 +3665,30 @@ export function App() {
       sourceTrack: track.sourceTrack,
     });
     if (playbackStarted) {
-      openAlbumTrackPreview(track, contextPreview);
+      setHomeAlbumExpanded(true);
     }
+  }
+
+  async function handleHomeAlbumPlayAll() {
+    const firstPlayableTrack = homeAlbumTrackEntries
+      .map((track) => ({ track, uri: trackUriWithFallback(track.uri, track.id) }))
+      .find((item) => Boolean(item.uri));
+    if (!firstPlayableTrack) {
+      setPlayerError("This album does not have a playable first song.");
+      return;
+    }
+    await handleHomeAlbumTrackPlay(firstPlayableTrack.track, firstPlayableTrack.uri);
+  }
+
+  async function handleAlbumPlayAll() {
+    const firstPlayableTrack = albumTrackEntries
+      .map((track) => ({ track, uri: trackUriWithFallback(track.uri, track.id) }))
+      .find((item) => Boolean(item.uri));
+    if (!firstPlayableTrack) {
+      setPlayerError("This album does not have a playable first song.");
+      return;
+    }
+    await handleAlbumTrackPlay(firstPlayableTrack.track, firstPlayableTrack.uri);
   }
 
   function handleExperienceModeChange(nextMode: ExperienceMode) {
@@ -7422,6 +7709,92 @@ export function App() {
     return (await response.json()) as RecentSectionResponse;
   }
 
+  async function loadLikedTracksCache() {
+    if (experienceMode !== "full") {
+      return;
+    }
+    setLikedTracksLoadAttempted(true);
+    setLikedTracksLoading(true);
+    setLikedTracksError(null);
+    try {
+      const payload = await fetchLikedTracks(RECENT_SECTION_FETCH_LIMIT);
+      setLikedTracksCache(payload);
+      if (payload.items.length > 0) {
+        setProfile((current) => current
+          ? {
+              ...current,
+              recent_likes_tracks: payload.items,
+              recent_likes_available: true,
+            }
+          : current);
+      }
+    } catch (error) {
+      setLikedTracksError(formatUiErrorMessage(error, "Failed to load liked tracks cache."));
+    } finally {
+      setLikedTracksLoading(false);
+    }
+  }
+
+  function likedTracksSyncFailureMessage(result: { stopped_reason: string; errors?: string[] }) {
+    const detail = result.errors?.find((entry) => entry.trim().length > 0) ?? "";
+    switch (result.stopped_reason) {
+      case "auth_error":
+        return "Liked tracks sync needs a valid Spotify session. Log out and log back in to reconnect Spotify.";
+      case "forbidden":
+      case "missing_scope":
+        return "Liked tracks sync needs Spotify library access. Log out and log back in to grant library access.";
+      case "rate_limited":
+        return "Spotify is rate-limiting liked tracks sync right now. Try again later.";
+      case "network_error":
+        return detail || "Liked tracks sync could not reach Spotify. Try again later.";
+      case "parse_error":
+      case "unexpected_response":
+        return detail || "Liked tracks sync received an unexpected Spotify response. Try again later.";
+      default:
+        return null;
+    }
+  }
+
+  async function syncLikedTracks() {
+    if (likedTracksSyncing) {
+      return;
+    }
+    setLikedTracksSyncing(true);
+    setLikedTracksError(null);
+    setStatusMessage("Syncing liked tracks...");
+    try {
+      const result = await postLikedTracksSync("quick");
+      const failureMessage = likedTracksSyncFailureMessage(result);
+      if (failureMessage) {
+        setLikedTracksError(failureMessage);
+        setStatusMessage(failureMessage);
+        setStatusHistory((current) => [...current, `Liked tracks sync ${result.stopped_reason}: ${failureMessage}`]);
+        return;
+      }
+      const payload = await fetchLikedTracks(RECENT_SECTION_FETCH_LIMIT);
+      setLikedTracksCache(payload);
+      setProfile((current) => current
+        ? {
+            ...current,
+            recent_likes_tracks: payload.items,
+            recent_likes_available: payload.items.length > 0,
+          }
+        : current);
+      setStatusMessage("");
+      setStatusHistory((current) => [
+        ...current,
+        `Liked tracks sync ${result.stopped_reason}: ${result.tracks_seen} seen, ${result.active_likes} active.`,
+      ]);
+    } catch (error) {
+      const message = formatUiErrorMessage(error, "Failed to sync liked tracks.");
+      setLikedTracksError(message);
+      setStatusMessage(message);
+      setStatusHistory((current) => [...current, `Liked tracks sync error: ${message}`]);
+    } finally {
+      setLikedTracksSyncing(false);
+    }
+  }
+
   async function loadPlayerRecentTracks() {
     setPlayerRecentTracksLoading(true);
     setPlayerRecentTracksError(null);
@@ -8230,8 +8603,8 @@ export function App() {
               recent_top_albums_available: data.recent_top_albums_available,
               recent_tracks: data.recent_tracks,
               recent_tracks_available: data.recent_tracks_available,
-              recent_likes_tracks: data.recent_likes_tracks,
-              recent_likes_available: data.recent_likes_available,
+              recent_likes_tracks: likedTracksCache?.items.length ? likedTracksCache.items : data.recent_likes_tracks,
+              recent_likes_available: likedTracksCache?.items.length ? true : data.recent_likes_available,
             }
           : current,
       );
@@ -8254,12 +8627,15 @@ export function App() {
       <div className="player-queue-settings">
         <button
           aria-expanded={playerQueuePauseMenuOpen}
-          aria-label="Queue delay timer"
+          aria-label="Stop queue timer"
           aria-pressed={queueDelayActive}
           className={`player-queue-header-button${queueDelayActive ? " player-queue-header-button-active player-queue-header-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
           disabled={!playerDisplayTrack && playerQueueTracks.length === 0}
-          onClick={() => setPlayerQueuePauseMenuOpen((current) => !current)}
-          title={queueDelayActive ? "Queue delay active" : "Delay queue"}
+          onClick={() => {
+            setPlayerQueuePauseMenuOpen((current) => !current);
+            setPlayerQueueSettingsOpen(false);
+          }}
+          title={queueDelayActive ? "Stop queue active" : "Stop queue"}
           type="button"
         >
           <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -8286,7 +8662,7 @@ export function App() {
             </button>
             {queueDelayActive ? (
               <button onClick={cancelQueueDelay} type="button">
-                Cancel delay
+                Cancel stop
               </button>
             ) : null}
           </div>
@@ -8322,24 +8698,27 @@ export function App() {
                       </span>
                     )}
                   </h2>
-                  {playerDisplayTrack?.uri ? (
-                    <a
-                      aria-label="Open in Spotify"
-                      className="player-menu-external"
-                      href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      <svg aria-hidden="true" viewBox="0 0 24 24">
-                        <path d="M12 2.2a9.8 9.8 0 1 0 0 19.6 9.8 9.8 0 0 0 0-19.6Zm4.49 14.13a.72.72 0 0 1-.99.24c-2.7-1.65-6.1-2.02-10.1-1.11a.72.72 0 1 1-.32-1.4c4.38-1 8.14-.57 11.17 1.28.34.2.44.65.24.99Zm1.2-2.68a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.46-1.34a.9.9 0 1 1-.52-1.72c4.18-1.27 9.37-.66 12.92 1.52.42.26.56.82.3 1.24Zm.1-2.8c-3.7-2.2-9.8-2.4-13.34-1.33a1.08 1.08 0 1 1-.63-2.07c4.06-1.23 10.8-.99 15.07 1.55a1.08 1.08 0 0 1-1.1 1.85Z" />
-                      </svg>
-                    </a>
-                  ) : null}
                 </div>
                 {playerDisplayArtistName ? (
-                  <button className="player-menu-meta-button player-menu-line single-line-ellipsis" onClick={() => openPlayerArtistDetails()} type="button">
-                    {playerDisplayArtistName}
-                  </button>
+                  <div className="player-menu-artist-row">
+                    <button className="player-menu-meta-button player-menu-line player-menu-artist-button single-line-ellipsis" onClick={() => openPlayerArtistDetails()} type="button">
+                      {playerDisplayArtistImageUrl ? <img alt="" className="player-menu-artist-image" src={playerDisplayArtistImageUrl} /> : null}
+                      <span className="single-line-ellipsis">{playerDisplayArtistName}</span>
+                    </button>
+                    {playerDisplayTrack?.uri ? (
+                      <a
+                        aria-label="Open in Spotify"
+                        className="player-menu-external player-menu-external-inline"
+                        href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <svg aria-hidden="true" viewBox="0 0 24 24">
+                          <path d="M12 2.2a9.8 9.8 0 1 0 0 19.6 9.8 9.8 0 0 0 0-19.6Zm4.49 14.13a.72.72 0 0 1-.99.24c-2.7-1.65-6.1-2.02-10.1-1.11a.72.72 0 1 1-.32-1.4c4.38-1 8.14-.57 11.17 1.28.34.2.44.65.24.99Zm1.2-2.68a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.46-1.34a.9.9 0 1 1-.52-1.72c4.18-1.27 9.37-.66 12.92 1.52.42.26.56.82.3 1.24Zm.1-2.8c-3.7-2.2-9.8-2.4-13.34-1.33a1.08 1.08 0 1 1-.63-2.07c4.06-1.23 10.8-.99 15.07 1.55a1.08 1.08 0 0 1-1.1 1.85Z" />
+                        </svg>
+                      </a>
+                    ) : null}
+                  </div>
                 ) : (
                   <p className="player-menu-line single-line-ellipsis">{playerDisplayTrack?.artists ?? "Spotify Premium playback"}</p>
                 )}
@@ -8366,7 +8745,7 @@ export function App() {
                     }
                   }}
                   step={1000}
-                  title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
+                  title={playerTransportTooltip}
                   type="range"
                   value={pendingSeekMs ?? playerDisplayPositionMs}
                 />
@@ -8380,32 +8759,32 @@ export function App() {
             <div className="actions actions-centered actions-in-card player-transport-controls">
               <button
                 aria-label="Previous track"
-                className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                className={`secondary-button player-icon-button${playerTransportReadOnly ? " player-control-readonly" : ""}`}
                 disabled={playerPreviousDisabled}
                 onClick={() => void movePlaybackQueue("previous")}
-                title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Previous track"}
+                title={playerTransportTooltip ?? "Previous track"}
                 type="button"
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24">
                   <path d="M7 5h2v14H7V5Zm3.7 7L19 5.8v12.4L10.7 12Z" />
                 </svg>
               </button>
-              <span title={livePlaybackControlTooltip}>
+              <span title={playerTransportTooltip}>
                 <button
-                  className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
-                  disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
+                  className={`primary-button${playerTransportReadOnly ? " primary-button-readonly" : ""}`}
+                  disabled={!previewInProgress && (!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot))}
                   onClick={() => void handlePlayerPrimaryButtonClick()}
                   type="button"
                 >
-                  {playerDisplayPaused ? "Play" : "Pause"}
+                  {previewInProgress ? "Play" : (playerDisplayPaused ? "Play" : "Pause")}
                 </button>
               </span>
               <button
                 aria-label="Next track"
-                className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                className={`secondary-button player-icon-button${playerTransportReadOnly ? " player-control-readonly" : ""}`}
                 disabled={playerNextDisabled}
                 onClick={() => void movePlaybackQueue("next")}
-                title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Next track"}
+                title={playerTransportTooltip ?? "Next track"}
                 type="button"
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -8415,8 +8794,8 @@ export function App() {
               <button
                 aria-label={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
                 aria-pressed={playerTrackLoopEnabled}
-                className={`secondary-button player-icon-button player-track-loop-button${playerTrackLoopEnabled ? " player-icon-button-active player-icon-button-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
-                disabled={!playerDisplayTrack}
+                className={`secondary-button player-icon-button player-track-loop-button${playerTrackLoopEnabled ? " player-icon-button-active player-icon-button-toggle-active" : ""}${playerTransportReadOnly ? " player-control-readonly" : ""}`}
+                disabled={previewInProgress || !playerDisplayTrack}
                 onClick={() => void handleTrackLoopClick()}
                 title={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
                 type="button"
@@ -8453,7 +8832,15 @@ export function App() {
               )}
               {homeAlbumExpanded ? (
                 <div className="player-home-album-tracks detail-modal-album-tracks detail-modal-album-tracks-full">
-                  <div className="detail-modal-album-header" aria-hidden="true">
+                  <div className="detail-modal-album-header">
+                    {hasPremiumPlayback ? (
+                      <button className="detail-album-play-all-button" onClick={() => void handleHomeAlbumPlayAll()} type="button">
+                        Play all
+                      </button>
+                    ) : (
+                      <span aria-hidden="true" />
+                    )}
+                    <span aria-hidden="true" />
                     <span className="detail-modal-album-preview-header">Preview</span>
                     <span className="detail-modal-album-last-played-header">Played</span>
                   </div>
@@ -8523,7 +8910,10 @@ export function App() {
                             ) : null}
                             <button
                               className="detail-album-track-name-button single-line-ellipsis"
-                              onClick={() => openAlbumTrackPreview(track, playerAlbumPreviewContext())}
+                              disabled={!rowTrackUri}
+                              onClick={() => {
+                                void handleHomeAlbumTrackPlay(track, rowTrackUri);
+                              }}
                               type="button"
                             >
                               {track.name}
@@ -8603,7 +8993,10 @@ export function App() {
                     aria-expanded={playerQueueSettingsOpen}
                     aria-label="Queue settings"
                     className={`player-queue-header-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
-                    onClick={() => setPlayerQueueSettingsOpen((current) => !current)}
+                    onClick={() => {
+                      setPlayerQueueSettingsOpen((current) => !current);
+                      setPlayerQueuePauseMenuOpen(false);
+                    }}
                     title="Queue settings"
                     type="button"
                   >
@@ -8613,6 +9006,12 @@ export function App() {
                   </button>
                   {playerQueueSettingsOpen ? (
                     <div className="player-queue-settings-menu">
+                      <button onClick={() => {
+                        setPlayerQueueOrganizeMode((current) => !current);
+                        setPlayerQueueSettingsOpen(false);
+                      }} type="button">
+                        {playerQueueOrganizeMode ? "Done organizing" : "Organize"}
+                      </button>
                       <button className={liveReadOnlyMode ? "player-control-readonly" : undefined} disabled={playerQueueTracks.length === 0} onClick={() => void handleClearPlayerQueueClick()} type="button">
                         Clear queue
                       </button>
@@ -8621,35 +9020,92 @@ export function App() {
                 </div>
               </div>
             </div>
-            <div className="player-recent-list">
+            {playerQueueOrganizeMode ? (
+              <div className="player-queue-organize-bar">
+                <label>
+                  <span>Sort</span>
+                  <select value={playerQueueSortMode} onChange={(event) => sortPlayerQueue(event.currentTarget.value as typeof playerQueueSortMode)}>
+                    <option value="custom">Custom</option>
+                    <option value="length">Length</option>
+                    <option value="az">A-Z</option>
+                    <option value="recent">Recently played</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Group by</span>
+                  <select value={playerQueueGroupMode} onChange={(event) => groupPlayerQueue(event.currentTarget.value as typeof playerQueueGroupMode)}>
+                    <option value="custom">Custom</option>
+                    <option value="artist">Artist</option>
+                    <option value="album">Album</option>
+                  </select>
+                </label>
+              </div>
+            ) : null}
+            <div className="player-recent-list" ref={homeQueueListRef}>
               {playerQueueTracks.map((track, index) => {
                 const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
                 const isLoopedQueueTrack = playerTrackLoopEnabled && isCurrentQueueTrack;
                 const isPausedQueueTrack = queuePausedCursor === index && isCurrentQueueTrack && playerDisplayPaused;
                 const isUpNextQueueTrack = !playerTrackLoopEnabled && hasActiveQueueCursor && index === activeQueueCursor + 1;
                 const isQueueDimmedByTrackLoop = playerTrackLoopEnabled && !isCurrentQueueTrack;
+                const isPlayedQueueTrack = playerQueueSource === "listenlab" && playerQueuePlayedKeys.has(queueTrackIdentity(track) ?? "");
                 return (
                   <div
-                    className={`player-recent-row player-queue-row${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack || isPausedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
+                    className={`player-recent-row player-queue-row${playerQueueOrganizeMode ? " player-queue-row-organizing" : ""}${playerQueueDragIndex === index ? " player-queue-row-dragging" : ""}${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack || isPausedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
                     data-player-queue-role={isUpNextQueueTrack ? "up-next" : (isCurrentQueueTrack ? "current" : undefined)}
+                    draggable={playerQueueOrganizeMode}
                     key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
+                    onDragEnd={() => setPlayerQueueDragIndex(null)}
+                    onDragOver={(event) => {
+                      if (playerQueueOrganizeMode) {
+                        event.preventDefault();
+                      }
+                    }}
+                    onDragStart={() => setPlayerQueueDragIndex(index)}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (playerQueueDragIndex != null) {
+                        moveQueueTrack(playerQueueDragIndex, index);
+                        setPlayerQueueDragIndex(null);
+                      }
+                    }}
                   >
-                    <button aria-label={`Play ${track.name}`} className="player-queue-cover-button" disabled={!track.uri} onClick={() => void playQueueTrackAtIndex(index)} type="button">
-                      {track.image ? (
-                        <img alt="" className="player-recent-cover" src={track.image} />
-                      ) : (
-                        <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">{track.name.slice(0, 1).toUpperCase()}</span>
-                      )}
-                      <span className="player-queue-cover-play" aria-hidden="true">
-                        <svg viewBox="0 0 24 24">
-                          <path d="M8 5.5v13l10-6.5-10-6.5Z" />
-                        </svg>
+                    {playerQueueOrganizeMode ? (
+                      <button aria-label={`Remove ${track.name} from queue`} className="player-queue-remove-button" onClick={() => removeQueueTrackAtIndex(index)} type="button">X</button>
+                    ) : null}
+                    {playerQueueOrganizeMode ? (
+                      <span className="player-queue-cover-button player-queue-cover-static" aria-hidden="true">
+                        {track.image ? (
+                          <img alt="" className="player-recent-cover" src={track.image} />
+                        ) : (
+                          <span className="player-recent-cover player-recent-cover-fallback">{track.name.slice(0, 1).toUpperCase()}</span>
+                        )}
                       </span>
-                    </button>
-                    <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
-                      <span className="player-recent-track single-line-ellipsis">{track.name}</span>
-                      <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
-                    </button>
+                    ) : (
+                      <button aria-label={`Play ${track.name}`} className="player-queue-cover-button" disabled={!track.uri} onClick={() => void playQueueTrackAtIndex(index)} type="button">
+                        {track.image ? (
+                          <img alt="" className="player-recent-cover" src={track.image} />
+                        ) : (
+                          <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">{track.name.slice(0, 1).toUpperCase()}</span>
+                        )}
+                        <span className="player-queue-cover-play" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <path d="M8 5.5v13l10-6.5-10-6.5Z" />
+                          </svg>
+                        </span>
+                      </button>
+                    )}
+                    {playerQueueOrganizeMode ? (
+                      <div className="player-recent-copy player-queue-drag-copy">
+                        <span className="player-recent-track single-line-ellipsis">{track.name}</span>
+                        <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
+                      </div>
+                    ) : (
+                      <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
+                        <span className="player-recent-track single-line-ellipsis">{track.name}</span>
+                        <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
+                      </button>
+                    )}
                     {isPausedQueueTrack ? <span className="player-queue-status player-queue-status-next">Paused</span> : null}
                     {isCurrentQueueTrack && !isLoopedQueueTrack && !isPausedQueueTrack ? <span className="player-queue-status">Current</span> : null}
                     {isLoopedQueueTrack ? (
@@ -8659,6 +9115,7 @@ export function App() {
                       </button>
                     ) : null}
                     {isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-next">{queuePauseAfterCurrentEnabled ? "Paused" : "Up next"}</span> : null}
+                    {isPlayedQueueTrack && !isCurrentQueueTrack && !isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-played">Played</span> : null}
                   </div>
                 );
               })}
@@ -8671,6 +9128,10 @@ export function App() {
     );
   }
 
+  const cachedLikedTracks = likedTracksCache?.items ?? [];
+  const usingLikedTracksFallback = cachedLikedTracks.length === 0 && Boolean(profile?.recent_likes_tracks.length);
+  const likedTracksForActivity = cachedLikedTracks.length > 0 ? cachedLikedTracks : (profile?.recent_likes_tracks ?? []);
+  const likedTracksAvailableForActivity = cachedLikedTracks.length > 0 || Boolean(profile?.recent_likes_available);
   const showLoadingScreen = (authTransitioning || session?.authenticated || experienceMode === "local") && !profile;
   const heroTitle = "ListenLab";
   const heroCopy =
@@ -9066,28 +9527,31 @@ export function App() {
                                     </span>
                                   )}
                                 </h2>
-                                {playerDisplayTrack?.uri ? (
-                                  <a
-                                    aria-label="Open in Spotify"
-                                    className="player-menu-external"
-                                    href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
-                                    rel="noreferrer"
-                                    target="_blank"
-                                  >
-                                    <svg aria-hidden="true" viewBox="0 0 24 24">
-                                      <path d="M12 2.2a9.8 9.8 0 1 0 0 19.6 9.8 9.8 0 0 0 0-19.6Zm4.49 14.13a.72.72 0 0 1-.99.24c-2.7-1.65-6.1-2.02-10.1-1.11a.72.72 0 1 1-.32-1.4c4.38-1 8.14-.57 11.17 1.28.34.2.44.65.24.99Zm1.2-2.68a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.46-1.34a.9.9 0 1 1-.52-1.72c4.18-1.27 9.37-.66 12.92 1.52.42.26.56.82.3 1.24Zm.1-2.8c-3.7-2.2-9.8-2.4-13.34-1.33a1.08 1.08 0 1 1-.63-2.07c4.06-1.23 10.8-.99 15.07 1.55a1.08 1.08 0 0 1-1.1 1.85Z" />
-                                    </svg>
-                                  </a>
-                                ) : null}
                               </div>
                               {playerDisplayArtistName ? (
-                                <button
-                                  className="player-menu-meta-button player-menu-line single-line-ellipsis"
-                                  onClick={() => openPlayerArtistDetails()}
-                                  type="button"
-                                >
-                                  {playerDisplayArtistName}
-                                </button>
+                                <div className="player-menu-artist-row">
+                                  <button
+                                    className="player-menu-meta-button player-menu-line player-menu-artist-button single-line-ellipsis"
+                                    onClick={() => openPlayerArtistDetails()}
+                                    type="button"
+                                  >
+                                    {playerDisplayArtistImageUrl ? <img alt="" className="player-menu-artist-image" src={playerDisplayArtistImageUrl} /> : null}
+                                    <span className="single-line-ellipsis">{playerDisplayArtistName}</span>
+                                  </button>
+                                  {playerDisplayTrack?.uri ? (
+                                    <a
+                                      aria-label="Open in Spotify"
+                                      className="player-menu-external player-menu-external-inline"
+                                      href={spotifyTrackUrl(playerDisplayTrack.uri) ?? undefined}
+                                      rel="noreferrer"
+                                      target="_blank"
+                                    >
+                                      <svg aria-hidden="true" viewBox="0 0 24 24">
+                                        <path d="M12 2.2a9.8 9.8 0 1 0 0 19.6 9.8 9.8 0 0 0 0-19.6Zm4.49 14.13a.72.72 0 0 1-.99.24c-2.7-1.65-6.1-2.02-10.1-1.11a.72.72 0 1 1-.32-1.4c4.38-1 8.14-.57 11.17 1.28.34.2.44.65.24.99Zm1.2-2.68a.9.9 0 0 1-1.24.3c-3.09-1.9-7.8-2.45-11.46-1.34a.9.9 0 1 1-.52-1.72c4.18-1.27 9.37-.66 12.92 1.52.42.26.56.82.3 1.24Zm.1-2.8c-3.7-2.2-9.8-2.4-13.34-1.33a1.08 1.08 0 1 1-.63-2.07c4.06-1.23 10.8-.99 15.07 1.55a1.08 1.08 0 0 1-1.1 1.85Z" />
+                                      </svg>
+                                    </a>
+                                  ) : null}
+                                </div>
                               ) : (
                                 <p className="player-menu-line single-line-ellipsis">
                                   {playerDisplayTrack?.artists ?? "Spotify Premium playback"}
@@ -9129,7 +9593,7 @@ export function App() {
                                   }
                                 }}
                                 step={1000}
-                                title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : undefined}
+                                title={playerTransportTooltip}
                                 type="range"
                                 value={pendingSeekMs ?? playerDisplayPositionMs}
                               />
@@ -9143,32 +9607,32 @@ export function App() {
                           <div className="actions actions-centered actions-in-card player-transport-controls">
                             <button
                               aria-label="Previous track"
-                              className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                              className={`secondary-button player-icon-button${playerTransportReadOnly ? " player-control-readonly" : ""}`}
                               disabled={playerPreviousDisabled}
                               onClick={() => void movePlaybackQueue("previous")}
-                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Previous track"}
+                              title={playerTransportTooltip ?? "Previous track"}
                               type="button"
                             >
                               <svg aria-hidden="true" viewBox="0 0 24 24">
                                 <path d="M7 5h2v14H7V5Zm3.7 7L19 5.8v12.4L10.7 12Z" />
                               </svg>
                             </button>
-                            <span title={livePlaybackControlTooltip}>
+                            <span title={playerTransportTooltip}>
                               <button
-                                className={`primary-button${liveReadOnlyMode ? " primary-button-readonly" : ""}`}
-                                disabled={!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot)}
+                                className={`primary-button${playerTransportReadOnly ? " primary-button-readonly" : ""}`}
+                                disabled={!previewInProgress && (!playerDisplayTrack || (!playerReady && !usingLivePlaybackSnapshot))}
                                 onClick={() => void handlePlayerPrimaryButtonClick()}
                                 type="button"
                               >
-                                {playerDisplayPaused ? "Play" : "Pause"}
+                                {previewInProgress ? "Play" : (playerDisplayPaused ? "Play" : "Pause")}
                               </button>
                             </span>
                             <button
                               aria-label="Next track"
-                              className={`secondary-button player-icon-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                              className={`secondary-button player-icon-button${playerTransportReadOnly ? " player-control-readonly" : ""}`}
                               disabled={playerNextDisabled}
                               onClick={() => void movePlaybackQueue("next")}
-                              title={usingLivePlaybackSnapshot ? livePlaybackControlTooltip : "Next track"}
+                              title={playerTransportTooltip ?? "Next track"}
                               type="button"
                             >
                               <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -9178,8 +9642,8 @@ export function App() {
                             <button
                               aria-label={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
                               aria-pressed={playerTrackLoopEnabled}
-                              className={`secondary-button player-icon-button player-track-loop-button${playerTrackLoopEnabled ? " player-icon-button-active player-icon-button-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
-                              disabled={!playerDisplayTrack}
+                              className={`secondary-button player-icon-button player-track-loop-button${playerTrackLoopEnabled ? " player-icon-button-active player-icon-button-toggle-active" : ""}${playerTransportReadOnly ? " player-control-readonly" : ""}`}
+                              disabled={previewInProgress || !playerDisplayTrack}
                               onClick={() => void handleTrackLoopClick()}
                               title={playerTrackLoopEnabled ? "Unloop current song" : "Loop current song"}
                               type="button"
@@ -9297,7 +9761,10 @@ export function App() {
                                   aria-expanded={playerQueueSettingsOpen}
                                   aria-label="Queue settings"
                                   className={`player-queue-header-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
-                                  onClick={() => setPlayerQueueSettingsOpen((current) => !current)}
+                                  onClick={() => {
+                                    setPlayerQueueSettingsOpen((current) => !current);
+                                    setPlayerQueuePauseMenuOpen(false);
+                                  }}
                                   title="Queue settings"
                                   type="button"
                                 >
@@ -9307,6 +9774,15 @@ export function App() {
                                 </button>
                                 {playerQueueSettingsOpen ? (
                                   <div className="player-queue-settings-menu">
+                                    <button
+                                      onClick={() => {
+                                        setPlayerQueueOrganizeMode((current) => !current);
+                                        setPlayerQueueSettingsOpen(false);
+                                      }}
+                                      type="button"
+                                    >
+                                      {playerQueueOrganizeMode ? "Done organizing" : "Organize"}
+                                    </button>
                                     <button
                                       className={liveReadOnlyMode ? "player-control-readonly" : undefined}
                                       disabled={playerQueueTracks.length === 0}
@@ -9320,50 +9796,111 @@ export function App() {
                               </div>
                             </div>
                           </div>
+                          {playerQueueOrganizeMode ? (
+                            <div className="player-queue-organize-bar">
+                              <label>
+                                <span>Sort</span>
+                                <select value={playerQueueSortMode} onChange={(event) => sortPlayerQueue(event.currentTarget.value as typeof playerQueueSortMode)}>
+                                  <option value="custom">Custom</option>
+                                  <option value="length">Length</option>
+                                  <option value="az">A-Z</option>
+                                  <option value="recent">Recently played</option>
+                                </select>
+                              </label>
+                              <label>
+                                <span>Group by</span>
+                                <select value={playerQueueGroupMode} onChange={(event) => groupPlayerQueue(event.currentTarget.value as typeof playerQueueGroupMode)}>
+                                  <option value="custom">Custom</option>
+                                  <option value="artist">Artist</option>
+                                  <option value="album">Album</option>
+                                </select>
+                              </label>
+                            </div>
+                          ) : null}
                           <div className="player-recent-list">
                             {playerQueueTracks.map((track, index) => {
                               const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
                               const isLoopedQueueTrack = playerTrackLoopEnabled && isCurrentQueueTrack;
                               const isUpNextQueueTrack = !playerTrackLoopEnabled && hasActiveQueueCursor && index === activeQueueCursor + 1;
                               const isQueueDimmedByTrackLoop = playerTrackLoopEnabled && !isCurrentQueueTrack;
+                              const isPlayedQueueTrack = playerQueueSource === "listenlab" && playerQueuePlayedKeys.has(queueTrackIdentity(track) ?? "");
                               return (
                                 <div
-                                  className={`player-recent-row player-queue-row${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
+                                  className={`player-recent-row player-queue-row${playerQueueOrganizeMode ? " player-queue-row-organizing" : ""}${playerQueueDragIndex === index ? " player-queue-row-dragging" : ""}${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
                                   data-player-queue-role={isUpNextQueueTrack ? "up-next" : (isCurrentQueueTrack ? "current" : undefined)}
+                                  draggable={playerQueueOrganizeMode}
                                   key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
+                                  onDragEnd={() => setPlayerQueueDragIndex(null)}
+                                  onDragOver={(event) => {
+                                    if (playerQueueOrganizeMode) {
+                                      event.preventDefault();
+                                    }
+                                  }}
+                                  onDragStart={() => setPlayerQueueDragIndex(index)}
+                                  onDrop={(event) => {
+                                    event.preventDefault();
+                                    if (playerQueueDragIndex != null) {
+                                      moveQueueTrack(playerQueueDragIndex, index);
+                                      setPlayerQueueDragIndex(null);
+                                    }
+                                  }}
                                 >
-                                  <button
-                                    aria-label={`Play ${track.name}`}
-                                    className="player-queue-cover-button"
-                                    disabled={!track.uri}
-                                    onClick={() => void playQueueTrackAtIndex(index)}
-                                    type="button"
-                                  >
-                                    {track.image ? (
-                                      <img alt="" className="player-recent-cover" src={track.image} />
-                                    ) : (
-                                      <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">
-                                        {track.name.slice(0, 1).toUpperCase()}
+                                  {playerQueueOrganizeMode ? (
+                                    <button aria-label={`Remove ${track.name} from queue`} className="player-queue-remove-button" onClick={() => removeQueueTrackAtIndex(index)} type="button">X</button>
+                                  ) : null}
+                                  {playerQueueOrganizeMode ? (
+                                    <span className="player-queue-cover-button player-queue-cover-static" aria-hidden="true">
+                                      {track.image ? (
+                                        <img alt="" className="player-recent-cover" src={track.image} />
+                                      ) : (
+                                        <span className="player-recent-cover player-recent-cover-fallback">{track.name.slice(0, 1).toUpperCase()}</span>
+                                      )}
+                                    </span>
+                                  ) : (
+                                    <button
+                                      aria-label={`Play ${track.name}`}
+                                      className="player-queue-cover-button"
+                                      disabled={!track.uri}
+                                      onClick={() => void playQueueTrackAtIndex(index)}
+                                      type="button"
+                                    >
+                                      {track.image ? (
+                                        <img alt="" className="player-recent-cover" src={track.image} />
+                                      ) : (
+                                        <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">
+                                          {track.name.slice(0, 1).toUpperCase()}
+                                        </span>
+                                      )}
+                                      <span className="player-queue-cover-play" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24">
+                                          <path d="M8 5.5v13l10-6.5-10-6.5Z" />
+                                        </svg>
                                       </span>
-                                    )}
-                                    <span className="player-queue-cover-play" aria-hidden="true">
-                                      <svg viewBox="0 0 24 24">
-                                        <path d="M8 5.5v13l10-6.5-10-6.5Z" />
-                                      </svg>
-                                    </span>
-                                  </button>
-                                  <button
-                                    className="player-recent-copy player-queue-copy-button"
-                                    onClick={() => openQueuePlayerTrackDetails(track)}
-                                    type="button"
-                                  >
-                                    <span className="player-recent-track single-line-ellipsis">
-                                      {track.name}
-                                    </span>
-                                    <span className="player-recent-artist single-line-ellipsis">
-                                      {track.artists}
-                                    </span>
-                                  </button>
+                                    </button>
+                                  )}
+                                  {playerQueueOrganizeMode ? (
+                                    <div className="player-recent-copy player-queue-drag-copy">
+                                      <span className="player-recent-track single-line-ellipsis">
+                                        {track.name}
+                                      </span>
+                                      <span className="player-recent-artist single-line-ellipsis">
+                                        {track.artists}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      className="player-recent-copy player-queue-copy-button"
+                                      onClick={() => openQueuePlayerTrackDetails(track)}
+                                      type="button"
+                                    >
+                                      <span className="player-recent-track single-line-ellipsis">
+                                        {track.name}
+                                      </span>
+                                      <span className="player-recent-artist single-line-ellipsis">
+                                        {track.artists}
+                                      </span>
+                                    </button>
+                                  )}
                                   {isCurrentQueueTrack && !isLoopedQueueTrack ? <span className="player-queue-status">Current</span> : null}
                                   {isLoopedQueueTrack ? (
                                     <button
@@ -9378,6 +9915,7 @@ export function App() {
                                     </button>
                                   ) : null}
                                   {isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-next">Up next</span> : null}
+                                  {isPlayedQueueTrack && !isCurrentQueueTrack && !isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-played">Played</span> : null}
                                 </div>
                               );
                             })}
@@ -9689,7 +10227,21 @@ export function App() {
                     </button>
                   </div>
                 )}
-                rightTitle={renderSectionTitle("Recently liked", "recent_likes")}
+                rightTitle={(
+                  <div className="section-column-header">
+                    {renderSectionTitle("Recently liked", "recent_likes")}
+                    {experienceMode === "full" ? (
+                      <button
+                        className="secondary-button inline-reload-button"
+                        disabled={likedTracksSyncing || spotifyCooldownActive}
+                        onClick={() => void syncLikedTracks()}
+                        type="button"
+                      >
+                        {likedTracksSyncing ? "Syncing..." : "Sync Likes"}
+                      </button>
+                    ) : null}
+                  </div>
+                )}
                 leftContent={renderTrackColumn(
                   "recent",
                   profile.recent_tracks,
@@ -9709,27 +10261,43 @@ export function App() {
                     </button>
                   ) : null,
                 )}
-                rightContent={renderTrackColumn(
-                  "likes",
-                  profile.recent_likes_tracks,
-                  profile.recent_likes_available,
-                  "Spotify returned no recently liked tracks.",
-                  recentUnavailableCopy(
-                    "Liked tracks are not available for this session yet. Log out and log back in to grant library access.",
-                  ),
-                  analysisMode === "quick" && experienceMode === "full" ? (
-                    <button
-                      className="secondary-button inline-reload-button"
-                      disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection(recentRange)}
-                      type="button"
-                    >
-                      {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                    </button>
-                  ) : null,
+                rightContent={(
+                  <>
+                    {usingLikedTracksFallback ? (
+                      <p className="empty-copy liked-tracks-cache-note">
+                        Latest from Spotify. Sync Likes to populate the local cache.
+                      </p>
+                    ) : null}
+                    {!usingLikedTracksFallback && cachedLikedTracks.length === 0 && !likedTracksLoading ? (
+                      <p className="empty-copy liked-tracks-cache-note">
+                        Liked tracks cache is empty. Sync Likes to load saved songs.
+                      </p>
+                    ) : null}
+                    {likedTracksLoading ? <p className="empty-copy liked-tracks-cache-note">Loading liked tracks cache...</p> : null}
+                    {likedTracksError ? <p className="empty-copy liked-tracks-cache-note">{likedTracksError}</p> : null}
+                    {renderTrackColumn(
+                      "likes",
+                      likedTracksForActivity,
+                      likedTracksAvailableForActivity,
+                      "No liked tracks are available in the cache yet.",
+                      recentUnavailableCopy(
+                        "Liked tracks are not available for this session yet. Log out and log back in to grant library access.",
+                      ),
+                      analysisMode === "quick" && experienceMode === "full" ? (
+                        <button
+                          className="secondary-button inline-reload-button"
+                          disabled={loadingRecentSection}
+                          onClick={() => void refreshRecentSection(recentRange)}
+                          type="button"
+                        >
+                          {loadingRecentSection ? "Refreshing..." : "Reload this section"}
+                        </button>
+                      ) : null,
+                    )}
+                  </>
                 )}
                 previewItemsLeft={previewItems(profile.recent_tracks)}
-                previewItemsRight={previewItems(profile.recent_likes_tracks)}
+                previewItemsRight={previewItems(likedTracksForActivity)}
                 collapsedPreviewItems={previewItems(collapseRecentPreviewTracks(profile.recent_tracks))}
                 isOpen={openSections.recent}
                 toggleSection={toggleSection}
@@ -10077,7 +10645,15 @@ export function App() {
                     {selectedPreview.kind === "album" ? selectedPreview.label : previewAlbumHeading(selectedPreview)}
                   </p>
                 )}
-                <div className="detail-modal-album-header" aria-hidden="true">
+                <div className="detail-modal-album-header">
+                  {hasPremiumPlayback ? (
+                    <button className="detail-album-play-all-button" onClick={() => void handleAlbumPlayAll()} type="button">
+                      Play all
+                    </button>
+                  ) : (
+                    <span aria-hidden="true" />
+                  )}
+                  <span aria-hidden="true" />
                   <span className="detail-modal-album-preview-header">Preview</span>
                   <span className="detail-modal-album-last-played-header">Played</span>
                 </div>

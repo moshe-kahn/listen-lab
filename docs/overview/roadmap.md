@@ -91,7 +91,9 @@ Ship a trustworthy authenticated dashboard that exposes the raw listening signal
 - local mode, full mode, and test-mode switching for Spotify availability handling
 - local snapshot fallback for selected Spotify-only sections
 - on-disk cache layers for local history insights, per-user recent sections, and shared static metadata
-- playback controls and related player UI states
+- read-only liked-track cache/sync support for Recent Likes, including fallback labeling while old direct Spotify latest-likes data remains in transition
+- guarded local/dev liked-track sync failure simulation for manual UI preservation QA
+- playback controls, queue organizer states, preview-resume behavior, album play-all controls, and related player UI states
 - dedicated recent-ingest auth/probe controls for validating recently-played API behavior
 - a tracks-only comparison page for current vs new all-time ranking formulas
 - multiple dashboard and popover usability refinements

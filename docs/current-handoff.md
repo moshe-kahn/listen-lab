@@ -17,138 +17,126 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest commit:
-- `15d2368` `Merge branch 'playback-tweaks-v2' into frontend-app-refactor`
+- `9dcb175` `Refine playback queue and recent listening UX`
 
 Working tree is dirty with uncommitted changes:
-- `backend/app/listening_log.py`
+- `backend/app/config.py`
+- `backend/app/db.py`
 - `backend/app/main.py`
-- `backend/app/recent_tracks_db.py`
-- `backend/app/routes/admin_routes.py`
-- `backend/app/routes/auth_routes.py`
-- `backend/app/routes/playback_routes.py`
-- `backend/app/spotify_recent_polling.py`
-- `backend/app/spotify_recent_sync.py`
+- `backend/app/liked_tracks.py` (new)
+- `backend/tests/test_liked_tracks.py` (new)
 - `docs/current-handoff.md`
+- `docs/overview/architecture.md`
+- `docs/overview/context.md`
+- `docs/overview/roadmap.md`
+- `docs/reference/refactor-notes.md`
 - `frontend/src/App.tsx`
-- `frontend/src/components/dashboard/DashboardListCard.tsx`
-- `frontend/src/components/dashboard/DashboardTrackColumn.tsx`
-- `frontend/src/components/recentDebug/RecentDebugPage.tsx`
-- `frontend/src/constants/appConstants.ts`
+- `frontend/src/api/appApi.ts`
 - `frontend/src/styles.css`
 - `frontend/src/types/appTypes.ts`
-- `frontend/src/utils/playbackUtils.ts`
-
-Diff size before this handoff/reference-doc refresh:
-- 17 files changed, 2779 insertions, 372 deletions.
 
 Known local processes:
-- Existing `node` processes may be listening on `127.0.0.1:5173` from outside this session.
-- No new dev server was intentionally left running by Codex.
+- Existing `Python` process may be listening on `127.0.0.1:8000` from outside this session.
+- Existing `node` process may be listening on `127.0.0.1:5173` from outside this session.
+- Temporary QA servers started by Codex on `127.0.0.1:8765` and `127.0.0.1:5174` were stopped.
 
 ## Uncommitted Work Summary
-Playback overlay and queue:
-- Replaced the overlay external-link arrow with a Spotify logo.
-- Restored visible song title text in the playback overlay.
-- Playback controls now render as a full homepage panel above Activity; the popup menu remains compact.
-- Homepage player title opens the song popup.
-- Removed the homepage `Up next` line under the album area.
-- Homepage album art moved below play controls; album name moved below the art.
-- Clicking homepage album art/name expands only the left player column and shows album tracks using the same row display/actions as the song overlay.
-- Album expansion no longer stretches the queue column.
-- Changed ListenLab queues from upcoming-only to full queue plus cursor.
-- Back/Forward explicitly starts the target queued track.
-- Track-end auto-advance starts the next ListenLab queue item.
-- Queue display auto-scrolls so `Up next` is anchored at the top; current/prior tracks remain available above by scrolling.
-- Queue item text opens the track overlay; queue item album art jumps playback to that queue item.
-- Spotify queue loading prepends the current track when Spotify only returns upcoming items.
-- Queue controls include queue loop, shuffle, stopwatch delay menu, and settings/clear queue.
-- Current-song loop is separate from queue loop.
-- Clear queue suppresses fallback queue refill.
-- Queue title uses the queue context label and links when a Spotify URL is available.
-- Compact popup has a separate `Up next` section below transport with clickable title/artist.
-- Compact popup action buttons are current-song loop, delay, and shuffle; queue loop/settings are omitted.
-- Delay menu:
-  - `After this song` advances to the next queued song at 0:00 and pauses it.
-  - `15 minutes` is an exact sleep timer that pauses playback when it expires.
-  - Delay controls can take over read-only external Spotify playback.
+Playback home and queue polish:
+- Playback home title was enlarged and made to use available width.
+- Fallback ListenLab queue label changed from `Recent likes` to `Recent Likes`.
+- Queue timer and gear dropdowns now close when clicking outside.
+- Opening timer closes gear; opening gear closes timer.
+- Queue controls now support organize mode with remove, drag reorder, sort, and group controls.
+- ListenLab queue tracks keep played/current/up-next state more visibly.
+- Queue cursor scrolling now applies to both popup and home queue surfaces.
+- Preview playback preserves base playback state and can resume after preview stop.
+- Preview playback disables normal transport movement while active.
+- Album track rows support preview/play flows and album `Play all` actions.
 
-Album tracks/fallback:
-- Backend `/auth/playback/album-tracks` fetches Spotify album tracklists when local DB data is insufficient.
-- Fetched album tracks/catalog rows are cached for later opens.
-- Homepage album expansion uses the same endpoint.
-- Overlay album queue and homepage album row play use album queue context.
+Liked-track cache and sync:
+- Added user-scoped read-only liked-track cache tables via `backend/app/db.py` migration:
+  - `spotify_liked_track_cache`
+  - `spotify_liked_track_sync_state`
+- Added `backend/app/liked_tracks.py` service/helper module.
+- Sync uses existing Spotify `_spotify_get` path and `GET /me/tracks` with `limit=50` and offset pagination.
+- Quick sync fetches bounded pages for freshness.
+- Full sync pages until natural end unless stopped by cap, timeout, rate limit, auth/forbidden, network, parse, or malformed response.
+- Unlike detection only runs after a full sync reaches Spotify natural end.
+- Partial full syncs never mark cached rows unliked.
+- Page-level Spotify response shape is validated before natural-end checks.
+- Individual malformed saved-track items are skipped with warnings.
+- Cache rows are scoped by `(user_id, spotify_track_id)` and use `is_liked=1` for active likes.
+- Cache reads do not require a live Spotify profile call.
+- Dev/test sync-failure simulation exists for local QA only:
+  - frontend sends simulation body/header only in Vite dev
+  - backend honors it only when `LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE=1` and `X-ListenLab-Debug-Sync-Failure: 1` are both present
+  - simulated failures do not mutate cache rows or sync metadata and do not call token/Spotify helpers
 
-Activity / Recently played:
-- Activity recent list is scrollable instead of paginated.
-- Activity progress bars show how much was listened.
-- Activity filter options are `Listened` by default and `All`; `Skipped` was removed from Activity.
-- `Listened` means listened ratio is at least 65%; `All` includes skips.
-- Filter is applied before dedupe/repeat counting.
-- Repeat counts use the filtered set: two 70% plays plus one 30% play shows `x2` for `Listened` and `x3` for `All`.
-- Activity bars use the same completion helper as playback recent rows.
-- Backend recent section now prefers unified Listen Log timing data when a recent row matches.
-- Removed the visible `Recently played` header text.
-- `Listen Log` button moved to the far right of the Activity header and opens the Listen Log page.
+Liked-track endpoints:
+- Added `GET /me/liked-tracks`.
+- Added `POST /me/liked-tracks/sync`.
+- Added `GET /me/liked-tracks/contains?spotify_track_id=...`.
+- `contains` is cache-only, user-scoped, returns `{ spotify_track_id, is_liked }`, and does not call Spotify.
 
-Listen Log:
-- Page title is `Listen Log`.
-- Rows show album art when available.
-- Backend response joins recent/history/player/catalog sources for duration, art, URL, gap, and completion fields.
-- Completion ratio can show full bars when duration/estimated-played data support it.
-- Listen Log has play amount toggle: `Listened`, `All`, `Skipped`; default is `Listened`; threshold is 65%.
-- `Reload log` was renamed to `Reload`.
-- Opening Listen Log and clicking `Reload` force a Spotify recent sync first.
-- Loading more Listen Log rows does not force a Spotify recent sync.
+Frontend liked-track integration:
+- Recent Likes now reads `GET /me/liked-tracks` on dashboard load.
+- Cached liked tracks are preferred when available.
+- If cache is empty but old direct Spotify latest-likes payload exists, UI labels it as latest/fallback and still shows `Sync Likes`.
+- Added visible `Sync Likes` action that calls quick sync.
+- Successful sync reloads `GET /me/liked-tracks`.
+- Missing/failed sync keeps visible cached/fallback rows and shows error copy.
+- No like/unlike write UI was added.
+- Frontend does not use `/me/liked-tracks/contains` yet.
 
-Spotify recent sync / polling:
-- Frontend live playback poll interval is 30 minutes.
-- Removed the immediate track-end `/auth/recent-ingest/poll-now` trigger.
-- Backend added `maybe_sync_spotify_recent(access_token, source_ref, force=false, min_interval_seconds=30*60, limit=50)` with an async lock and last-completed throttle check.
-- Scheduled/background polling uses a 30 minute minimum interval.
-- App/profile/recent-section loads use a 10 minute minimum interval.
-- Explicit manual paths force sync:
-  - experimental overlay refresh icon
-  - opening Listen Log
-  - Listen Log `Reload`
-  - `/auth/recent-ingest/poll-now`
-  - OAuth recent ingest flow
-- Ordinary dashboard reloads/range changes are not forced.
-- Experimental overlay has a top-right refresh icon that forces Spotify data refresh unless Spotify cooldown/loading blocks it.
-- `/me/recent` supports `force_recent_sync`.
-- `spotify_recent_polling.poll_recent_for_user(user_id, force=False)` reports skipped/throttled status metadata.
+Docs updated for staged-ready scope:
+- `docs/overview/architecture.md`
+- `docs/overview/context.md`
+- `docs/overview/roadmap.md`
+- `docs/reference/refactor-notes.md`
+- `docs/current-handoff.md`
+
+Deferred:
+- Like/unlike write actions.
+- `user-library-modify` scope plumbing.
+- Live Spotify contains helper.
+- Full UI pagination for large liked-track cache.
+- Browser smoke for every playback queue/preview edge case.
 
 ## Verification
-Passed after the uncommitted changes:
+Passed in this session:
+- `python3 -m unittest backend.tests.test_liked_tracks`
+- `python3 -m py_compile backend/app/liked_tracks.py backend/app/main.py`
+- `python3 -m py_compile backend/app/liked_tracks.py backend/app/main.py backend/app/db.py`
 - `npm run build --prefix frontend`
 - `git diff --check`
-- `./.venv/bin/python -m py_compile backend/app/routes/playback_routes.py backend/app/listening_log.py backend/app/recent_tracks_db.py backend/app/spotify_recent_sync.py backend/app/spotify_recent_polling.py backend/app/main.py backend/app/routes/auth_routes.py backend/app/routes/admin_routes.py`
-- `./.venv/bin/python -m unittest backend.tests.test_spotify_queue_playlist backend.tests.test_spotify_current_playback`
+- Earlier targeted `git diff --check` for liked-track and frontend files also passed.
 
-Browser smoke:
-- Opened `http://127.0.0.1:5173` with the in-app browser.
-- Inactive homepage player rendered.
-- Earlier smoke verified the homepage player and compact popup shape, but active Spotify playback still needs a connected device/Web Playback SDK session.
+Manual QA performed:
+- Authenticated session `kahnman91` loaded dashboard successfully.
+- Initial empty liked-track cache showed old `profile.recent_likes_tracks` rows under `Latest from Spotify. Sync Likes to populate the local cache.`
+- Clicking `Sync Likes` populated cache and removed fallback label.
+- Backend `/me/liked-tracks` returned `source_label: "liked_cache"` rows, `has_more: true`, `last_sync_mode: "quick"`, `last_stopped_reason: "cap_reached"`, `last_tracks_seen: 100`, `last_active_count: 100`.
+- Simulated `missing_scope` sync failure using dev query/header path kept visible rows and showed library-access guidance.
+- Browser console had no errors during liked-track success/failure QA.
+
+Not fully verified:
+- Full browser smoke for all playback queue organizer, preview resume, album queue, and cursor preservation behavior.
+- Failure preservation against a real Spotify auth/scope failure; simulated failure was verified instead.
+- Production deployment env was not exercised; production frontend build was checked to omit debug simulation strings.
 
 ## Next Task
 Recommended next step:
-- Manually QA playback and recent sync with a connected Spotify device:
-  - queue Back/Forward starts the intended previous/next track
-  - track-end auto-advance starts next queued item
-  - queue scroll anchors `Up next`
-  - queue text opens the track overlay
-  - queue album art jumps playback
-  - `After this song` queues next track paused at 0:00
-  - `15 minutes` pauses exactly at timer expiry
-  - compact popup title/artist/buttons work
-  - homepage album expansion shows album rows without stretching queue
-  - homepage album rows play/open/preview like overlay rows
-  - Activity `Listened`/`All` filters, bars, and repeat counts match 65% rules
-  - Listen Log open/reload force recent sync; load more does not
-  - experimental overlay refresh forces sync and respects Spotify cooldown
-  - ordinary dashboard reloads/range changes do not force sync
+- Review the full dirty diff once more, then confirm whether to commit.
 
-After manual QA:
-- If clean, commit the uncommitted playback/listen-log/recent-sync changes together.
+Before commit, already passed:
+- `python3 -m unittest backend.tests.test_liked_tracks`
+- `python3 -m py_compile backend/app/liked_tracks.py backend/app/main.py`
+- `npm run build --prefix frontend`
+- `git diff --check`
+
+Optional extra before commit:
+- Run broader backend test discovery if you want more confidence across unrelated backend surfaces.
+- Browser smoke the playback queue organizer and preview resume flows with an active Spotify device/Web Playback SDK session.
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.
@@ -159,4 +147,4 @@ After manual QA:
 - If the user says `end session and commit`, update this file and reference docs, summarize staged-ready changes, and propose a commit message. Do not commit unless the user explicitly confirms.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Documents/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`; latest commit is `15d2368` (`Merge branch 'playback-tweaks-v2' into frontend-app-refactor`). Working tree has uncommitted playback/queue, homepage player album expansion, album-track fallback/cache, Activity recently-played filters/bars, Listen Log play amount filters/forced reload, and Spotify recent-sync throttling changes. Build, `git diff --check`, backend py_compile, and targeted backend unittest commands passed. Next step is manual QA with a connected Spotify device, especially queue navigation, auto-advance, delay timer, sleep timer, compact popup controls, homepage album expansion, Activity 65% listened filtering, Listen Log forced reload, and experimental forced Spotify refresh.
+Continue in `/Users/kahntra/Documents/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`; latest commit is `9dcb175`. Working tree has uncommitted liked-track cache/sync work, guarded dev/test sync-failure simulation, frontend Recent Likes cache UI, and playback/queue/preview polish. Dirty files include backend config/db/main, new `backend/app/liked_tracks.py`, new `backend/tests/test_liked_tracks.py`, overview/reference docs, and frontend `App.tsx`, API helpers, styles, and types. Targeted liked-track tests, backend py_compile, frontend build, and `git diff --check` passed. Manual QA verified liked-track fallback, successful sync, cached rows, and simulated failure preservation. Next step is review full diff and confirm commit; optional extra is broader backend tests or playback browser smoke.

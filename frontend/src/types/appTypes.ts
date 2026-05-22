@@ -73,7 +73,7 @@ export type RecentTrack = {
   longevity_score?: number | null;
   has_recent_source?: boolean | null;
   has_history_source?: boolean | null;
-  source_label?: "recent" | "history" | "both" | "api" | null;
+  source_label?: "recent" | "history" | "both" | "api" | "liked_cache" | null;
   recent_source_event_count?: number | null;
   history_source_event_count?: number | null;
   matched_source_event_count?: number | null;
@@ -81,10 +81,50 @@ export type RecentTrack = {
   matched_state?: string | null;
   raw_spotify_recent_id?: number | null;
   raw_spotify_history_id?: number | null;
+  liked_at?: string | null;
+  is_liked?: boolean | null;
+  first_seen_at?: string | null;
+  unliked_at?: string | null;
   spotify_skipped?: boolean | null;
   spotify_shuffle?: boolean | null;
   spotify_offline?: boolean | null;
   formula_rank_delta?: number | null;
+};
+
+export type LikedTracksSyncMetadata = {
+  sync_key: string;
+  last_quick_sync_at: string | null;
+  last_completed_full_sync_at: string | null;
+  last_attempted_sync_at: string | null;
+  last_sync_mode: string | null;
+  last_stopped_reason: string | null;
+  last_full_completed: boolean;
+  last_active_count: number | null;
+  last_tracks_seen: number | null;
+  last_pages_seen: number | null;
+  updated_at: string;
+};
+
+export type LikedTracksResponse = {
+  items: RecentTrack[];
+  has_more: boolean;
+  limit: number;
+  offset: number;
+  metadata: LikedTracksSyncMetadata | null;
+};
+
+export type LikedTracksSyncResponse = {
+  sync_mode: "quick" | "full";
+  full_completed: boolean;
+  stopped_reason: string;
+  pages_seen: number;
+  tracks_seen: number;
+  tracks_upserted: number;
+  active_likes: number;
+  marked_unliked: number;
+  warnings: string[];
+  errors: string[];
+  metadata: LikedTracksSyncMetadata | null;
 };
 
 export type MatchCounts = {

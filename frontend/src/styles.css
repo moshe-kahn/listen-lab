@@ -1957,6 +1957,10 @@ h1 {
   white-space: nowrap;
 }
 
+.liked-tracks-cache-note {
+  margin: 0 0 8px;
+}
+
 @keyframes recent-vinyl-spin {
   from {
     transform: rotate(0deg);
@@ -2086,6 +2090,15 @@ h1 {
   padding: 16px;
 }
 
+.player-home-panel .player-menu-summary {
+  display: block;
+}
+
+.player-home-panel .player-menu-copy-top h2 {
+  font-size: 2rem;
+  line-height: 1.05;
+}
+
 .player-home-layout {
   display: grid;
   grid-template-columns: minmax(300px, 1fr) minmax(280px, 420px);
@@ -2097,8 +2110,9 @@ h1 {
   max-height: 260px;
 }
 
-.player-home-queue-column {
+.player-recent-column.player-home-queue-column {
   align-self: start;
+  height: fit-content;
 }
 
 .player-recent-column,
@@ -2239,6 +2253,35 @@ h1 {
   cursor: not-allowed;
 }
 
+.player-queue-organize-bar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.player-queue-organize-bar label {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  color: #9cb7a6;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.player-queue-organize-bar select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f7f8f2;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .player-recent-list {
   display: grid;
   gap: 4px;
@@ -2295,6 +2338,41 @@ h1 {
   filter: saturate(0.35);
 }
 
+.player-queue-row-organizing {
+  grid-template-columns: 26px 38px minmax(0, 1fr) auto;
+  cursor: grab;
+}
+
+.player-queue-row-organizing:active {
+  cursor: grabbing;
+}
+
+.player-queue-row-dragging {
+  opacity: 0.5;
+}
+
+.player-queue-remove-button {
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f7f8f2;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.player-queue-remove-button:hover,
+.player-queue-remove-button:focus-visible {
+  border-color: rgba(255, 120, 120, 0.55);
+  background: rgba(255, 120, 120, 0.16);
+  color: #ffb3b3;
+}
+
 .player-queue-cover-button {
   position: relative;
   width: 38px;
@@ -2311,6 +2389,10 @@ h1 {
 
 .player-queue-cover-button:disabled {
   cursor: default;
+}
+
+.player-queue-cover-static {
+  cursor: grab;
 }
 
 .player-queue-cover-play {
@@ -2346,6 +2428,11 @@ h1 {
 
 .player-queue-status-next {
   color: #1ed760;
+}
+
+.player-queue-status-played {
+  color: #dff8e8;
+  opacity: 0.72;
 }
 
 .player-queue-loop-status {
@@ -2400,6 +2487,10 @@ h1 {
   color: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.player-queue-drag-copy {
+  cursor: grab;
 }
 
 .player-queue-copy-button:hover .player-recent-track,
@@ -2539,10 +2630,7 @@ h1 {
 }
 
 .player-menu-copy-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+  display: block;
 }
 
 .player-menu-copy-top h2 {
@@ -2606,6 +2694,14 @@ h1 {
   line-height: 1.3;
 }
 
+.player-menu-artist-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .player-menu-meta-button {
   width: 100%;
   min-width: 0;
@@ -2618,9 +2714,28 @@ h1 {
   cursor: pointer;
 }
 
+.player-menu-artist-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.player-menu-artist-image {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
 .player-menu-meta-button:hover {
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.player-menu-external-inline {
+  flex: 0 0 auto;
 }
 
 .player-menu-line-muted {
@@ -3214,10 +3329,10 @@ h1 {
 
 .detail-modal-album-header {
   display: grid;
-  grid-template-columns: 56px 44px;
+  grid-template-columns: 72px minmax(0, 1fr) 56px 44px;
   align-items: center;
-  justify-content: end;
-  gap: 12px;
+  gap: 10px;
+  padding: 0 8px;
 }
 
 .detail-modal-album-last-played-header {
@@ -3234,6 +3349,27 @@ h1 {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   text-align: center;
+}
+
+.detail-album-play-all-button {
+  min-width: 72px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(125, 255, 172, 0.28);
+  border-radius: 999px;
+  background: rgba(125, 255, 172, 0.1);
+  color: #dff8e8;
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.detail-album-play-all-button:hover,
+.detail-album-play-all-button:focus-visible {
+  background: rgba(125, 255, 172, 0.18);
+  border-color: rgba(125, 255, 172, 0.5);
+  color: #7dffac;
 }
 
 .detail-album-track-list {

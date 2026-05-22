@@ -9,6 +9,7 @@ This document is the implementation-oriented technical source of truth for the L
 - Spotify OAuth login, callback handling, session persistence, and authenticated `GET /me` profile loading are implemented.
 - The dashboard currently renders profile identity, playlists, recent listening, liked tracks, top tracks, top artists, and top albums.
 - The dashboard also includes playback controls plus a local/full/test mode model for working through Spotify rate limits and local-only sessions.
+- Recent Likes now has a read-only user-scoped SQLite cache/sync path for Spotify saved tracks, with the old direct Spotify latest-likes payload retained only as a clearly labeled transition fallback.
 - The auth layer now also supports a dedicated recent-ingest OAuth path with PKCE plus probe and poll-now endpoints for recent-play API debugging.
 - A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
 - The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
@@ -64,6 +65,7 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend loading handoff after Spotify auth
 - frontend persistent sticky navigation with project/account popovers
 - frontend playback controls and player state presentation
+- frontend queue organizer, preview-resume handling, album play-all controls, and Recent Likes cache/sync UI
 - frontend local/full/test mode controls with cached-state indicators
 - frontend tracks-only comparison page for current vs new all-time ranking formulas
 - frontend recent-ingest controls for connect+ingest, before-cursor probe, backfill probe, and post-track-end polling
@@ -86,6 +88,7 @@ This document is the implementation-oriented technical source of truth for the L
 - section-level caching for live sections and persistent history-based favorites
 - on-disk local analysis cache, per-user snapshot cache, and shared static metadata cache for artists, albums, and tracks
 - SQLite schema migrations and `raw_play_event`, `raw_play_event_membership`, `live_playback_event`, `ingest_run`, and `spotify_sync_state` tables
+- SQLite liked-track cache tables for read-only saved-track cache state and sync metadata
 - raw ingest helpers with source-row dedupe plus conservative cross-source upgrade matching
 - ingest-run listing, fetch, and deletion helpers plus a unified top-track query on raw data
 - history JSON file loader and batch history ingest path
@@ -98,13 +101,18 @@ This document is the implementation-oriented technical source of truth for the L
   - `spotify_catalog_backfill_queue`
   - track metadata worker state, lock, and invocation tables
 - backend debug APIs for Catalog Backfill coverage, queue state, recent runs, lookup, duplicate diagnostics, release-album merge preview, and release-album merge dry-run
+- backend liked-track cache APIs:
+  - `GET /me/liked-tracks`
+  - `POST /me/liked-tracks/sync`
+  - `GET /me/liked-tracks/contains`
+  - dev/test-only sync-failure simulation guarded by `LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE=1` plus `X-ListenLab-Debug-Sync-Failure: 1`
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
 2. The backend runs OAuth with Spotify and stores session state for the logged-in user.
 3. The frontend calls `GET /auth/session` and `GET /me`.
 4. The backend fetches fresh recent sections, short-cache live ranking sections, and optionally serves persistent history-derived favorites or local snapshot sections when valid.
-5. The frontend first renders a loading handoff, then the dashboard snapshot, then optionally fills in the extended view.
+5. The frontend first renders a loading handoff, then the dashboard snapshot, then optionally fills in the extended view and liked-track cache state.
 6. When Spotify is unavailable or the user explicitly chooses local mode, the backend returns a locally assembled payload backed by history and cached Spotify-derived metadata.
 7. A later milestone will add `POST /analysis` and `POST /playlist`.
 
@@ -141,6 +149,10 @@ Album-family candidate report review:
   - also stores `last_heartbeat_at` and persisted phase timing metrics
 - `spotify_sync_state`
   - stores the recent-sync watermark, overlap lookback, and current/latest sync run metadata
+- `spotify_liked_track_cache`
+  - stores user-scoped active/inactive Spotify saved-track cache rows keyed by `(user_id, spotify_track_id)`
+- `spotify_liked_track_sync_state`
+  - stores user-scoped liked-track sync metadata, including last quick/full attempts, stopped reason, active count, and page/track counts
 - `raw_play_event`
   - stores the raw play event plus ingest provenance and duration quality method
 - `raw_play_event_membership`
@@ -313,7 +325,7 @@ The FastAPI backend is responsible for:
 ## Dashboard Cache Strategy
 ### Fresh sections
 - recently played tracks
-- recently liked tracks
+- recently liked tracks from `profile.recent_likes_tracks` only as a transition fallback
 - other current-activity style sections
 
 ### Short-cache sections
@@ -324,6 +336,7 @@ The FastAPI backend is responsible for:
 - followed-artist totals
 
 ### Persistent cache sections
+- user-scoped liked-track cache populated from Spotify saved tracks
 - history-calibrated artist favorites
 - history-calibrated album favorites
 - stable image and URL enrichment for those history-ranked results

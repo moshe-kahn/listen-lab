@@ -64,6 +64,13 @@ from backend.app.progress_tracker import (
     _progress_key,
     _set_load_progress,
 )
+from backend.app.liked_tracks import (
+    SIMULATED_SYNC_FAILURE_REASONS,
+    build_simulated_liked_track_sync_failure,
+    is_liked_track_cached,
+    list_cached_liked_tracks,
+    sync_spotify_liked_tracks,
+)
 from backend.app.recent_debug_compare import build_recent_comparison_summary
 from backend.app.recent_top_tracks_db import build_recent_top_tracks_section_from_db
 from backend.app.recent_tracks_db import (
@@ -2310,6 +2317,62 @@ async def me_local(
         return payload
     finally:
         _clear_load_progress(request)
+
+
+@app.get("/me/liked-tracks")
+async def me_liked_tracks(
+    request: Request,
+    limit: int = SECTION_PREVIEW_LIMIT,
+    offset: int = 0,
+    active_only: bool = True,
+) -> dict[str, Any]:
+    user_id = _require_local_data_session(request)
+    return list_cached_liked_tracks(str(user_id), limit=limit, offset=offset, active_only=active_only)
+
+
+@app.get("/me/liked-tracks/contains")
+async def me_liked_tracks_contains(
+    request: Request,
+    spotify_track_id: str,
+) -> dict[str, Any]:
+    normalized_track_id = str(spotify_track_id or "").strip()
+    if not normalized_track_id:
+        raise HTTPException(status_code=400, detail="spotify_track_id is required.")
+    user_id = _require_local_data_session(request)
+    return {
+        "spotify_track_id": normalized_track_id,
+        "is_liked": is_liked_track_cached(str(user_id), normalized_track_id),
+    }
+
+
+@app.post("/me/liked-tracks/sync")
+async def me_liked_tracks_sync(
+    request: Request,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    mode = str(body.get("mode") or "quick")
+    if mode not in {"quick", "full"}:
+        raise HTTPException(status_code=400, detail="Liked tracks sync mode must be 'quick' or 'full'.")
+    simulate_failure_reason = str(body.get("simulate_failure_reason") or "").strip()
+    if simulate_failure_reason:
+        if not get_settings().listenlab_enable_debug_sync_failure:
+            raise HTTPException(status_code=400, detail="Liked tracks sync failure simulation is disabled.")
+        if request.headers.get("X-ListenLab-Debug-Sync-Failure") != "1":
+            raise HTTPException(status_code=400, detail="Liked tracks sync failure simulation requires the debug header.")
+        if simulate_failure_reason not in SIMULATED_SYNC_FAILURE_REASONS:
+            raise HTTPException(status_code=400, detail="Unsupported liked tracks sync failure simulation reason.")
+        return build_simulated_liked_track_sync_failure(
+            str(user_id),
+            mode=mode,  # type: ignore[arg-type]
+            stopped_reason=simulate_failure_reason,
+        )
+    token = _require_token(request)
+    return await sync_spotify_liked_tracks(
+        user_id=str(user_id),
+        access_token=token,
+        mode=mode,  # type: ignore[arg-type]
+    )
 
 
 @app.get("/me/recent")

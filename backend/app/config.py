@@ -24,6 +24,7 @@ class Settings:
     cache_dir: str
     sqlite_db_path: str
     spotify_recent_full_page_mode: bool = True
+    listenlab_enable_debug_sync_failure: bool = False
     spotify_scope: str = (
         "user-read-email user-read-private user-read-recently-played playlist-read-private "
         "playlist-modify-private user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
@@ -85,4 +86,5 @@ def get_settings() -> Settings:
         cache_dir=_read_env("CACHE_DIR", str(BACKEND_DIR / "data" / "cache")),
         sqlite_db_path=_read_env("SQLITE_DB_PATH", str(BACKEND_DIR / "data" / "listenlabs.sqlite3")),
         spotify_recent_full_page_mode=_read_env_bool("SPOTIFY_RECENT_FULL_PAGE_MODE", True),
+        listenlab_enable_debug_sync_failure=_read_env_bool("LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE", False),
     )

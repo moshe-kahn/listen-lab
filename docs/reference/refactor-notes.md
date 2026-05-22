@@ -52,6 +52,8 @@ Current extracted modules:
   - merged track aggregate query and route payload helper
 - `backend/app/spotify_preview.py`
   - representative artist/album track preview helpers
+- `backend/app/liked_tracks.py`
+  - user-scoped read-only liked-track cache listing, contains checks, Spotify saved-track quick/full sync, sync metadata, unlike marking after completed full sync, and guarded dev/test failure simulation response shape
 
 Extracted route modules:
 - `backend/app/routes/audit_routes.py`
@@ -78,6 +80,12 @@ Current `backend/app/main.py` role:
 - dashboard assembly and domain-specific fetch/enrichment orchestration
 - remaining dashboard, ingest, and catalog route handlers
 - remaining dashboard orchestration helpers
+- liked-track cache routes remain inline for now and should move with the future dashboard route extraction, not as a broad standalone refactor during unrelated work
+
+Frontend `App.tsx` current uncommitted scope:
+- Recent Likes cache integration prefers `GET /me/liked-tracks`, keeps direct Spotify latest-likes rows as a labeled fallback, and exposes `Sync Likes` quick sync.
+- Playback/queue work includes queue organizer controls, queue played-state markers, preview playback resume, album play-all, and dropdown outside-click handling.
+- Further frontend extraction should preserve these behaviors and avoid mixing feature work with component moves.
 
 Backend verification pattern:
 - `./.venv/bin/python -m py_compile <changed modules>`

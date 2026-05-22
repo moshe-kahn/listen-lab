@@ -1357,6 +1357,48 @@ LEFT JOIN fact_play_event_history_link fh
 LEFT JOIN fact_play_event_player_link fp
   ON fp.fact_play_event_id = f.id;
 """,
+    27: """
+CREATE TABLE IF NOT EXISTS spotify_liked_track_cache (
+  user_id TEXT NOT NULL,
+  spotify_track_id TEXT NOT NULL,
+  uri TEXT,
+  name TEXT NOT NULL,
+  artist_names TEXT,
+  album_name TEXT,
+  album_spotify_id TEXT,
+  duration_ms INTEGER,
+  popularity INTEGER,
+  explicit INTEGER,
+  liked_at TEXT NOT NULL,
+  is_liked INTEGER NOT NULL DEFAULT 1,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  unliked_at TEXT,
+  PRIMARY KEY (user_id, spotify_track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_liked_track_cache_user_active_liked_at
+  ON spotify_liked_track_cache(user_id, is_liked, liked_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_liked_track_cache_user_last_seen
+  ON spotify_liked_track_cache(user_id, last_seen_at);
+
+CREATE TABLE IF NOT EXISTS spotify_liked_track_sync_state (
+  user_id TEXT NOT NULL,
+  sync_key TEXT NOT NULL,
+  last_quick_sync_at TEXT,
+  last_completed_full_sync_at TEXT,
+  last_attempted_sync_at TEXT,
+  last_sync_mode TEXT,
+  last_stopped_reason TEXT,
+  last_full_completed INTEGER NOT NULL DEFAULT 0,
+  last_active_count INTEGER,
+  last_tracks_seen INTEGER,
+  last_pages_seen INTEGER,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, sync_key)
+);
+""",
 }
 
 
