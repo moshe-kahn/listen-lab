@@ -20,6 +20,10 @@ export type ProfileProgressResponse = {
 export type RecentTrack = {
   event_id?: number | null;
   track_id: string | null;
+  release_track_id?: number | null;
+  release_track_name?: string | null;
+  release_track_source_count?: number | null;
+  has_release_track_siblings?: boolean | null;
   track_name: string | null;
   artist_name: string | null;
   album_name: string | null;
@@ -1108,6 +1112,10 @@ export type FullAvailabilityResponse = {
 export type CurrentPlaybackSnapshot = {
   item_type: string | null;
   item_id: string | null;
+  release_track_id?: number | null;
+  release_track_name?: string | null;
+  release_track_source_count?: number | null;
+  has_release_track_siblings?: boolean | null;
   name: string | null;
   uri: string | null;
   image_url: string | null;

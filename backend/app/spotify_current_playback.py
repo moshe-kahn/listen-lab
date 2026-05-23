@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from backend.app.db import get_spotify_auth_record, insert_live_playback_event
+from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata
 from backend.app.spotify_token_store import (
     SpotifyTokenStoreError,
     mark_spotify_reauth_required,
@@ -77,7 +78,7 @@ def _normalize_current_playback(payload: dict[str, Any]) -> dict[str, Any]:
             if first_item_image:
                 image_url = str(first_item_image.get("url"))
 
-    return {
+    normalized = {
         "item_type": item_type or None,
         "item_id": item.get("id"),
         "name": item.get("name"),
@@ -93,6 +94,7 @@ def _normalize_current_playback(payload: dict[str, Any]) -> dict[str, Any]:
         "device_type": device.get("type"),
         "timestamp": payload.get("timestamp"),
     }
+    return enrich_track_rows_with_release_metadata([normalized], track_id_key="item_id")[0]
 
 
 async def fetch_spotify_current_playback_state(access_token: str) -> dict[str, Any] | None:

@@ -109,6 +109,8 @@ Collect the core library signals and normalize them into artist-level records.
   - recent-play API ingest exists
   - history-dump ingest exists
   - same-source and cross-source raw upgrades exist
+  - music-only fact projection excludes Spotify podcast episodes and unidentifiable non-track history rows while preserving raw history
+  - projected music facts now ensure release-track identity where possible
 - Source-layer Spotify catalog enrichment is also implemented for known track and album IDs:
   - track metadata
   - album metadata
@@ -125,9 +127,11 @@ Collect the core library signals and normalize them into artist-level records.
 - pagination handling for required Spotify endpoints
 - raw event ingestion from Spotify recent-play API into SQLite
 - raw event ingestion from Spotify extended streaming history into SQLite
+- preservation of non-music Spotify history rows in raw history while excluding them from music facts
 - conservative replay overlap and early-stop paging for recent-play sync
 - source-row idempotency plus conservative cross-source upgrade matching
 - canonical-event membership tracking for duplicate source rows
+- release-track identity creation during music fact projection
 - live playback observation capture as a separate evidence layer
 - aggregation pipeline that produces `ArtistProfile` records
 - unit-tested normalization logic for multi-artist tracks and album relationships

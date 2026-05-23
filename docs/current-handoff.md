@@ -4,10 +4,11 @@
 Start here in a new chat, then open only the docs relevant to the requested task.
 
 Recommended topic docs:
+- `docs/reference/raw-ingest.md` for raw recent/history ingest, canonical play-event projection, and the music-only fact boundary.
+- `docs/reference/drafts/entity-model-draft.md` for source/release/analysis track identity.
+- `docs/reference/source-track-resolution-policy.md` for source-track/release-track/Track Family review policy.
+- `docs/reference/spotify-catalog-backfill.md` for catalog enrichment and backfill invariants.
 - `docs/reference/refactor-notes.md` for frontend/playback refactor and route extraction notes.
-- `docs/reference/raw-ingest.md` for raw play events, recent/history ingest, recent-sync throttling, and fallback history text.
-- `docs/reference/spotify-catalog-backfill.md` for catalog enrichment, album-track fallback/cache, lookup, and backfill invariants.
-- `docs/reference/drafts/entity-model-draft.md` for release/source/analysis identity and duplicate diagnostics.
 - `docs/reference/drafts/identity-audit-submission-contract.md` only when working on saved track-audit submissions.
 - `docs/reference/album-family-review-policy.md` only when working on album-family candidate review.
 
@@ -19,97 +20,140 @@ Active branch: `frontend-app-refactor`.
 Latest committed baseline before this handoff update:
 - `af2ebf8` `Add liked-track cache sync and refine playback queue UI`
 
-This session prepared a follow-up commit with liked-cache artwork, Activity liked/listened UI refinements, shared liked stars, and release-track sibling metadata badges.
+Current uncommitted scope is ready to commit:
+- release-track identity enrichment across backend payloads
+- release-track-aware liked-star checks in frontend
+- Activity/Listened release-track coverage audit endpoint
+- automatic release-track identity creation during play-event projection
+- one-time local cleanup/backfill of missing release-track identities
+- music-only fact boundary for history projection, preserving raw podcast/unidentifiable history rows but excluding them from `fact_play_event`
 
 Known local processes:
-- Existing backend/frontend dev servers may be listening on `127.0.0.1:8000` and `127.0.0.1:5173` from outside this session.
-- No new long-running servers were started by Codex for the final work in this session.
+- No new long-running dev server was started by Codex for this scope.
 
 ## Work Completed
-Liked-track cache enrichment:
-- `spotify_liked_track_cache` now stores `album_image_url` and `artist_ids`.
-- Liked-track cache responses return album art and structured artist IDs/images when available.
-- Added `backend/app/artwork.py` for cache-first track and artist artwork resolution.
-- `GET /me/liked-tracks` resolves missing album/artist artwork from local cache/catalog first and only uses Spotify fetches when needed and auth is available.
+Release-track payload identity:
+- Added `release_track_id`, `release_track_name`, `release_track_source_count`, and `has_release_track_siblings` to track-like payloads where mapping is available.
+- Enrichment is shared through `backend/app/release_track_metadata.py`.
+- Payloads touched include recent/listened rows, liked-cache rows, top/all-time rows, album track rows, player/current playback rows, and local `/me` payload sections.
+- Existing Spotify track IDs and playback URIs remain in payloads for playback/version identity.
 
-Liked-track Activity UI:
-- Frontend now loads all cached liked-track pages through `fetchAllLikedTracks`, using backend paging.
-- Activity `Liked` is scrollable, not paginated.
-- Activity liked controls support:
-  - `100` vs total cached-like count
-  - `Recent` vs `Older`
-  - ordered vs shuffle icon toggle
-  - repeated shuffle clicks reshuffle again
-- `Refresh` runs a full liked-track sync, then reloads the local liked cache.
-- Cache status copy shows cached count and whether full refresh completed or stopped partially.
+Release-track-aware liked state:
+- Frontend liked checks now prefer `release_track_id` and fall back to Spotify track ID.
+- If any accepted Spotify source under a release track is liked, sibling rows display as liked.
+- No Activity grouping, liked-cache semantic grouping, play-count aggregation, or ranking formula changes were made.
 
-Liked stars:
-- Added shared `LikedBadge`.
-- Liked stars show across dashboard track cards, Activity Listened/Liked, Tracks views, player titles, queue rows, recent dropdown rows, track detail overlays, and album tracklists.
-- Liked state is still primarily Spotify-track-ID based, with fallback to liked-cache source rows. The next semantic improvement should move this to release-track-level identity.
+Activity/Listened coverage audit:
+- Added read-only endpoint:
+  - `GET /debug/activity/release-track-coverage?activity_limit=50&backing_limit=1000&sample_limit=5`
+- The audit reports visible Activity coverage and backing play-event coverage, sibling groups that would collapse, missing examples, and suspicious groups.
+- After cleanup, local sample coverage is:
+  - visible Activity sample: `50/50` release-track mapped
+  - backing 1,000 music fact sample: `1000/1000` release-track mapped
 
-Album and artist artwork:
-- Album art now flows from liked cache rows and resolver fallback paths.
-- Artist art resolver checks local/static cache first, then bounded Spotify artist fetches by artist ID.
-- Album tracklists can benefit from cached metadata where available.
+Automatic identity creation:
+- `backend/app/play_event_projector.py` now ensures release-track identity while projecting music facts.
+- If `spotify_track_id` exists, projection creates/reuses exact Spotify provider identity:
+  - `source_track.source_name = 'spotify'`
+  - accepted `source_track_map`
+  - linked `release_track`
+- If no Spotify track ID exists but track text exists, projection uses the existing local `history_raw` text fallback path.
+- Backend enrichment can now resolve no-Spotify-ID rows through the same `history_raw` key.
 
-Release-track sibling badges:
-- Added `backend/app/release_track_metadata.py` shared helper.
-- Added `POST /tracks/release-track-metadata`.
-- Album track endpoint enriches rows with release-track metadata.
-- Frontend fetches release-track metadata in batches and remembers checked IDs, including non-matches, so later IDs are not starved behind early misses.
-- Shared `ReleaseSiblingBadge` renders `RT` where a Spotify track maps to an accepted local `release_track` with multiple accepted source tracks.
-- `RT` is currently source-map backed:
-  - requires `source_track_map.status = 'accepted'`
-  - does not require `is_user_confirmed = 1`
-  - does not include suggested/rejected/unaccepted candidates
+Local cleanup/backfill already run:
+- `backfill_fact_play_event_release_track_identity()` scanned `76,113` projected play events.
+- It created:
+  - `96` release tracks
+  - `96` source tracks
+  - `96` track maps
+- It found `0` scannable music facts without identity after the run.
 
-Important product direction identified:
-- The UI should eventually use internal `release_track_id` as the primary song identity, not Spotify track ID.
-- Desired behavior:
-  - if any sibling version is liked, the release track is liked
-  - listening to sibling Spotify IDs counts as listening to the same song
-  - Activity Liked/Listened should group by `release_track_id`
-  - Spotify IDs remain playback/version identifiers, not UI identity
+Music-only fact boundary:
+- Raw Spotify history remains source-faithful and preserves podcast/unidentifiable rows.
+- `fact_play_event` is now treated as the music fact table.
+- History projection skips rows when:
+  - `spotify_episode_uri` is present, or
+  - there is no Spotify track ID, no Spotify track URI, and no raw track name.
+- Local cleanup already removed derived non-music facts while preserving raw rows:
+  - raw podcast episode rows preserved: `390`
+  - projected podcast facts now: `0`
+  - projected unidentifiable history facts now: `0`
+  - fact rows with no music identity now: `0`
+
+## Files Changed
+Backend:
+- `backend/app/activity_release_track_audit.py`
+- `backend/app/liked_tracks.py`
+- `backend/app/main.py`
+- `backend/app/merged_track_aggregate.py`
+- `backend/app/play_event_projector.py`
+- `backend/app/recent_top_tracks_db.py`
+- `backend/app/recent_tracks_db.py`
+- `backend/app/release_track_metadata.py`
+- `backend/app/routes/admin_routes.py`
+- `backend/app/spotify_current_playback.py`
+- `backend/app/track_sections.py`
+
+Frontend:
+- `frontend/src/App.tsx`
+- `frontend/src/components/dashboard/DashboardTrackColumn.tsx`
+- `frontend/src/types/appTypes.ts`
+- `frontend/src/utils/playbackUtils.ts`
+
+Tests/docs:
+- `backend/tests/test_merged_track_aggregate.py`
+- `backend/tests/test_play_event_projection.py`
+- `docs/current-handoff.md`
+- relevant overview/reference docs updated for this scope
 
 ## Verification
-Passed during this session:
-- `python3 -m unittest backend.tests.test_liked_tracks`
-- `python3 -m py_compile backend/app/artwork.py backend/app/liked_tracks.py backend/app/main.py backend/app/db.py`
-- `python3 -m py_compile backend/app/release_track_metadata.py backend/app/routes/playback_routes.py backend/app/main.py`
+Passed:
+- `python3 -m py_compile backend/app/play_event_projector.py backend/app/activity_release_track_audit.py backend/tests/test_play_event_projection.py backend/tests/test_merged_track_aggregate.py`
+- `python3 -m unittest backend.tests.test_liked_tracks backend.tests.test_recent_top_tracks_db backend.tests.test_merged_track_aggregate backend.tests.test_play_event_projection`
 - `npm run build --prefix frontend`
 - `git diff --check`
 
 Manual/database checks:
-- User reported full liked refresh completed with `3,129` cached liked songs.
-- Local DB check found `1,706` accepted multi-source release tracks and `3,597` Spotify IDs in those groups.
-- `Rain Dog` maps to release track `284` with four accepted Spotify source IDs.
-- Backend metadata helper returned expected `has_release_track_siblings: true` for known `Rain Dog`/sibling IDs.
+- Release-track identity backfill created `96` missing mappings.
+- Activity release-track audit now reports `100%` coverage for both visible Activity sample and backing music fact sample.
+- Raw podcast rows remain in `raw_spotify_history`; no podcast rows remain projected into `fact_play_event`.
 
 Not fully verified:
-- Browser QA after the final release-track metadata batching fix.
-- Browser layout QA for album tracklist liked column and `RT` badges.
-- End-to-end release-track grouping semantics; current UI is not yet release-track-level for liked/listened aggregation.
+- Browser QA of release-track-aware liked stars after the latest backend cleanup.
+- Browser QA of Activity layout after future grouping, because grouping has not been implemented yet.
 
 ## Recommended Next Task
-Move liked/listened semantics from Spotify track ID to internal release-track identity.
+Phase 3: group Activity `Listened` display rows by `release_track_id`.
 
-Suggested phased approach:
-1. Add `release_track_id`, `release_track_name`, source count, and release-track-level liked state to all track payloads where possible.
-2. Derive liked state from release track: if any accepted source Spotify ID under a release track is liked, the release track is liked.
-3. Group Activity `Listened` by `release_track_id`, falling back to Spotify track ID or normalized title/artist only when no release mapping exists.
-4. Group Activity `Liked` by `release_track_id`; make labels clear because Spotify liked-song count and internal liked-release-track count can differ.
-5. Update queue/player/detail edge cases to display release-track-level liked state while preserving Spotify URI for playback.
+Implementation plan:
+1. Group only Activity/Listened display rows, not raw play-event history.
+2. Use `release_track_id` as the preferred grouping key.
+3. Fallback to Spotify track ID, then existing normalized title/artist behavior only when release identity is missing.
+4. Preserve event/play counts by summing grouped rows.
+5. Use latest play as the representative row for display and playback.
+6. Keep playback on concrete Spotify track ID/URI.
+7. Add focused tests for grouping, fallback, count preservation, and latest-play representative selection.
 
-Do not implement this as frontend title/artist guessing. The backend owns the mapping and should return explicit release-track identity/state.
+Do not bundle this with Activity `Liked` grouping. Keep `Liked` as Phase 4.
+
+## Future Follow-Up After Current Project
+Explore sibling/family album artwork near the home playback album-art expansion.
+
+Do not implement this as a frontend-only guess. First add a read-only backend/debug helper that, given a Spotify track ID or `release_track_id`, returns related album appearances:
+- exact release-track siblings first
+- then Track Family / `analysis_track` related songs if available
+- album art, album name, source track ID/URI, and relationship reason
+- duplicate album-art suppression
+- playable representative Spotify URI when available
+
+After inspecting real payloads, design a small album-art strip beside the current playback album art. Clicking an item should have explicit behavior: inspect/switch expanded album, not silently mutate playback.
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.
 - Do not merge to `main` unless explicitly requested.
 - Keep `frontend-app-refactor` as the integration baseline.
-- Old topic branches should remain archive/source-only.
-- If the user says `end session`, update this file and provide a short resume prompt.
-- If the user says `end session and commit`, update this file and commit only after the user explicitly confirms. In this session, the user confirmed with `end session and commit`.
+- Raw history is source-faithful. Do not delete podcast rows from `raw_spotify_history`; exclude them only from music facts/queries unless building podcast features.
+- Do not implement release-track grouping as frontend title/artist guessing. Backend owns identity mapping.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Documents/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. The latest work committed after `af2ebf8` adds liked-cache artwork enrichment, full cached-liked loading, Activity Liked/Listened UI refinements, shared liked stars, and release-track sibling `RT` metadata badges. Verification passed with targeted backend tests/py_compile, frontend build, and `git diff --check`. Browser QA after the final `RT` batching fix was not performed. Recommended next task: make frontend liked/listened semantics release-track-level instead of Spotify-track-ID-level.
+Continue in `/Users/kahntra/Documents/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest completed scope adds release-track identity payload enrichment, release-track-aware liked stars, Activity release-track coverage audit, automatic release-track identity creation during music fact projection, local identity backfill, and music-only fact cleanup that preserves raw podcast history but removes podcast/unidentifiable rows from `fact_play_event`. Verification passed with targeted backend tests, py_compile, frontend build, and `git diff --check`. Recommended next task: Phase 3, group Activity `Listened` display rows by `release_track_id`.

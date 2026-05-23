@@ -24,6 +24,7 @@ type DashboardTrackColumnProps = {
   presorted: boolean;
   trackRankingMode: TrackRankingMode;
   likedTrackIds?: Set<string>;
+  likedReleaseTrackIds?: Set<number>;
   releaseTrackSiblingById?: Map<string, number>;
   sectionPage: number;
   moveSectionPage: (section: SectionKey, direction: -1 | 1, itemCount: number, pageSize?: number) => void;
@@ -42,6 +43,7 @@ export function DashboardTrackColumn({
   presorted,
   trackRankingMode,
   likedTrackIds,
+  likedReleaseTrackIds,
   releaseTrackSiblingById,
   sectionPage,
   moveSectionPage,
@@ -80,9 +82,10 @@ export function DashboardTrackColumn({
       : null;
   const trackIsKnownLiked = (track: RecentTrack) =>
     Boolean(
-      track.is_liked
-      ?? (track.source_label === "liked_cache" ? true : null)
-      ?? (track.track_id && likedTrackIds?.has(track.track_id) ? true : null),
+      track.is_liked === true
+      || track.source_label === "liked_cache"
+      || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
+      || (track.track_id && likedTrackIds?.has(track.track_id)),
     );
   const releaseSiblingSourceCount = (track: RecentTrack) =>
     track.track_id ? (releaseTrackSiblingById?.get(track.track_id) ?? 0) : 0;

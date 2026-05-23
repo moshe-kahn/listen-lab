@@ -182,8 +182,19 @@ Mapping direction:
 
 Current implementation note:
 - `source_track -> release_track` dedupe is intentionally conservative and rerunnable
+- play-event projection now ensures `release_track` identity for music facts:
+  - exact Spotify track IDs map through `source_track(source_name='spotify')`
+  - no-Spotify-ID music rows with title text use the existing `history_raw` fallback key
+  - Spotify podcast episodes are not mapped into `release_track`
 - `release_track -> track_family` is now driven by a policy/config layer plus variant-title interpretation, not by one hardcoded title-heuristic block
 - `track_family` should still be treated as a conservative grouping layer, not as the final universal canonical track identity for every downstream analysis
+
+UI identity direction:
+- `release_track_id` is the preferred UI identity for same-song state.
+- Spotify track ID remains source/version/playback identity.
+- Current frontend liked stars are release-track-aware.
+- Activity `Listened` grouping by `release_track_id` is planned next.
+- Activity `Liked` grouping should remain a separate phase because displayed internal liked-release-track count can differ from Spotify liked-track count.
 
 ### Albums
 - `release_album`

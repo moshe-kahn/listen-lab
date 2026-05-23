@@ -5,6 +5,7 @@ import sqlite3
 from typing import Any, TypedDict
 
 from backend.app.db import sqlite_connection
+from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata
 from backend.app.track_sections import CanonicalTrackSectionItem, CanonicalTrackSectionPayload
 
 
@@ -311,7 +312,7 @@ def build_recent_tracks_section_from_db(
     recent_window_days: int,
 ) -> CanonicalTrackSectionPayload:
     rows = query_recent_track_rows(limit=limit)
-    items = [map_recent_track_row_to_canonical_item(row) for row in rows]
+    items = enrich_track_rows_with_release_metadata([map_recent_track_row_to_canonical_item(row) for row in rows])
     return {
         "items": items,
         "available": bool(items),

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from backend.app.db import get_sqlite_db_path
+from backend.app.db import (
+    _ensure_source_track_mapping_with_connection,
+    _resolve_release_track_id_for_local_backfill_with_connection,
+    get_sqlite_db_path,
+)
 from backend.app.play_event_matcher import MatchPair, match_recent_history_rows
 
 
@@ -208,6 +213,80 @@ def _compute_started_at(ended_at: str | None, ms_played: int | None) -> str | No
     return _iso_z(started_dt)
 
 
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_non_empty(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _history_row_is_episode(row: dict[str, Any] | sqlite3.Row) -> bool:
+    raw_payload_json = row["raw_payload_json"] if "raw_payload_json" in row.keys() else None
+    if raw_payload_json is None:
+        return False
+    try:
+        payload = json.loads(str(raw_payload_json))
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("spotify_episode_uri"))
+
+
+def _ensure_release_track_identity_for_fact(
+    connection: sqlite3.Connection,
+    *,
+    spotify_track_id: str | None,
+    spotify_track_uri: str | None,
+    track_name: str | None,
+    artist_name: str | None,
+    album_name: str | None,
+    track_duration_ms: int | None,
+    raw_payload_json: str | None,
+) -> int | None:
+    if spotify_track_id is not None and spotify_track_id.strip():
+        safe_spotify_track_id = spotify_track_id.strip()
+        safe_spotify_track_uri = (
+            spotify_track_uri.strip()
+            if spotify_track_uri is not None and spotify_track_uri.strip()
+            else f"spotify:track:{safe_spotify_track_id}"
+        )
+        return _ensure_source_track_mapping_with_connection(
+            connection,
+            source_name="spotify",
+            external_id=safe_spotify_track_id,
+            external_uri=safe_spotify_track_uri,
+            track_name=track_name,
+            track_duration_ms=track_duration_ms,
+            raw_payload_json=raw_payload_json,
+            create_match_method="spotify_provider_identity",
+            create_confidence=1.0,
+            create_explanation="Created from exact Spotify track ID during play-event projection",
+        )
+
+    return _resolve_release_track_id_for_local_backfill_with_connection(
+        connection,
+        spotify_track_id=None,
+        spotify_track_uri=spotify_track_uri,
+        track_name_raw=track_name,
+        artist_name_raw=artist_name,
+        album_name_raw=album_name,
+        track_duration_ms=track_duration_ms,
+    )
+
+
 def _reload_fact_from_sources(connection: sqlite3.Connection, *, fact_id: int) -> None:
     recent_row = connection.execute(
         """
@@ -362,6 +441,18 @@ def _reload_fact_from_sources(connection: sqlite3.Connection, *, fact_id: int) -
             else (str(player_row["album_name_raw"]) if player_row is not None and player_row["album_name_raw"] is not None else None)
         )
     )
+    track_duration_ms = (
+        _optional_int(recent_row["track_duration_ms"])
+        if recent_row is not None and "track_duration_ms" in recent_row.keys()
+        else None
+    )
+    if track_duration_ms is None and player_row is not None and "track_duration_ms" in player_row.keys():
+        track_duration_ms = _optional_int(player_row["track_duration_ms"])
+    raw_payload_json = _first_non_empty(
+        recent_row["raw_payload_json"] if recent_row is not None else None,
+        history_row["raw_payload_json"] if history_row is not None else None,
+        player_row["raw_payload_json"] if player_row is not None else None,
+    )
 
     connection.execute(
         """
@@ -416,6 +507,193 @@ def _reload_fact_from_sources(connection: sqlite3.Connection, *, fact_id: int) -
             fact_id,
         ),
     )
+    _ensure_release_track_identity_for_fact(
+        connection,
+        spotify_track_id=spotify_track_id,
+        spotify_track_uri=spotify_track_uri,
+        track_name=track_name_canonical,
+        artist_name=artist_name_canonical,
+        album_name=album_name_canonical,
+        track_duration_ms=track_duration_ms,
+        raw_payload_json=raw_payload_json,
+    )
+
+
+def backfill_fact_play_event_release_track_identity() -> dict[str, int]:
+    counts = {
+        "rows_scanned": 0,
+        "rows_with_identity": 0,
+        "rows_without_identity": 0,
+        "release_tracks_created": 0,
+        "source_tracks_created": 0,
+        "track_maps_created": 0,
+    }
+
+    with sqlite3.connect(get_sqlite_db_path(), timeout=30) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        before = {
+            "release_tracks": int(connection.execute("SELECT count(*) FROM release_track").fetchone()[0]),
+            "source_tracks": int(connection.execute("SELECT count(*) FROM source_track").fetchone()[0]),
+            "track_maps": int(connection.execute("SELECT count(*) FROM source_track_map").fetchone()[0]),
+        }
+        rows = connection.execute(
+            """
+            SELECT
+              spotify_track_id,
+              spotify_track_uri,
+              track_name_canonical,
+              artist_name_canonical,
+              album_name_canonical
+            FROM fact_play_event
+            WHERE
+              (spotify_track_id IS NOT NULL AND trim(spotify_track_id) != '')
+              OR (spotify_track_uri IS NOT NULL AND trim(spotify_track_uri) != '')
+              OR (track_name_canonical IS NOT NULL AND trim(track_name_canonical) != '')
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+        for row in rows:
+            counts["rows_scanned"] += 1
+            release_track_id = _ensure_release_track_identity_for_fact(
+                connection,
+                spotify_track_id=row["spotify_track_id"],
+                spotify_track_uri=row["spotify_track_uri"],
+                track_name=row["track_name_canonical"],
+                artist_name=row["artist_name_canonical"],
+                album_name=row["album_name_canonical"],
+                track_duration_ms=None,
+                raw_payload_json=None,
+            )
+            if release_track_id is None:
+                counts["rows_without_identity"] += 1
+            else:
+                counts["rows_with_identity"] += 1
+
+        after = {
+            "release_tracks": int(connection.execute("SELECT count(*) FROM release_track").fetchone()[0]),
+            "source_tracks": int(connection.execute("SELECT count(*) FROM source_track").fetchone()[0]),
+            "track_maps": int(connection.execute("SELECT count(*) FROM source_track_map").fetchone()[0]),
+        }
+        connection.commit()
+
+    counts["release_tracks_created"] = after["release_tracks"] - before["release_tracks"]
+    counts["source_tracks_created"] = after["source_tracks"] - before["source_tracks"]
+    counts["track_maps_created"] = after["track_maps"] - before["track_maps"]
+    return counts
+
+
+def delete_projected_podcast_episode_facts() -> dict[str, int]:
+    counts = {
+        "episode_fact_rows_found": 0,
+        "history_links_deleted": 0,
+        "fact_rows_deleted": 0,
+        "raw_history_rows_preserved": 0,
+    }
+
+    with sqlite3.connect(get_sqlite_db_path(), timeout=30) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        rows = connection.execute(
+            """
+            SELECT
+              f.id AS fact_play_event_id,
+              h.id AS raw_spotify_history_id
+            FROM fact_play_event f
+            JOIN fact_play_event_history_link hl
+              ON hl.fact_play_event_id = f.id
+            JOIN raw_spotify_history h
+              ON h.id = hl.raw_spotify_history_id
+            LEFT JOIN fact_play_event_recent_link rl
+              ON rl.fact_play_event_id = f.id
+            LEFT JOIN fact_play_event_player_link pl
+              ON pl.fact_play_event_id = f.id
+            WHERE json_extract(h.raw_payload_json, '$.spotify_episode_uri') IS NOT NULL
+              AND rl.fact_play_event_id IS NULL
+              AND pl.fact_play_event_id IS NULL
+            ORDER BY f.id ASC
+            """
+        ).fetchall()
+        fact_ids = [int(row["fact_play_event_id"]) for row in rows]
+        raw_history_ids = [int(row["raw_spotify_history_id"]) for row in rows]
+        counts["episode_fact_rows_found"] = len(fact_ids)
+        counts["raw_history_rows_preserved"] = len(set(raw_history_ids))
+        if not fact_ids:
+            return counts
+
+        placeholders = ",".join("?" for _ in fact_ids)
+        history_cursor = connection.execute(
+            f"DELETE FROM fact_play_event_history_link WHERE fact_play_event_id IN ({placeholders})",
+            fact_ids,
+        )
+        fact_cursor = connection.execute(
+            f"DELETE FROM fact_play_event WHERE id IN ({placeholders})",
+            fact_ids,
+        )
+        counts["history_links_deleted"] = int(history_cursor.rowcount or 0)
+        counts["fact_rows_deleted"] = int(fact_cursor.rowcount or 0)
+        connection.commit()
+
+    return counts
+
+
+def delete_projected_unidentifiable_history_facts() -> dict[str, int]:
+    counts = {
+        "unidentifiable_fact_rows_found": 0,
+        "history_links_deleted": 0,
+        "fact_rows_deleted": 0,
+        "raw_history_rows_preserved": 0,
+    }
+
+    with sqlite3.connect(get_sqlite_db_path(), timeout=30) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        rows = connection.execute(
+            """
+            SELECT
+              f.id AS fact_play_event_id,
+              h.id AS raw_spotify_history_id
+            FROM fact_play_event f
+            JOIN fact_play_event_history_link hl
+              ON hl.fact_play_event_id = f.id
+            JOIN raw_spotify_history h
+              ON h.id = hl.raw_spotify_history_id
+            LEFT JOIN fact_play_event_recent_link rl
+              ON rl.fact_play_event_id = f.id
+            LEFT JOIN fact_play_event_player_link pl
+              ON pl.fact_play_event_id = f.id
+            WHERE rl.fact_play_event_id IS NULL
+              AND pl.fact_play_event_id IS NULL
+              AND COALESCE(
+                NULLIF(trim(h.spotify_track_id), ''),
+                NULLIF(trim(h.spotify_track_uri), ''),
+                NULLIF(trim(h.track_name_raw), '')
+              ) IS NULL
+            ORDER BY f.id ASC
+            """
+        ).fetchall()
+        fact_ids = [int(row["fact_play_event_id"]) for row in rows]
+        raw_history_ids = [int(row["raw_spotify_history_id"]) for row in rows]
+        counts["unidentifiable_fact_rows_found"] = len(fact_ids)
+        counts["raw_history_rows_preserved"] = len(set(raw_history_ids))
+        if not fact_ids:
+            return counts
+
+        placeholders = ",".join("?" for _ in fact_ids)
+        history_cursor = connection.execute(
+            f"DELETE FROM fact_play_event_history_link WHERE fact_play_event_id IN ({placeholders})",
+            fact_ids,
+        )
+        fact_cursor = connection.execute(
+            f"DELETE FROM fact_play_event WHERE id IN ({placeholders})",
+            fact_ids,
+        )
+        counts["history_links_deleted"] = int(history_cursor.rowcount or 0)
+        counts["fact_rows_deleted"] = int(fact_cursor.rowcount or 0)
+        connection.commit()
+
+    return counts
 
 
 def _pending_recent_candidates_for_run(connection: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
@@ -452,6 +730,12 @@ def _pending_history_candidates_for_run(connection: sqlite3.Connection, run_id: 
         LEFT JOIN fact_play_event_recent_link r
           ON r.fact_play_event_id = l.fact_play_event_id
         WHERE h.ingest_run_id = ?
+          AND json_extract(h.raw_payload_json, '$.spotify_episode_uri') IS NULL
+          AND COALESCE(
+            NULLIF(trim(h.spotify_track_id), ''),
+            NULLIF(trim(h.spotify_track_uri), ''),
+            NULLIF(trim(h.track_name_raw), '')
+          ) IS NOT NULL
           AND (l.fact_play_event_id IS NULL OR r.fact_play_event_id IS NULL)
         ORDER BY h.played_at ASC, h.id ASC
         """,
@@ -533,6 +817,12 @@ def _history_counterparts_for_recent_rows(
           ON r.fact_play_event_id = l.fact_play_event_id
         WHERE h.played_at >= ?
           AND h.played_at <= ?
+          AND json_extract(h.raw_payload_json, '$.spotify_episode_uri') IS NULL
+          AND COALESCE(
+            NULLIF(trim(h.spotify_track_id), ''),
+            NULLIF(trim(h.spotify_track_uri), ''),
+            NULLIF(trim(h.track_name_raw), '')
+          ) IS NOT NULL
           AND (l.fact_play_event_id IS NULL OR r.fact_play_event_id IS NULL)
         ORDER BY h.played_at ASC, h.id ASC
         """,
@@ -761,6 +1051,8 @@ def reconcile_fact_play_events_for_ingest_run(
 
         candidate_started = datetime.now(UTC)
         player_candidates: list[dict[str, Any]] = []
+        skipped_history_episode_count = 0
+        skipped_history_unidentifiable_count = 0
         if source_type == "spotify_recent":
             recent_candidates = _pending_recent_candidates_for_run(connection, run_id)
             history_candidates = _history_counterparts_for_recent_rows(
@@ -770,6 +1062,35 @@ def reconcile_fact_play_events_for_ingest_run(
                 connection, recent_rows=recent_candidates
             )
         elif source_type == "export":
+            skipped_history_episode_count = int(
+                connection.execute(
+                    """
+                    SELECT count(*)
+                    FROM raw_spotify_history
+                    WHERE ingest_run_id = ?
+                      AND json_extract(raw_payload_json, '$.spotify_episode_uri') IS NOT NULL
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+                or 0
+            )
+            skipped_history_unidentifiable_count = int(
+                connection.execute(
+                    """
+                    SELECT count(*)
+                    FROM raw_spotify_history
+                    WHERE ingest_run_id = ?
+                      AND json_extract(raw_payload_json, '$.spotify_episode_uri') IS NULL
+                      AND COALESCE(
+                        NULLIF(trim(spotify_track_id), ''),
+                        NULLIF(trim(spotify_track_uri), ''),
+                        NULLIF(trim(track_name_raw), '')
+                      ) IS NULL
+                    """,
+                    (run_id,),
+                ).fetchone()[0]
+                or 0
+            )
             history_candidates = _pending_history_candidates_for_run(connection, run_id)
             recent_candidates = _recent_counterparts_for_history_rows(
                 connection, history_rows=history_candidates
@@ -862,6 +1183,8 @@ def reconcile_fact_play_events_for_ingest_run(
             "unmatched_recent_count": len(match_result.unmatched_recent_ids),
             "unmatched_history_count": len(match_result.unmatched_history_ids),
             "unmatched_player_count": len(player_match_result.unmatched_history_ids),
+            "skipped_history_episode_count": skipped_history_episode_count,
+            "skipped_history_unidentifiable_count": skipped_history_unidentifiable_count,
             "facts_touched_count": len(set(touched_fact_ids)),
             "candidate_collect_ms": candidate_collect_ms,
             "matcher_ms": matcher_ms,

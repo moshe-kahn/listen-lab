@@ -15,7 +15,13 @@ from backend.app.db import (
     insert_raw_spotify_history_observation,
     insert_raw_spotify_recent_observation,
 )
-from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
+from backend.app.play_event_projector import (
+    backfill_fact_play_event_release_track_identity,
+    delete_projected_podcast_episode_facts,
+    delete_projected_unidentifiable_history_facts,
+    reconcile_fact_play_events_for_ingest_run,
+)
+from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata
 
 
 class PlayEventProjectionTests(unittest.TestCase):
@@ -142,6 +148,417 @@ class PlayEventProjectionTests(unittest.TestCase):
         self.assertEqual("logout", row[4])
         self.assertEqual("playlist", row[5])
         self.assertEqual("spotify:playlist:abc", row[6])
+
+    def test_reconcile_creates_source_track_mapping_from_recent_spotify_id(self) -> None:
+        run_recent = "run-recent-source-identity"
+        insert_ingest_run(
+            run_id=run_recent,
+            source_type="spotify_recent",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        insert_raw_spotify_recent_observation(
+            ingest_run_id=run_recent,
+            source_row_key="recent-source-identity-row",
+            source_event_id=None,
+            played_at="2026-04-17T19:52:08Z",
+            ms_played_estimate=180000,
+            ms_played_method="default_guess",
+            ms_played_confidence="low",
+            ms_played_fallback_class="fallback_likely_complete",
+            spotify_track_uri="spotify:track:track-source-identity",
+            spotify_track_id="track-source-identity",
+            track_name_raw="Source Identity Song",
+            artist_name_raw="Artist A",
+            album_name_raw="Album A",
+            spotify_album_id="album-1",
+            spotify_artist_ids_json=json.dumps(["artist-1"]),
+            track_duration_ms=240000,
+            context_type=None,
+            context_uri=None,
+            raw_payload_json=json.dumps({"id": "track-source-identity"}),
+        )
+
+        summary_recent = reconcile_fact_play_events_for_ingest_run(
+            source_type="spotify_recent",
+            run_id=run_recent,
+        )
+
+        self.assertEqual(1, summary_recent["facts_touched_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                  st.source_name,
+                  st.external_id,
+                  st.external_uri,
+                  st.source_name_raw,
+                  rt.primary_name,
+                  rt.duration_ms,
+                  stm.match_method,
+                  stm.confidence,
+                  stm.status
+                FROM source_track st
+                JOIN source_track_map stm
+                  ON stm.source_track_id = st.id
+                JOIN release_track rt
+                  ON rt.id = stm.release_track_id
+                WHERE st.source_name = 'spotify'
+                  AND st.external_id = 'track-source-identity'
+                LIMIT 1
+                """
+            ).fetchone()
+
+        assert row is not None
+        self.assertEqual("spotify", row[0])
+        self.assertEqual("track-source-identity", row[1])
+        self.assertEqual("spotify:track:track-source-identity", row[2])
+        self.assertEqual("Source Identity Song", row[3])
+        self.assertEqual("Source Identity Song", row[4])
+        self.assertEqual(240000, row[5])
+        self.assertEqual("spotify_provider_identity", row[6])
+        self.assertEqual(1.0, row[7])
+        self.assertEqual("accepted", row[8])
+
+    def test_reconcile_creates_local_release_track_mapping_without_spotify_id(self) -> None:
+        run_recent = "run-recent-local-identity"
+        insert_ingest_run(
+            run_id=run_recent,
+            source_type="spotify_recent",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        insert_raw_spotify_recent_observation(
+            ingest_run_id=run_recent,
+            source_row_key="recent-local-identity-row",
+            source_event_id=None,
+            played_at="2026-04-17T19:53:08Z",
+            ms_played_estimate=180000,
+            ms_played_method="default_guess",
+            ms_played_confidence="low",
+            ms_played_fallback_class="fallback_likely_complete",
+            spotify_track_uri=None,
+            spotify_track_id=None,
+            track_name_raw="Local Identity Song",
+            artist_name_raw="Artist B",
+            album_name_raw="Album B",
+            spotify_album_id=None,
+            spotify_artist_ids_json=None,
+            track_duration_ms=220000,
+            context_type=None,
+            context_uri=None,
+            raw_payload_json=json.dumps({"name": "Local Identity Song"}),
+        )
+
+        summary_recent = reconcile_fact_play_events_for_ingest_run(
+            source_type="spotify_recent",
+            run_id=run_recent,
+        )
+
+        self.assertEqual(1, summary_recent["facts_touched_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                  st.source_name,
+                  st.source_name_raw,
+                  rt.primary_name,
+                  rt.duration_ms,
+                  stm.match_method,
+                  stm.confidence,
+                  stm.status
+                FROM source_track st
+                JOIN source_track_map stm
+                  ON stm.source_track_id = st.id
+                JOIN release_track rt
+                  ON rt.id = stm.release_track_id
+                WHERE st.source_name = 'history_raw'
+                LIMIT 1
+                """
+            ).fetchone()
+
+        assert row is not None
+        self.assertEqual("history_raw", row[0])
+        self.assertEqual("Local Identity Song", row[1])
+        self.assertEqual("Local Identity Song", row[2])
+        self.assertEqual(220000, row[3])
+        self.assertEqual("history_raw_text", row[4])
+        self.assertEqual(0.75, row[5])
+        self.assertEqual("accepted", row[6])
+
+        enriched = enrich_track_rows_with_release_metadata([
+            {
+                "track_id": None,
+                "track_name": "Local Identity Song",
+                "artist_name": "Artist B",
+                "album_name": "Album B",
+            }
+        ])
+        self.assertIsInstance(enriched[0].get("release_track_id"), int)
+        self.assertEqual("Local Identity Song", enriched[0].get("release_track_name"))
+
+    def test_fact_identity_backfill_repairs_existing_fact_rows(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at,
+                  spotify_track_id,
+                  spotify_track_uri,
+                  track_name_canonical,
+                  artist_name_canonical,
+                  album_name_canonical,
+                  timing_source,
+                  matched_state
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'recent_fallback', 'recent_only')
+                """,
+                (
+                    "2026-04-17T19:54:08Z",
+                    "backfill-track-1",
+                    "spotify:track:backfill-track-1",
+                    "Backfill Song",
+                    "Artist C",
+                    "Album C",
+                ),
+            )
+            connection.commit()
+
+        summary = backfill_fact_play_event_release_track_identity()
+
+        self.assertGreaterEqual(summary["rows_scanned"], 1)
+        self.assertEqual(1, summary["rows_with_identity"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT rt.primary_name, stm.status
+                FROM source_track st
+                JOIN source_track_map stm
+                  ON stm.source_track_id = st.id
+                JOIN release_track rt
+                  ON rt.id = stm.release_track_id
+                WHERE st.source_name = 'spotify'
+                  AND st.external_id = 'backfill-track-1'
+                LIMIT 1
+                """
+            ).fetchone()
+
+        assert row is not None
+        self.assertEqual("Backfill Song", row[0])
+        self.assertEqual("accepted", row[1])
+
+    def test_reconcile_skips_spotify_episode_history_rows(self) -> None:
+        run_history = "run-history-episode"
+        insert_ingest_run(
+            run_id=run_history,
+            source_type="export",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        insert_raw_spotify_history_observation(
+            ingest_run_id=run_history,
+            source_row_key="history-episode-row",
+            played_at="2026-04-17T19:58:01Z",
+            ms_played=40149,
+            spotify_track_uri=None,
+            spotify_track_id=None,
+            track_name_raw=None,
+            artist_name_raw=None,
+            album_name_raw=None,
+            spotify_album_id=None,
+            spotify_artist_ids_json=None,
+            reason_start="clickrow",
+            reason_end="endplay",
+            skipped=1,
+            shuffle=0,
+            offline=0,
+            platform="ios",
+            conn_country="US",
+            private_session=0,
+            raw_payload_json=json.dumps(
+                {
+                    "spotify_episode_uri": "spotify:episode:episode-1",
+                    "episode_name": "Episode A",
+                    "episode_show_name": "Show A",
+                    "spotify_track_uri": None,
+                    "master_metadata_track_name": None,
+                }
+            ),
+        )
+
+        summary = reconcile_fact_play_events_for_ingest_run(
+            source_type="export",
+            run_id=run_history,
+        )
+
+        self.assertEqual(1, summary["skipped_history_episode_count"])
+        self.assertEqual(0, summary["facts_touched_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            raw_count = connection.execute("SELECT count(*) FROM raw_spotify_history").fetchone()[0]
+            link_count = connection.execute("SELECT count(*) FROM fact_play_event_history_link").fetchone()[0]
+            fact_count = connection.execute("SELECT count(*) FROM fact_play_event").fetchone()[0]
+        self.assertEqual(1, raw_count)
+        self.assertEqual(0, link_count)
+        self.assertEqual(0, fact_count)
+
+    def test_reconcile_skips_unidentifiable_history_rows(self) -> None:
+        run_history = "run-history-unidentifiable"
+        insert_ingest_run(
+            run_id=run_history,
+            source_type="export",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        insert_raw_spotify_history_observation(
+            ingest_run_id=run_history,
+            source_row_key="history-unidentifiable-row",
+            played_at="2026-04-17T20:00:01Z",
+            ms_played=17632,
+            raw_payload_json=json.dumps(
+                {
+                    "spotify_episode_uri": None,
+                    "spotify_track_uri": None,
+                    "master_metadata_track_name": None,
+                    "master_metadata_album_artist_name": None,
+                }
+            ),
+        )
+
+        summary = reconcile_fact_play_events_for_ingest_run(
+            source_type="export",
+            run_id=run_history,
+        )
+
+        self.assertEqual(1, summary["skipped_history_unidentifiable_count"])
+        self.assertEqual(0, summary["facts_touched_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            raw_count = connection.execute("SELECT count(*) FROM raw_spotify_history").fetchone()[0]
+            link_count = connection.execute("SELECT count(*) FROM fact_play_event_history_link").fetchone()[0]
+            fact_count = connection.execute("SELECT count(*) FROM fact_play_event").fetchone()[0]
+        self.assertEqual(1, raw_count)
+        self.assertEqual(0, link_count)
+        self.assertEqual(0, fact_count)
+
+    def test_delete_projected_podcast_episode_facts_preserves_raw_history(self) -> None:
+        run_history = "run-history-episode-cleanup"
+        insert_ingest_run(
+            run_id=run_history,
+            source_type="export",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        inserted = insert_raw_spotify_history_observation(
+            ingest_run_id=run_history,
+            source_row_key="history-episode-cleanup-row",
+            played_at="2026-04-17T19:59:01Z",
+            ms_played=5000,
+            raw_payload_json=json.dumps(
+                {
+                    "spotify_episode_uri": "spotify:episode:episode-cleanup",
+                    "episode_name": "Episode Cleanup",
+                    "episode_show_name": "Show Cleanup",
+                }
+            ),
+        )
+        raw_history_id = int(inserted["row_id"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            cursor = connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at,
+                  canonical_ms_played,
+                  timing_source,
+                  matched_state
+                )
+                VALUES ('2026-04-17T19:59:01Z', 5000, 'history', 'history_only')
+                """
+            )
+            fact_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO fact_play_event_history_link (
+                  fact_play_event_id,
+                  raw_spotify_history_id,
+                  is_primary
+                )
+                VALUES (?, ?, 1)
+                """,
+                (fact_id, raw_history_id),
+            )
+            connection.commit()
+
+        summary = delete_projected_podcast_episode_facts()
+
+        self.assertEqual(1, summary["episode_fact_rows_found"])
+        self.assertEqual(1, summary["history_links_deleted"])
+        self.assertEqual(1, summary["fact_rows_deleted"])
+        self.assertEqual(1, summary["raw_history_rows_preserved"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            raw_count = connection.execute("SELECT count(*) FROM raw_spotify_history").fetchone()[0]
+            link_count = connection.execute("SELECT count(*) FROM fact_play_event_history_link").fetchone()[0]
+            fact_count = connection.execute("SELECT count(*) FROM fact_play_event").fetchone()[0]
+        self.assertEqual(1, raw_count)
+        self.assertEqual(0, link_count)
+        self.assertEqual(0, fact_count)
+
+    def test_delete_projected_unidentifiable_history_facts_preserves_raw_history(self) -> None:
+        run_history = "run-history-unidentifiable-cleanup"
+        insert_ingest_run(
+            run_id=run_history,
+            source_type="export",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        inserted = insert_raw_spotify_history_observation(
+            ingest_run_id=run_history,
+            source_row_key="history-unidentifiable-cleanup-row",
+            played_at="2026-04-17T20:01:01Z",
+            ms_played=5000,
+            raw_payload_json=json.dumps({"spotify_track_uri": None, "spotify_episode_uri": None}),
+        )
+        raw_history_id = int(inserted["row_id"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            cursor = connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at,
+                  canonical_ms_played,
+                  timing_source,
+                  matched_state
+                )
+                VALUES ('2026-04-17T20:01:01Z', 5000, 'history', 'history_only')
+                """
+            )
+            fact_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO fact_play_event_history_link (
+                  fact_play_event_id,
+                  raw_spotify_history_id,
+                  is_primary
+                )
+                VALUES (?, ?, 1)
+                """,
+                (fact_id, raw_history_id),
+            )
+            connection.commit()
+
+        summary = delete_projected_unidentifiable_history_facts()
+
+        self.assertEqual(1, summary["unidentifiable_fact_rows_found"])
+        self.assertEqual(1, summary["history_links_deleted"])
+        self.assertEqual(1, summary["fact_rows_deleted"])
+        self.assertEqual(1, summary["raw_history_rows_preserved"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            raw_count = connection.execute("SELECT count(*) FROM raw_spotify_history").fetchone()[0]
+            link_count = connection.execute("SELECT count(*) FROM fact_play_event_history_link").fetchone()[0]
+            fact_count = connection.execute("SELECT count(*) FROM fact_play_event").fetchone()[0]
+        self.assertEqual(1, raw_count)
+        self.assertEqual(0, link_count)
+        self.assertEqual(0, fact_count)
 
     def test_reconcile_merges_recent_with_listenlab_player_fact(self) -> None:
         run_player = "run-player-1"

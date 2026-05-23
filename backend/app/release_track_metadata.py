@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from backend.app.db import sqlite_connection
+from backend.app.db import _normalize_fallback_artist_text, _stable_text_key, sqlite_connection
 
 
 def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -71,19 +71,101 @@ def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict
     return metadata
 
 
-def enrich_album_track_rows_with_release_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def release_track_metadata_for_history_raw_keys(text_keys: list[str]) -> dict[str, dict[str, Any]]:
+    normalized_keys = sorted({str(text_key or "").strip() for text_key in text_keys if str(text_key or "").strip()})
+    if not normalized_keys:
+        return {}
+    placeholders = ",".join("?" for _ in normalized_keys)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            f"""
+            WITH matched AS (
+              SELECT
+                st.external_id AS history_raw_key,
+                stm.release_track_id
+              FROM source_track_map stm
+              JOIN source_track st
+                ON st.id = stm.source_track_id
+              WHERE stm.status = 'accepted'
+                AND st.source_name = 'history_raw'
+                AND st.external_id IN ({placeholders})
+            ),
+            source_counts AS (
+              SELECT
+                stm.release_track_id,
+                count(DISTINCT stm.source_track_id) AS source_track_count
+              FROM source_track_map stm
+              WHERE stm.status = 'accepted'
+                AND stm.release_track_id IN (SELECT DISTINCT release_track_id FROM matched)
+              GROUP BY stm.release_track_id
+            )
+            SELECT
+              matched.history_raw_key,
+              matched.release_track_id,
+              rt.primary_name AS release_track_name,
+              source_counts.source_track_count
+            FROM matched
+            JOIN release_track rt
+              ON rt.id = matched.release_track_id
+            JOIN source_counts
+              ON source_counts.release_track_id = matched.release_track_id
+            ORDER BY source_counts.source_track_count DESC, matched.release_track_id ASC
+            """,
+            normalized_keys,
+        ).fetchall()
+
+    metadata: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        history_raw_key = str(row["history_raw_key"] or "").strip()
+        if not history_raw_key or history_raw_key in metadata:
+            continue
+        source_track_count = int(row["source_track_count"] or 0)
+        metadata[history_raw_key] = {
+            "release_track_id": int(row["release_track_id"]),
+            "release_track_name": str(row["release_track_name"] or ""),
+            "release_track_source_count": source_track_count,
+            "has_release_track_siblings": source_track_count > 1,
+        }
+    return metadata
+
+
+def _history_raw_key_for_item(item: dict[str, Any]) -> str | None:
+    track_name = str(item.get("track_name") or item.get("track_name_raw") or "").strip()
+    if not track_name:
+        return None
+    artist_name = item.get("artist_name") or item.get("artist_name_raw")
+    album_name = item.get("album_name") or item.get("album_name_raw")
+    fallback_artist_key = _normalize_fallback_artist_text(str(artist_name)) if artist_name is not None else None
+    return _stable_text_key("history_raw_track", track_name, fallback_artist_key, str(album_name) if album_name is not None else None)
+
+
+def enrich_track_rows_with_release_metadata(
+    items: list[dict[str, Any]],
+    *,
+    track_id_key: str = "track_id",
+) -> list[dict[str, Any]]:
     metadata_by_track_id = release_track_metadata_for_spotify_ids([
-        str(item.get("id") or "").strip()
+        str(item.get(track_id_key) or "").strip()
         for item in items
         if isinstance(item, dict)
+    ])
+    metadata_by_history_raw_key = release_track_metadata_for_history_raw_keys([
+        history_raw_key
+        for item in items
+        if isinstance(item, dict)
+        for history_raw_key in [_history_raw_key_for_item(item)]
+        if history_raw_key is not None
     ])
     enriched: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        track_id = str(item.get("id") or "").strip()
+        track_id = str(item.get(track_id_key) or "").strip()
         row = dict(item)
         metadata = metadata_by_track_id.get(track_id)
+        if metadata is None:
+            history_raw_key = _history_raw_key_for_item(row)
+            metadata = metadata_by_history_raw_key.get(history_raw_key or "")
         if metadata:
             row.update(metadata)
         else:
@@ -93,3 +175,7 @@ def enrich_album_track_rows_with_release_metadata(items: list[dict[str, Any]]) -
             row.setdefault("has_release_track_siblings", False)
         enriched.append(row)
     return enriched
+
+
+def enrich_album_track_rows_with_release_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return enrich_track_rows_with_release_metadata(items, track_id_key="id")

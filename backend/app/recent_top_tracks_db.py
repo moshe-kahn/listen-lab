@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 
 from backend.app.db import sqlite_connection
+from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata
 from backend.app.track_sections import CanonicalTrackSectionItem, CanonicalTrackSectionPayload
 
 
@@ -229,7 +230,7 @@ def build_recent_top_tracks_section_from_db(
         recent_window_days=recent_window_days,
         as_of_iso=as_of_iso,
     )
-    items = [map_recent_top_track_row_to_canonical_item(row) for row in rows]
+    items = enrich_track_rows_with_release_metadata([map_recent_top_track_row_to_canonical_item(row) for row in rows])
     return {
         "items": items,
         "available": bool(items),

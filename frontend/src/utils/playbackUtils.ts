@@ -82,12 +82,19 @@ export function filterAndDedupeRecentTracksForActivity(
   filter: RecentPlayFilter,
   limit = tracks.length,
   likedTrackIds?: Set<string>,
+  likedReleaseTrackIds?: Set<number>,
 ) {
   const groups = new Map<string, RecentTrack[]>();
   const orderedKeys: string[] = [];
   for (const track of tracks) {
     if (filter === "liked") {
-      if (!track.track_id || !likedTrackIds?.has(track.track_id)) {
+      const isKnownLiked = Boolean(
+        track.is_liked === true
+        || track.source_label === "liked_cache"
+        || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
+        || (track.track_id && likedTrackIds?.has(track.track_id)),
+      );
+      if (!isKnownLiked) {
         continue;
       }
     } else if (!recentTrackMatchesFilter(track, filter)) {

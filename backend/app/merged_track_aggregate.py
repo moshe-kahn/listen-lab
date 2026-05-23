@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, TypedDict
 
 from backend.app.db import sqlite_connection
+from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata
 
 
 MergedTrackSourceFilter = Literal["all", "recent", "history", "both"]
@@ -13,6 +14,10 @@ MergedTrackSourceLabel = Literal["recent", "history", "both"]
 class MergedTrackAggregateItem(TypedDict, total=False):
     track_identity: str
     track_id: str | None
+    release_track_id: int | None
+    release_track_name: str | None
+    release_track_source_count: int
+    has_release_track_siblings: bool
     uri: str | None
     album_id: str | None
     track_name: str | None
@@ -303,7 +308,7 @@ def get_merged_track_aggregate(
         )
 
     return {
-        "items": items,
+        "items": enrich_track_rows_with_release_metadata(items),
         "excluded_unknown_identity_count": excluded_unknown_identity_count,
     }
 

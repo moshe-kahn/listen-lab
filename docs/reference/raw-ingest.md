@@ -20,7 +20,7 @@ The raw ingest layer is responsible for:
 - storing source-faithful play events before higher-level scoring
 - preserving enough provenance to improve a row when better source data arrives later
 - maintaining split raw observations (`raw_spotify_recent`, `raw_spotify_history`)
-- projecting canonical play-event facts (`fact_play_event` + link tables)
+- projecting music-only canonical play-event facts (`fact_play_event` + link tables)
 - tracking ingest runs
 - tracking Spotify recent-sync replay state
 
@@ -29,6 +29,13 @@ The raw ingest layer is not yet responsible for:
 - final ranking/scoring
 - fuzzy matching
 - canonical song clustering
+
+Important boundary:
+- `raw_spotify_history` is source-faithful and may include Spotify podcast episode rows or otherwise unidentifiable export rows.
+- `fact_play_event` is the current music fact table.
+- History projection skips rows with `spotify_episode_uri` and rows that have no Spotify track ID, no Spotify track URI, and no raw track name.
+- Do not delete podcast rows from raw history; keep them for possible future podcast features.
+- Do not map podcast episodes into `release_track`.
 
 The live playback evidence layer is responsible for:
 - capturing current-playback observations for debugging and skip/transition analysis
@@ -179,7 +186,14 @@ Stores raw recent-play observations with source-specific confidence/fallback met
 Stores raw extended-history observations with source timing/completion semantics.
 
 ### `fact_play_event`
-Canonical logical listen event with source precedence applied.
+Canonical music listen event with source precedence applied.
+
+Projection behavior:
+- Spotify episode rows from extended history are preserved in `raw_spotify_history` but not projected.
+- Unidentifiable history rows with no track ID, track URI, or track name are preserved raw but not projected.
+- Projected music rows ensure release-track identity during projection when enough identity evidence exists:
+  - exact Spotify track ID maps through `source_track(source_name='spotify')`
+  - no-Spotify-ID rows with track text fall back to `history_raw` release-track identity
 
 ### `fact_play_event_recent_link` / `fact_play_event_history_link`
 Provenance link tables from canonical facts back to source-specific raw rows.

@@ -18,6 +18,10 @@ class CanonicalTrackSectionDebug(TypedDict, total=False):
 
 class CanonicalTrackSectionItem(TypedDict, total=False):
     track_id: str | None
+    release_track_id: int | None
+    release_track_name: str | None
+    release_track_source_count: int
+    has_release_track_siblings: bool
     track_name: str | None
     artist_name: str | None
     album_name: str | None

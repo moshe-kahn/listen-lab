@@ -68,6 +68,9 @@ Current note:
   - `source_track`
   - `release_track`
   - `track_family` (implemented in schema/code as `analysis_track`)
+- release-track identity is now exposed in track-like payloads and is the intended UI identity for same-song semantics; Spotify track IDs remain provider/playback identifiers
+- liked stars are release-track-aware where release identity exists, while Activity grouping is still pending
+- raw Spotify history may include podcast episode rows; keep them in raw history, but exclude them from the current music fact layer unless building podcast features
 - track variant grouping is now policy-driven, with an explicit ambiguous-review queue generated after refresh passes so borderline title families can be inspected with artist context
 - source Spotify catalog enrichment now exists as an evidence-gathering layer for identity review:
   - priority metadata runs fetch Spotify track and album metadata into source catalog tables
@@ -96,7 +99,19 @@ The rule that the exact same source event should not be inserted twice. This is 
 The rule that the same logical listen can be improved by a better source later. This is currently handled conservatively through `cross_source_event_key`.
 
 ### Canonical play event
-The single logical listen stored in `fact_play_event`, with provenance links back to `raw_spotify_recent` and/or `raw_spotify_history`.
+The single logical music listen stored in `fact_play_event`, with provenance links back to `raw_spotify_recent` and/or `raw_spotify_history`.
+
+Current boundary:
+- Spotify podcast episodes and unidentifiable non-track history rows stay in raw history.
+- They are not projected into `fact_play_event` because the current database and analysis surfaces are music-first.
+
+### Release track
+The internal release-level song identity used for display/state semantics when multiple Spotify source track IDs represent the same track object.
+
+Current rule:
+- UI liked state should prefer `release_track_id`.
+- Spotify track ID remains necessary for playback and source/version provenance.
+- Activity `Listened` grouping by `release_track_id` is the next planned semantic step.
 
 ### Source catalog metadata
 Provider metadata fetched for known source identifiers, such as Spotify track duration, ISRC, album id, album release date, and external IDs. This metadata is evidence for review and diagnostics, not an identity decision by itself.
@@ -195,6 +210,9 @@ The MVP succeeds when:
 - Fix the incorrect track count still shown for "Chronicles of a Diamond."
 - Improve local-mode image persistence and hydration so artist and album artwork survives mode switches more reliably.
 - Improve recent album ranking so 4-week and 6-month windows do not collapse to overly sparse results.
+- Group Activity `Listened` display rows by `release_track_id`, preserving event counts and concrete Spotify playback targets.
+- Later, group Activity `Liked` by `release_track_id` with clear wording because Spotify liked-track count and internal liked-release-track count can differ.
+- Later, inspect sibling/Track Family album appearances for current playback and consider a small related-album-art strip beside the home playback album art.
 - Use the Tracks page as the track-level formula comparison surface: canonical track rows/cards, side-by-side ranking formulas, and aggregate play metrics rather than event/session inspection.
 - Decide how canonical Spotify-backed winner selection should work when multiple `source_track` rows are merged into one `release_track`.
 - Review the ambiguous track-variant queue and tighten policy family-by-family instead of adding more hardcoded title rules.

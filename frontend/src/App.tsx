@@ -595,6 +595,70 @@ export function App() {
   const playerDisplayDurationMs = previewInProgress
     ? previewPlaybackSession?.baseDurationMs ?? basePlayerDisplayDurationMs
     : basePlayerDisplayDurationMs;
+  const cachedLikedTracks = likedTracksCache?.items ?? [];
+  const usingLikedTracksFallback = cachedLikedTracks.length === 0 && Boolean(profile?.recent_likes_tracks.length);
+  const likedTracksForActivitySource = cachedLikedTracks.length > 0 ? cachedLikedTracks : (profile?.recent_likes_tracks ?? []);
+  const likedTrackIdsForDisplay = useMemo(() => {
+    const ids = new Set<string>();
+    for (const track of likedTracksForActivitySource) {
+      if (track.track_id) {
+        ids.add(track.track_id);
+      }
+    }
+    return ids;
+  }, [likedTracksForActivitySource]);
+  const likedReleaseTrackIdsForDisplay = useMemo(() => {
+    const ids = new Set<number>();
+    for (const track of likedTracksForActivitySource) {
+      if (typeof track.release_track_id === "number") {
+        ids.add(track.release_track_id);
+      }
+    }
+    return ids;
+  }, [likedTracksForActivitySource]);
+  const releaseTrackIdForSpotifyTrackId = (trackId: string | null | undefined) => {
+    if (!trackId) {
+      return null;
+    }
+    const metadata = releaseTrackMetadataById[trackId];
+    return typeof metadata?.release_track_id === "number" ? metadata.release_track_id : null;
+  };
+  const recentTrackIsKnownLiked = (track: RecentTrack | null | undefined, fallbackTrackId?: string | null) => {
+    if (track?.is_liked === true) {
+      return true;
+    }
+    if (track?.source_label === "liked_cache") {
+      return true;
+    }
+    const releaseTrackId = typeof track?.release_track_id === "number"
+      ? track.release_track_id
+      : releaseTrackIdForSpotifyTrackId(track?.track_id ?? fallbackTrackId);
+    if (typeof releaseTrackId === "number" && likedReleaseTrackIdsForDisplay.has(releaseTrackId)) {
+      return true;
+    }
+    const spotifyTrackId = track?.track_id ?? fallbackTrackId;
+    return Boolean(spotifyTrackId && likedTrackIdsForDisplay.has(spotifyTrackId));
+  };
+  const albumTrackIsKnownLiked = (track: AlbumTrackEntry) => {
+    if (recentTrackIsKnownLiked(track.sourceTrack, track.id)) {
+      return true;
+    }
+    const releaseTrackId = track.releaseTrackId ?? releaseTrackIdForSpotifyTrackId(track.id);
+    if (typeof releaseTrackId === "number" && likedReleaseTrackIdsForDisplay.has(releaseTrackId)) {
+      return true;
+    }
+    return Boolean(track.id && likedTrackIdsForDisplay.has(track.id));
+  };
+  const queueTrackIsKnownLiked = (track: PlayerQueueTrack) => {
+    if (track.isLiked === true) {
+      return true;
+    }
+    const releaseTrackId = releaseTrackIdForSpotifyTrackId(track.trackId);
+    if (typeof releaseTrackId === "number" && likedReleaseTrackIdsForDisplay.has(releaseTrackId)) {
+      return true;
+    }
+    return Boolean(track.trackId && likedTrackIdsForDisplay.has(track.trackId));
+  };
   const selectedPreviewPrimaryArtistName = selectedPreview?.kind === "track"
     ? (
       firstArtistFromRecentTrack(selectedPreview.sourceTrack)?.name
@@ -665,7 +729,7 @@ export function App() {
     : 0;
   const selectedPreviewIsKnownLiked = Boolean(
     selectedPreview?.kind === "track"
-    && (selectedPreview.sourceTrack?.is_liked ?? (selectedPreview.sourceTrack?.source_label === "liked_cache" ? true : null)),
+    && recentTrackIsKnownLiked(selectedPreview.sourceTrack, selectedPreview.trackId),
   );
   const selectedPreviewTrackOptimisticSummary: PlayerTrackSummary | null = selectedPreview?.kind === "track"
     ? {
@@ -702,7 +766,7 @@ export function App() {
     : null;
   const playerDisplayArtist = firstArtistFromRecentTrack(playerDisplayKnownTrack);
   const playerDisplayKnownLiked = Boolean(
-    playerDisplayKnownTrack?.is_liked ?? (playerDisplayKnownTrack?.source_label === "liked_cache" ? true : null),
+    recentTrackIsKnownLiked(playerDisplayKnownTrack, playerDisplayTrackId),
   );
   const playerDisplayArtistName = playerDisplayArtist?.name ?? playerDisplayPrimaryArtistFromDisplay ?? null;
   const playerDisplayArtistId = playerDisplayArtist?.artist_id ?? playerDisplayArtist?.id ?? null;
@@ -4865,7 +4929,7 @@ export function App() {
     return (
       <DashboardTrackColumn
         section={section}
-        items={section === "recent" ? filterAndDedupeRecentTracksForActivity(items, recentPlayFilter, items.length, likedTrackIdsForDisplay) : items}
+        items={section === "recent" ? filterAndDedupeRecentTracksForActivity(items, recentPlayFilter, items.length, likedTrackIdsForDisplay, likedReleaseTrackIdsForDisplay) : items}
         available={available}
         emptyCopy={section === "recent" && recentPlayFilter !== "all" ? `No ${recentPlayFilter} songs in this recent window.` : emptyCopy}
         unavailableCopy={unavailableCopy}
@@ -4874,6 +4938,7 @@ export function App() {
         presorted={presorted}
         trackRankingMode={trackRankingMode}
         likedTrackIds={likedTrackIdsForDisplay}
+        likedReleaseTrackIds={likedReleaseTrackIdsForDisplay}
         releaseTrackSiblingById={releaseTrackSiblingById}
         sectionPage={sectionPages[section]}
         moveSectionPage={moveSectionPage}
@@ -8913,7 +8978,7 @@ export function App() {
                         const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
                         const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                         const rowLastPlayed = formatMonthDay(track.lastPlayedAt);
-                        const rowIsLiked = Boolean(track.id && likedTrackIdsForDisplay.has(track.id));
+                        const rowIsLiked = albumTrackIsKnownLiked(track);
                         const rowBaseDurationMs = (
                           track.durationMs
                           ?? (rowIsCurrentTrack
@@ -9158,7 +9223,7 @@ export function App() {
                     {playerQueueOrganizeMode ? (
                       <div className="player-recent-copy player-queue-drag-copy">
                         <span className="player-recent-track single-line-ellipsis">
-                          {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                          {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
                           {hasReleaseSiblingForTrackId(track.trackId) ? (
                             <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
                           ) : null}
@@ -9169,7 +9234,7 @@ export function App() {
                     ) : (
                       <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
                         <span className="player-recent-track single-line-ellipsis">
-                          {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                          {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
                           {hasReleaseSiblingForTrackId(track.trackId) ? (
                             <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
                           ) : null}
@@ -9200,9 +9265,6 @@ export function App() {
     );
   }
 
-  const cachedLikedTracks = likedTracksCache?.items ?? [];
-  const usingLikedTracksFallback = cachedLikedTracks.length === 0 && Boolean(profile?.recent_likes_tracks.length);
-  const likedTracksForActivitySource = cachedLikedTracks.length > 0 ? cachedLikedTracks : (profile?.recent_likes_tracks ?? []);
   const likedTracksForActivity = useMemo(() => {
     const likedAtMs = (track: RecentTrack) => {
       const timestamp = parseTimestampMs(track.liked_at ?? track.spotify_played_at ?? null);
@@ -9237,15 +9299,6 @@ export function App() {
     likedTracksSortMode,
   ]);
   const likedTracksAvailableForActivity = likedTracksForActivitySource.length > 0 || Boolean(profile?.recent_likes_available);
-  const likedTrackIdsForDisplay = useMemo(() => {
-    const ids = new Set<string>();
-    for (const track of likedTracksForActivitySource) {
-      if (track.track_id) {
-        ids.add(track.track_id);
-      }
-    }
-    return ids;
-  }, [likedTracksForActivitySource]);
   const releaseTrackMetadataIds = useMemo(() => {
     const ids = new Set<string>();
     const addRecentTrack = (track: RecentTrack | null | undefined) => {
@@ -9277,6 +9330,12 @@ export function App() {
         ids.add(track.trackId);
       }
     });
+    if (playerDisplayTrackId) {
+      ids.add(playerDisplayTrackId);
+    }
+    if (selectedPreview?.kind === "track" && selectedPreview.trackId) {
+      ids.add(selectedPreview.trackId);
+    }
     addRecentTrack(playerDisplayKnownTrack);
     return Array.from(ids).sort();
   }, [
@@ -9286,11 +9345,13 @@ export function App() {
     likedTracksForActivitySource,
     mergedTracks,
     playerDisplayKnownTrack,
+    playerDisplayTrackId,
     playerQueueTracks,
     profile?.recent_likes_tracks,
     profile?.recent_top_tracks,
     profile?.recent_tracks,
     profile?.top_tracks,
+    selectedPreview,
   ]);
   const releaseTrackMetadataKey = releaseTrackMetadataIds.join("|");
   useEffect(() => {
@@ -9347,7 +9408,7 @@ export function App() {
     trackId ? (releaseTrackSiblingById.get(trackId) ?? 0) : 0;
   const hasReleaseSiblingForTrackId = (trackId: string | null | undefined) =>
     releaseSiblingSourceCountForTrackId(trackId) > 1;
-  const allTimeLikedMatchCount = (profile?.top_tracks ?? []).filter((track) => track.track_id && likedTrackIdsForDisplay.has(track.track_id)).length;
+  const allTimeLikedMatchCount = (profile?.top_tracks ?? []).filter((track) => recentTrackIsKnownLiked(track)).length;
   const allTimeTrackIdCount = (profile?.top_tracks ?? []).filter((track) => Boolean(track.track_id)).length;
   const likedTracksTotalCount = Number(likedTracksCache?.metadata?.last_active_count ?? (cachedLikedTracks.length > 0 ? cachedLikedTracks.length : likedTracksForActivitySource.length));
   const likedTracksTotalLabel = likedTracksTotalCount > 0 ? likedTracksTotalCount.toLocaleString() : "All";
@@ -9704,7 +9765,7 @@ export function App() {
                                   )}
                                   <span className="player-recent-copy">
                                     <span className="player-recent-track single-line-ellipsis">
-                                      {track.is_liked ? <LikedBadge className="player-liked-badge" /> : null}
+                                      {recentTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
                                       {hasReleaseSiblingForTrackId(track.track_id) ? (
                                         <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.track_id)} />
                                       ) : null}
@@ -10134,7 +10195,7 @@ export function App() {
                                   {playerQueueOrganizeMode ? (
                                     <div className="player-recent-copy player-queue-drag-copy">
                                       <span className="player-recent-track single-line-ellipsis">
-                                        {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                                        {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
                                         {hasReleaseSiblingForTrackId(track.trackId) ? (
                                           <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
                                         ) : null}
@@ -10151,7 +10212,7 @@ export function App() {
                                       type="button"
                                     >
                                       <span className="player-recent-track single-line-ellipsis">
-                                        {track.isLiked ? <LikedBadge className="player-liked-badge" /> : null}
+                                        {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
                                         {hasReleaseSiblingForTrackId(track.trackId) ? (
                                           <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
                                         ) : null}
@@ -11012,7 +11073,7 @@ export function App() {
                       const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
                       const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                       const rowLastPlayed = formatMonthDay(track.lastPlayedAt);
-                      const rowIsLiked = Boolean(track.id && likedTrackIdsForDisplay.has(track.id));
+                      const rowIsLiked = albumTrackIsKnownLiked(track);
                       const rowBaseDurationMs = (
                         track.durationMs
                         ?? (rowIsCurrentTrack

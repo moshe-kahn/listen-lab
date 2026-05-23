@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from backend.app.activity_release_track_audit import build_activity_release_track_coverage_audit
 from backend.app.auth.session import _require_local_data_session
 from backend.app.cache.history_cache import (
     HISTORY_TRACKS_DISPLAY_LIMIT,
@@ -85,3 +86,18 @@ async def debug_listening_log(
         source_filter=source_filter if source_filter in {"all", "api", "history", "both"} else "all",
     )
     return dict(payload)
+
+
+@router.get("/debug/activity/release-track-coverage")
+async def debug_activity_release_track_coverage(
+    request: Request,
+    activity_limit: int = 50,
+    backing_limit: int = 1000,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return build_activity_release_track_coverage_audit(
+        activity_limit=activity_limit,
+        backing_limit=backing_limit,
+        sample_limit=sample_limit,
+    )

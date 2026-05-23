@@ -23,6 +23,12 @@ This policy is evidence and review guidance only. It does not authorize schema c
 - Album family: related album/release variants. Deluxe, regional, reissue, and label variants may belong to one family while remaining separate album releases.
 - Representative display metadata: derived display values chosen from evidence, not a blind copy of one Spotify album or track.
 
+Current UI direction:
+- release-track identity is the preferred same-song identity for liked/display state.
+- Spotify track IDs remain concrete playback and provider-version identifiers.
+- Track Family should not be used for playback substitution without returning a playable representative Spotify URI.
+- Future related-album UI should first expose read-only related album appearances from the backend, with exact release-track siblings before broader Track Family matches.
+
 ## Classification Checklist
 
 Review each ambiguous album/source-track group with the strongest available evidence first: album shape, track position, duration, title/artist semantics, explicit/version flags, and external IDs.

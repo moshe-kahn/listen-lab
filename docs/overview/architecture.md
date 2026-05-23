@@ -26,6 +26,10 @@ This document is the implementation-oriented technical source of truth for the L
   - `raw_spotify_history`
   - `fact_play_event`
   - source link tables for canonical provenance
+- `fact_play_event` is now explicitly music-only:
+  - Spotify podcast episode rows remain in raw history for future use
+  - podcast/unidentifiable history rows are not projected into music facts
+  - projected music facts ensure release-track identity from exact Spotify IDs or local text fallback
 - Raw duplicate-member tracking, ingest-run cleanup helpers, current-playback observation, and unified top-track SQLite queries are now implemented on top of the ingest foundation.
 - History ingest now supports an end-to-end downstream projection pipeline after canonical projection, including conservative entity backfills and relationship refresh.
 - Ingest reliability now includes startup stale-run recovery plus persisted phase timings on `ingest_run`.
@@ -71,6 +75,7 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend recent-ingest controls for connect+ingest, before-cursor probe, backfill probe, and post-track-end polling
 - frontend recent-debug page for grouped recent-play inspection plus DB-archive pagination
 - frontend track-detail overlay enhancements for album-song browsing, playback toggles, and same-album track switching without full overlay reset
+- frontend liked-star state is release-track-aware where release identity is available, while playback still uses concrete Spotify track IDs/URIs
 - frontend helper extraction for API wrappers, shared constants/types, and Identity Audit support components is in progress; see `docs/reference/refactor-notes.md`
 - backend OAuth endpoints
 - backend token exchange and session storage
@@ -162,7 +167,8 @@ Album-family candidate report review:
 - `raw_spotify_history`
   - stores source-faithful extended-history observations and timing/completion fields
 - `fact_play_event`
-  - stores canonical play-event fields with source precedence applied
+  - stores canonical music play-event fields with source precedence applied
+  - excludes Spotify podcast episodes and unidentifiable non-track history rows
 - `fact_play_event_recent_link`
   - canonical-to-recent provenance link table
 - `fact_play_event_history_link`

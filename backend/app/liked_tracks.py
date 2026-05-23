@@ -9,6 +9,7 @@ import httpx
 from fastapi import HTTPException, status
 
 from backend.app.db import sqlite_connection
+from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata
 from backend.app.spotify_http import _spotify_get
 
 LIKED_TRACK_SYNC_KEY = "spotify_liked_tracks"
@@ -442,7 +443,7 @@ def list_cached_liked_tracks(user_id: str, *, limit: int = 50, offset: int = 0, 
             }
         )
     return {
-        "items": items,
+        "items": enrich_track_rows_with_release_metadata(items),
         "has_more": has_more,
         "limit": bounded_limit,
         "offset": bounded_offset,

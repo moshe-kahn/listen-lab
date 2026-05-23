@@ -79,7 +79,7 @@ from backend.app.recent_tracks_db import (
     map_recent_track_row_to_canonical_item,
     query_recent_track_rows,
 )
-from backend.app.release_track_metadata import release_track_metadata_for_spotify_ids
+from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata, release_track_metadata_for_spotify_ids
 from backend.app.routes.admin_routes import router as admin_router
 from backend.app.routes.auth_routes import router as auth_router
 from backend.app.routes.audit_routes import router as identity_audit_router
@@ -209,6 +209,16 @@ def _normalize_recent_track_item_for_route(item: dict[str, Any]) -> dict[str, An
 
 def _normalize_recent_tracks_payload_for_route(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [_normalize_recent_track_item_for_route(item) for item in items]
+
+
+def _enrich_profile_track_payload_sections(payload: dict[str, Any]) -> dict[str, Any]:
+    for key in ("top_tracks", "recent_top_tracks", "recent_tracks", "recent_likes_tracks"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            payload[key] = enrich_track_rows_with_release_metadata([
+                item for item in items if isinstance(item, dict)
+            ])
+    return payload
 
 
 def _load_persistent_history_cache(
@@ -375,7 +385,7 @@ async def _fetch_recent_tracks(access_token: str, limit: int) -> tuple[list[dict
         )
 
     _save_static_metadata_cache(_load_static_metadata_cache())
-    return results, True
+    return enrich_track_rows_with_release_metadata(results), True
 
 
 async def _sync_recent_to_db_best_effort(
@@ -1729,7 +1739,7 @@ async def _fetch_top_tracks(access_token: str, time_range: str, limit: int) -> t
         raise
 
     tracks = payload.get("items") or []
-    normalized_tracks = [_normalize_track(track) for track in tracks]
+    normalized_tracks = enrich_track_rows_with_release_metadata([_normalize_track(track) for track in tracks])
     for track in normalized_tracks:
         _remember_track_metadata(track)
     _save_static_metadata_cache(_load_static_metadata_cache())
@@ -1996,7 +2006,7 @@ def _build_local_profile_payload(
     if top_playlists_available:
         stale_sections.append("top_playlists")
 
-    return {
+    payload = {
         "id": "local-history",
         "display_name": display_name or "Local History",
         "email": email,
@@ -2042,6 +2052,7 @@ def _build_local_profile_payload(
         "stale_sections": stale_sections,
         "local_last_synced_at": local_last_synced_at,
     }
+    return _enrich_profile_track_payload_sections(payload)
 
 
 app.include_router(admin_router)
@@ -2515,6 +2526,7 @@ async def me_recent(
             "recent_likes_tracks": recent_likes_tracks,
             "recent_likes_available": recent_likes_available,
         }
+        payload = _enrich_profile_track_payload_sections(payload)
         _store_user_recent_snapshot(user_id, recent_range, payload)
         _store_user_profile_snapshot(
             user_id,
@@ -2605,6 +2617,7 @@ async def _build_legacy_recent_payload_for_debug(
         "recent_likes_tracks": recent_likes_tracks,
         "recent_likes_available": recent_likes_available,
     }
+    payload = _enrich_profile_track_payload_sections(payload)
     _store_user_recent_snapshot(user_id, recent_range, payload)
     _store_user_profile_snapshot(
         user_id,
@@ -3343,6 +3356,7 @@ async def me(
                 "recent_likes_tracks": [],
                 "recent_likes_available": False,
             }
+            payload = _enrich_profile_track_payload_sections(payload)
             _store_user_profile_snapshot(
                 user_id,
                 {
@@ -3762,6 +3776,7 @@ async def me(
             "recent_likes_tracks": recent_likes_tracks,
             "recent_likes_available": recent_likes_available,
         }
+        payload = _enrich_profile_track_payload_sections(payload)
         _store_user_profile_snapshot(
             user_id,
             {

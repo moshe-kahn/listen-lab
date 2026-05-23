@@ -111,7 +111,11 @@ class MergedTrackAggregateTests(unittest.TestCase):
         reconcile_fact_play_events_for_ingest_run(source_type="spotify_recent", run_id=recent_run)
         reconcile_fact_play_events_for_ingest_run(source_type="export", run_id=history_run)
 
-        items = list_merged_track_aggregate(limit=10, recent_window_days=28)
+        items = get_merged_track_aggregate(
+            limit=10,
+            recent_window_days=28,
+            as_of_iso="2026-04-20T12:00:00Z",
+        )["items"]
         by_id = {item["track_id"]: item for item in items}
 
         self.assertEqual("recent", by_id["track-recent"]["source_label"])
@@ -171,7 +175,7 @@ class MergedTrackAggregateTests(unittest.TestCase):
         self.assertEqual(["track-recent-only"], [item["track_id"] for item in recent_items])
         self.assertEqual(["track-history-only"], [item["track_id"] for item in history_items])
 
-    def test_unknown_identity_rows_are_excluded_but_counted(self) -> None:
+    def test_unknown_identity_history_rows_are_not_projected(self) -> None:
         history_run = "history-run-3"
         insert_ingest_run(run_id=history_run, source_type="export", started_at="2026-04-20T12:00:00Z", source_ref="test")
 
@@ -200,12 +204,13 @@ class MergedTrackAggregateTests(unittest.TestCase):
             album_name_raw="Known Album",
         )
 
-        reconcile_fact_play_events_for_ingest_run(source_type="export", run_id=history_run)
+        summary = reconcile_fact_play_events_for_ingest_run(source_type="export", run_id=history_run)
 
         result = get_merged_track_aggregate(limit=10)
 
+        self.assertEqual(1, summary["skipped_history_unidentifiable_count"])
         self.assertEqual(["known-track"], [item["track_id"] for item in result["items"]])
-        self.assertEqual(1, result["excluded_unknown_identity_count"])
+        self.assertEqual(0, result["excluded_unknown_identity_count"])
 
 
 if __name__ == "__main__":
