@@ -1052,6 +1052,14 @@ export type PreviewItem = {
   trackId?: string | null;
   albumId?: string | null;
   artistName?: string | null;
+  artists?: Array<{
+    artist_id?: string | null;
+    id?: string | null;
+    name?: string | null;
+    uri?: string | null;
+    url?: string | null;
+    image_url?: string | null;
+  }> | null;
   sourceTrack?: RecentTrack | null;
 };
 
@@ -1150,6 +1158,7 @@ export type PlayerQueueTrack = PlayerTrackSummary & {
   albumId: string | null;
   isLiked?: boolean | null;
   likedAt?: string | null;
+  artistItems?: RecentTrack["artists"];
 };
 
 export type SpotifyPlayerState = {

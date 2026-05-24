@@ -2882,6 +2882,27 @@ h1 {
   gap: 7px;
 }
 
+.player-menu-artist-list {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.player-menu-artist-link-wrap {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.player-menu-artist-list .player-menu-meta-button {
+  width: auto;
+}
+
+.player-menu-artist-separator {
+  color: rgba(223, 248, 232, 0.72);
+}
+
 .player-menu-artist-image {
   width: 22px;
   height: 22px;
@@ -3457,6 +3478,14 @@ h1 {
 
 .detail-modal-inline-link:hover {
   color: #7dffac;
+}
+
+.detail-modal-artist-links {
+  display: inline;
+}
+
+.detail-modal-artist-separator {
+  color: rgba(223, 248, 232, 0.72);
 }
 
 .detail-modal-badge {

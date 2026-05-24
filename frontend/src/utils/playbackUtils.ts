@@ -186,6 +186,7 @@ export function recentTracksToPlayerQueueTracks(tracks: RecentTrack[]): PlayerQu
       durationMs: Math.max(0, Number(track.duration_ms ?? 0)),
       trackId: track.track_id ?? spotifyTrackIdFromUri(uri),
       albumId: track.album_id ?? null,
+      artistItems: track.artists ?? null,
       isLiked: track.is_liked ?? (track.source_label === "liked_cache" ? true : null),
       likedAt: track.liked_at ?? null,
     };
