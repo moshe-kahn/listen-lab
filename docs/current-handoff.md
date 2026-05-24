@@ -4,12 +4,10 @@
 Start here in a new chat, then open only the docs relevant to the requested task.
 
 Recommended topic docs:
-- `docs/reference/raw-ingest.md` for raw recent/history ingest, canonical play-event projection, and the music-only fact boundary.
-- `docs/reference/drafts/entity-model-draft.md` for source/release/analysis track identity.
-- `docs/reference/source-track-resolution-policy.md` for source-track/release-track/Track Family review policy.
-- `docs/reference/spotify-catalog-backfill.md` for catalog enrichment and backfill invariants.
 - `docs/reference/refactor-notes.md` for frontend/playback refactor and route extraction notes.
-- `docs/reference/drafts/identity-audit-submission-contract.md` only when working on saved track-audit submissions.
+- `docs/reference/spotify-catalog-backfill.md` for cached Spotify catalog and album tracklist behavior.
+- `docs/reference/raw-ingest.md` for raw recent/history ingest and canonical play-event projection.
+- `docs/reference/source-track-resolution-policy.md` for source-track/release-track identity.
 - `docs/reference/album-family-review-policy.md` only when working on album-family candidate review.
 
 Avoid reading every doc by default.
@@ -21,139 +19,100 @@ Latest committed baseline before this handoff update:
 - `af2ebf8` `Add liked-track cache sync and refine playback queue UI`
 
 Current uncommitted scope is ready to commit:
-- release-track identity enrichment across backend payloads
-- release-track-aware liked-star checks in frontend
-- Activity/Listened release-track coverage audit endpoint
-- automatic release-track identity creation during play-event projection
-- one-time local cleanup/backfill of missing release-track identities
-- music-only fact boundary for history projection, preserving raw podcast/unidentifiable history rows but excluding them from `fact_play_event`
+- artist album evidence backend endpoint
+- artist overlay album/appears-on rendering from backend evidence
+- album and track overlay artist splitting
+- album tracklist `With` column and artist highlight behavior
+- path updates in release-album validation docs
 
 Known local processes:
-- No new long-running dev server was started by Codex for this scope.
+- No long-running dev server was started by Codex for this scope.
 
 ## Work Completed
-Release-track payload identity:
-- Added `release_track_id`, `release_track_name`, `release_track_source_count`, and `has_release_track_siblings` to track-like payloads where mapping is available.
-- Enrichment is shared through `backend/app/release_track_metadata.py`.
-- Payloads touched include recent/listened rows, liked-cache rows, top/all-time rows, album track rows, player/current playback rows, and local `/me` payload sections.
-- Existing Spotify track IDs and playback URIs remain in payloads for playback/version identity.
+Backend artist album evidence:
+- Added `backend/app/artist_album_evidence.py`.
+- Added `GET /auth/artist-albums` in `backend/app/routes/playback_routes.py`.
+- Endpoint accepts repeated `artist_names` query params plus optional `source_album_id` and `source_album_name`.
+- Endpoint is read-only and uses cached `spotify_album_catalog` / `spotify_album_track` data.
+- Single artist response classifies albums as `album`, `appears_on`, or `unknown`.
+- Shared artist response includes only albums where all selected artists are supported by album or track evidence.
+- Source album sorting is supported by album id or normalized album name.
+- Raw SQL errors are hidden behind a generic route error.
 
-Release-track-aware liked state:
-- Frontend liked checks now prefer `release_track_id` and fall back to Spotify track ID.
-- If any accepted Spotify source under a release track is liked, sibling rows display as liked.
-- No Activity grouping, liked-cache semantic grouping, play-count aggregation, or ranking formula changes were made.
+Frontend artist overlay:
+- Added typed frontend API wrapper `fetchArtistAlbumEvidence`.
+- Artist overlay now calls `/auth/artist-albums` and falls back to the older local/profile-derived list if the request fails.
+- Single artist pages split backend evidence into `Albums` and `Appears on`.
+- Shared artist pages render one combined album list.
+- Empty album sections do not render headings or empty text.
+- Source album is highlighted when provided.
 
-Activity/Listened coverage audit:
-- Added read-only endpoint:
-  - `GET /debug/activity/release-track-coverage?activity_limit=50&backing_limit=1000&sample_limit=5`
-- The audit reports visible Activity coverage and backing play-event coverage, sibling groups that would collapse, missing examples, and suspicious groups.
-- After cleanup, local sample coverage is:
-  - visible Activity sample: `50/50` release-track mapped
-  - backing 1,000 music fact sample: `1000/1000` release-track mapped
+Album and track overlay artist behavior:
+- Album overlay title shows year inline.
+- Album overlay summary shows track count and album runtime once tracks are loaded.
+- Album main artists are derived from loaded track evidence: artists on a majority of album tracks are treated as main; otherwise the album metadata artists are used as fallback.
+- Guest/sub-artists are shown in a top `with ...` list and in each row's `With` column.
+- Hover/focus on the top `with ...` list delays briefly, highlights matching track rows, and scrolls the first matching row into view when needed.
+- Hovering the row-level `With` column does not highlight; those row artists remain clickable.
+- Clicking a row-level `With` artist opens a shared artist page for the derived album main artist(s) plus that guest.
+- Track overlay artist display now shows album-main artist(s) first and then `with ...` for other artists on that track.
+- Track-view album headings include source album year when available.
 
-Automatic identity creation:
-- `backend/app/play_event_projector.py` now ensures release-track identity while projecting music facts.
-- If `spotify_track_id` exists, projection creates/reuses exact Spotify provider identity:
-  - `source_track.source_name = 'spotify'`
-  - accepted `source_track_map`
-  - linked `release_track`
-- If no Spotify track ID exists but track text exists, projection uses the existing local `history_raw` text fallback path.
-- Backend enrichment can now resolve no-Spotify-ID rows through the same `history_raw` key.
-
-Local cleanup/backfill already run:
-- `backfill_fact_play_event_release_track_identity()` scanned `76,113` projected play events.
-- It created:
-  - `96` release tracks
-  - `96` source tracks
-  - `96` track maps
-- It found `0` scannable music facts without identity after the run.
-
-Music-only fact boundary:
-- Raw Spotify history remains source-faithful and preserves podcast/unidentifiable rows.
-- `fact_play_event` is now treated as the music fact table.
-- History projection skips rows when:
-  - `spotify_episode_uri` is present, or
-  - there is no Spotify track ID, no Spotify track URI, and no raw track name.
-- Local cleanup already removed derived non-music facts while preserving raw rows:
-  - raw podcast episode rows preserved: `390`
-  - projected podcast facts now: `0`
-  - projected unidentifiable history facts now: `0`
-  - fact rows with no music identity now: `0`
+Other frontend cleanup in this uncommitted scope:
+- Removed representative artist/album song UI helpers/types from the frontend surface that no longer uses them.
+- Homepage activity collapsed album art now suppresses duplicate album covers across the collapsed set.
+- Album track rows reserve highlight space and share grid variables between header and rows to reduce table drift.
 
 ## Files Changed
 Backend:
-- `backend/app/activity_release_track_audit.py`
-- `backend/app/liked_tracks.py`
-- `backend/app/main.py`
-- `backend/app/merged_track_aggregate.py`
-- `backend/app/play_event_projector.py`
-- `backend/app/recent_top_tracks_db.py`
-- `backend/app/recent_tracks_db.py`
-- `backend/app/release_track_metadata.py`
-- `backend/app/routes/admin_routes.py`
-- `backend/app/spotify_current_playback.py`
-- `backend/app/track_sections.py`
+- `backend/app/artist_album_evidence.py`
+- `backend/app/routes/playback_routes.py`
 
 Frontend:
 - `frontend/src/App.tsx`
-- `frontend/src/components/dashboard/DashboardTrackColumn.tsx`
+- `frontend/src/api/appApi.ts`
+- `frontend/src/styles.css`
 - `frontend/src/types/appTypes.ts`
-- `frontend/src/utils/playbackUtils.ts`
+- `frontend/src/utils/dashboardUtils.ts`
 
 Tests/docs:
-- `backend/tests/test_merged_track_aggregate.py`
-- `backend/tests/test_play_event_projection.py`
+- `backend/tests/test_artist_album_evidence.py`
 - `docs/current-handoff.md`
-- relevant overview/reference docs updated for this scope
+- `docs/reference/release-album-merge-validation.md`
+- `docs/reference/refactor-notes.md`
 
 ## Verification
-Passed:
-- `python3 -m py_compile backend/app/play_event_projector.py backend/app/activity_release_track_audit.py backend/tests/test_play_event_projection.py backend/tests/test_merged_track_aggregate.py`
-- `python3 -m unittest backend.tests.test_liked_tracks backend.tests.test_recent_top_tracks_db backend.tests.test_merged_track_aggregate backend.tests.test_play_event_projection`
+Passed during this scope:
+- `./.venv/bin/python -m unittest backend.tests.test_artist_album_evidence`
+- `./.venv/bin/python -m py_compile backend/app/artist_album_evidence.py backend/app/routes/playback_routes.py`
 - `npm run build --prefix frontend`
 - `git diff --check`
 
-Manual/database checks:
-- Release-track identity backfill created `96` missing mappings.
-- Activity release-track audit now reports `100%` coverage for both visible Activity sample and backing music fact sample.
-- Raw podcast rows remain in `raw_spotify_history`; no podcast rows remain projected into `fact_play_event`.
+Manual/data checks:
+- Local cached catalog has examples for co-main artists plus guests:
+  - `TajMo`: `Taj Mahal` and `Keb' Mo'` on `11/11`, guest `Lizz Wright` on `1/11`.
+  - `Hymne au soleil`: `Laurent Bardainne` and `Tigre d'Eau Douce` on `11/11`, guests `Celia Wa` and `Bertrand Belin` on `1/11`.
 
 Not fully verified:
-- Browser QA of release-track-aware liked stars after the latest backend cleanup.
-- Browser QA of Activity layout after future grouping, because grouping has not been implemented yet.
+- Browser visual QA for the album tracklist grid alignment after the latest CSS changes.
+- Live OAuth/session request check for `/auth/artist-albums` in the browser network panel.
 
 ## Recommended Next Task
-Phase 3: group Activity `Listened` display rows by `release_track_id`.
+Start a fresh chat before the next feature task to reduce context noise.
 
-Implementation plan:
-1. Group only Activity/Listened display rows, not raw play-event history.
-2. Use `release_track_id` as the preferred grouping key.
-3. Fallback to Spotify track ID, then existing normalized title/artist behavior only when release identity is missing.
-4. Preserve event/play counts by summing grouped rows.
-5. Use latest play as the representative row for display and playback.
-6. Keep playback on concrete Spotify track ID/URI.
-7. Add focused tests for grouping, fallback, count preservation, and latest-play representative selection.
-
-Do not bundle this with Activity `Liked` grouping. Keep `Liked` as Phase 4.
-
-## Future Follow-Up After Current Project
-Explore sibling/family album artwork near the home playback album-art expansion.
-
-Do not implement this as a frontend-only guess. First add a read-only backend/debug helper that, given a Spotify track ID or `release_track_id`, returns related album appearances:
-- exact release-track siblings first
-- then Track Family / `analysis_track` related songs if available
-- album art, album name, source track ID/URI, and relationship reason
-- duplicate album-art suppression
-- playable representative Spotify URI when available
-
-After inspecting real payloads, design a small album-art strip beside the current playback album art. Clicking an item should have explicit behavior: inspect/switch expanded album, not silently mutate playback.
+First suggested follow-up:
+1. Run the app.
+2. Open `Next to Nothing Remixed`.
+3. Verify the album header treats only majority-track artists as main.
+4. Verify the row `With` clicks open shared artist pages.
+5. Inspect the album tracklist grid in browser devtools if any column drift remains.
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.
 - Do not merge to `main` unless explicitly requested.
 - Keep `frontend-app-refactor` as the integration baseline.
-- Raw history is source-faithful. Do not delete podcast rows from `raw_spotify_history`; exclude them only from music facts/queries unless building podcast features.
-- Do not implement release-track grouping as frontend title/artist guessing. Backend owns identity mapping.
+- Do not make frontend-only identity guesses when backend catalog or identity evidence is available.
+- Keep `/auth/artist-albums` read-only; do not add merge/promotion/write behavior there.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Documents/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest completed scope adds release-track identity payload enrichment, release-track-aware liked stars, Activity release-track coverage audit, automatic release-track identity creation during music fact projection, local identity backfill, and music-only fact cleanup that preserves raw podcast history but removes podcast/unidentifiable rows from `fact_play_event`. Verification passed with targeted backend tests, py_compile, frontend build, and `git diff --check`. Recommended next task: Phase 3, group Activity `Listened` display rows by `release_track_id`.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest completed scope adds read-only `/auth/artist-albums`, frontend artist overlay backend evidence, single/shared artist album rendering, album/track artist main-vs-with splitting, album row `With` behavior, delayed top guest hover highlighting, and docs updates. Verification passed with `backend.tests.test_artist_album_evidence`, `py_compile`, `npm run build --prefix frontend`, and `git diff --check`. Recommended next task: fresh browser QA of `Next to Nothing Remixed` album/track overlays and table alignment.

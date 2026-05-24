@@ -3,6 +3,7 @@ import type {
   SessionResponse,
   ProfileProgressResponse,
   RecentTrack,
+  ArtistAlbumEvidenceItem,
   MatchCounts,
   TopPlaylist,
   ProfileResponse,
@@ -74,7 +75,6 @@ import type {
   SectionKey,
   DashboardListCardProps,
   PreviewItem,
-  RepresentativePreviewResponse,
   AuthTokenResponse,
   RecentIngestResultResponse,
   RecentBeforeProbeResponse,
@@ -133,6 +133,7 @@ import {
   fetchIdentityAuditSavedSubmissionById,
   fetchIdentityAuditSavedSubmissionDryRun,
   fetchAllLikedTracks,
+  fetchArtistAlbumEvidence,
   fetchReleaseTrackMetadata,
   postLikedTracksSync
 } from "./api/appApi";
@@ -211,12 +212,24 @@ import {
   previewItems,
   primaryArtistName,
   recentRangeLabel,
-  representativeReasonMessage,
   trackLookupRowCanBulkPrioritize,
 } from "./utils/dashboardUtils";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 type TrackArtistEntry = NonNullable<RecentTrack["artists"]>[number];
+type ArtistAlbumEntry = {
+  albumId: string | null;
+  name: string;
+  artistName: string | null;
+  imageUrl: string | null;
+  url: string;
+  releaseYear: string | null;
+  trackCount: number | null;
+  source: "album" | "track";
+  isHighlighted: boolean;
+  relationship?: "album" | "appears_on" | "unknown";
+  evidence?: string | null;
+};
 
 function artistEntriesFromText(value: string | null | undefined): TrackArtistEntry[] {
   return String(value ?? "")
@@ -228,7 +241,8 @@ function artistEntriesFromText(value: string | null | undefined): TrackArtistEnt
 
 function uniqueArtistEntries(...groups: Array<RecentTrack["artists"] | null | undefined>): TrackArtistEntry[] {
   const entries: TrackArtistEntry[] = [];
-  const seen = new Set<string>();
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
   for (const group of groups) {
     for (const artist of group ?? []) {
       const name = artist?.name?.trim() ?? "";
@@ -236,15 +250,43 @@ function uniqueArtistEntries(...groups: Array<RecentTrack["artists"] | null | un
       if (!name && !artistId) {
         continue;
       }
-      const key = artistId ? `id:${artistId}` : `name:${name.toLocaleLowerCase()}`;
-      if (seen.has(key)) {
+      const nameKey = name.toLocaleLowerCase();
+      if ((artistId && seenIds.has(artistId)) || (nameKey && seenNames.has(nameKey))) {
         continue;
       }
-      seen.add(key);
+      if (artistId) {
+        seenIds.add(artistId);
+      }
+      if (nameKey) {
+        seenNames.add(nameKey);
+      }
       entries.push(artist);
     }
   }
   return entries;
+}
+
+function artistNameMatches(candidate: string | null | undefined, target: string | null | undefined) {
+  const normalizedTarget = target?.trim().toLocaleLowerCase();
+  if (!normalizedTarget) {
+    return false;
+  }
+  return String(candidate ?? "")
+    .split(",")
+    .map((name) => name.trim().toLocaleLowerCase())
+    .some((name) => name === normalizedTarget);
+}
+
+function collaboratorLabel(artistNames: string | null | undefined, selectedArtistName: string | null | undefined) {
+  const selectedKey = selectedArtistName?.trim().toLocaleLowerCase();
+  if (!selectedKey) {
+    return null;
+  }
+  const collaborators = String(artistNames ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name && name.toLocaleLowerCase() !== selectedKey);
+  return collaborators.length > 0 ? `with ${collaborators.join(", ")}` : null;
 }
 
 declare global {
@@ -298,16 +340,15 @@ export function App() {
   const [playerMenuOpen, setPlayerMenuOpen] = useState(false);
   const [rateLimitMenuOpen, setRateLimitMenuOpen] = useState(false);
   const [selectedPreview, setSelectedPreview] = useState<PreviewItem | null>(null);
+  const [artistAlbumEvidenceItems, setArtistAlbumEvidenceItems] = useState<ArtistAlbumEvidenceItem[] | null>(null);
   const [albumTrackEntries, setAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [albumTrackEntriesLoading, setAlbumTrackEntriesLoading] = useState(false);
   const [albumTrackEntriesError, setAlbumTrackEntriesError] = useState<string | null>(null);
+  const [hoveredAlbumWithArtistName, setHoveredAlbumWithArtistName] = useState<string | null>(null);
   const [homeAlbumExpanded, setHomeAlbumExpanded] = useState(false);
   const [homeAlbumTrackEntries, setHomeAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [homeAlbumTrackEntriesLoading, setHomeAlbumTrackEntriesLoading] = useState(false);
   const [homeAlbumTrackEntriesError, setHomeAlbumTrackEntriesError] = useState<string | null>(null);
-  const [representativeTrack, setRepresentativeTrack] = useState<RecentTrack | null>(null);
-  const [representativeLoading, setRepresentativeLoading] = useState(false);
-  const [representativeReason, setRepresentativeReason] = useState<string | null>(null);
   const [playerReady, setPlayerReady] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [playerRecentTracks, setPlayerRecentTracks] = useState<RecentTrack[]>([]);
@@ -550,6 +591,8 @@ export function App() {
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const loadedHomeAlbumTracksAlbumIdRef = useRef<string | null>(null);
+  const albumTrackListRef = useRef<HTMLUListElement | null>(null);
+  const albumWithHoverDelayRef = useRef<number | null>(null);
   const trackMappingLineageRequestIdRef = useRef(0);
   const playbackPositionMsRef = useRef(0);
   const autoAdvanceTrackUriRef = useRef<string | null>(null);
@@ -690,14 +733,22 @@ export function App() {
     }
     return Boolean(track.trackId && likedTrackIdsForDisplay.has(track.trackId));
   };
-  const selectedPreviewArtists = selectedPreview?.kind === "track"
-    ? uniqueArtistEntries(
-      selectedPreview.artists,
-      selectedPreview.sourceTrack?.artists,
-      artistEntriesFromText(selectedPreview.artistName ?? selectedPreview.meta),
+  const selectedPreviewArtists = selectedPreview?.kind === "artist"
+    ? (
+      selectedPreview.targetArtists?.length
+        ? uniqueArtistEntries(selectedPreview.targetArtists)
+        : selectedPreview.artists?.length
+          ? uniqueArtistEntries(selectedPreview.artists)
+        : uniqueArtistEntries(artistEntriesFromText(selectedPreview.artistName ?? selectedPreview.label))
     )
-    : [];
-  const selectedPreviewPrimaryArtistName = selectedPreview?.kind === "track"
+    : selectedPreview?.kind === "track" || selectedPreview?.kind === "album"
+      ? uniqueArtistEntries(
+        selectedPreview.artists,
+        selectedPreview.sourceTrack?.artists,
+        artistEntriesFromText(selectedPreview.artistName ?? selectedPreview.meta),
+      )
+      : [];
+  const selectedPreviewPrimaryArtistName = selectedPreview?.kind === "track" || selectedPreview?.kind === "album" || selectedPreview?.kind === "artist"
     ? (
       selectedPreviewArtists[0]?.name
       ?? firstArtistFromRecentTrack(selectedPreview.sourceTrack)?.name
@@ -706,16 +757,99 @@ export function App() {
       ?? null
     )
     : null;
-  const selectedPreviewPrimaryArtist = selectedPreview?.kind === "track"
+  const selectedPreviewPrimaryArtist = selectedPreview?.kind === "track" || selectedPreview?.kind === "album" || selectedPreview?.kind === "artist"
     ? (selectedPreviewArtists[0] ?? firstArtistFromRecentTrack(selectedPreview.sourceTrack))
     : null;
-  const selectedPreviewArtistImageUrl = selectedPreview && selectedPreview.kind === "track"
+  const selectedPreviewAlbumTrackCount = selectedPreview?.kind === "album" && albumTrackEntries.length > 0
+    ? albumTrackEntries.length
+    : null;
+  const selectedPreviewAlbumDurationMs = selectedPreview?.kind === "album"
+    ? albumTrackEntries.reduce((total, track) => total + Math.max(0, track.durationMs ?? 0), 0)
+    : 0;
+  const selectedPreviewAlbumSummary = selectedPreview?.kind === "album"
+    ? [
+      selectedPreviewAlbumTrackCount != null ? `${selectedPreviewAlbumTrackCount} tracks` : null,
+      selectedPreviewAlbumDurationMs > 0 ? formatDurationMs(selectedPreviewAlbumDurationMs) : null,
+    ].filter(Boolean).join(" | ")
+    : null;
+  const selectedPreviewAlbumMainArtists = useMemo<TrackArtistEntry[]>(() => {
+    if (selectedPreview?.kind !== "album" && selectedPreview?.kind !== "track") {
+      return [];
+    }
+    const baseArtists = selectedPreview.kind === "album" ? selectedPreviewArtists : [];
+    if (albumTrackEntries.length === 0) {
+      return baseArtists;
+    }
+    const artistCounts = new Map<string, { artist: TrackArtistEntry; count: number }>();
+    for (const track of albumTrackEntries) {
+      for (const artist of uniqueArtistEntries(artistEntriesFromText(track.artistName))) {
+        const artistName = artist.name?.trim();
+        if (!artistName) {
+          continue;
+        }
+        const key = artistName.toLocaleLowerCase();
+        const current = artistCounts.get(key);
+        artistCounts.set(key, { artist: current?.artist ?? artist, count: (current?.count ?? 0) + 1 });
+      }
+    }
+    const majorityArtists = [...artistCounts.values()]
+      .filter((entry) => entry.count > albumTrackEntries.length / 2)
+      .map((entry) => entry.artist);
+    return majorityArtists.length > 0 ? uniqueArtistEntries(majorityArtists) : baseArtists;
+  }, [albumTrackEntries, selectedPreview, selectedPreviewArtists]);
+  const selectedPreviewAlbumGuestArtists = useMemo<TrackArtistEntry[]>(() => {
+    if (selectedPreview?.kind !== "album" && selectedPreview?.kind !== "track") {
+      return [];
+    }
+    const primaryNames = new Set(
+      selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
+    );
+    const guestArtists = albumTrackEntries.flatMap((track) => artistEntriesFromText(track.artistName));
+    return uniqueArtistEntries(guestArtists).filter((artist) => {
+      const artistName = artist.name?.trim().toLocaleLowerCase();
+      return Boolean(artistName && !primaryNames.has(artistName));
+    });
+  }, [albumTrackEntries, selectedPreview, selectedPreviewAlbumMainArtists]);
+  const selectedPreviewTrackMainArtists = useMemo<TrackArtistEntry[]>(() => {
+    if (selectedPreview?.kind !== "track") {
+      return [];
+    }
+    const mainNames = new Set(
+      selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
+    );
+    const matchingArtists = selectedPreviewArtists.filter((artist) => {
+      const artistName = artist.name?.trim().toLocaleLowerCase();
+      return Boolean(artistName && mainNames.has(artistName));
+    });
+    return matchingArtists.length > 0 ? matchingArtists : selectedPreviewArtists.slice(0, 1);
+  }, [selectedPreview, selectedPreviewAlbumMainArtists, selectedPreviewArtists]);
+  const selectedPreviewTrackGuestArtists = useMemo<TrackArtistEntry[]>(() => {
+    if (selectedPreview?.kind !== "track") {
+      return [];
+    }
+    const mainNames = new Set(
+      selectedPreviewTrackMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
+    );
+    return selectedPreviewArtists.filter((artist) => {
+      const artistName = artist.name?.trim().toLocaleLowerCase();
+      return Boolean(artistName && !mainNames.has(artistName));
+    });
+  }, [selectedPreview, selectedPreviewArtists, selectedPreviewTrackMainArtists]);
+  const selectedPreviewArtistImageUrl = selectedPreview && (selectedPreview.kind === "track" || selectedPreview.kind === "album" || selectedPreview.kind === "artist")
     ? (
       selectedPreviewPrimaryArtist?.image_url
       ?? findArtistImageUrl(selectedPreviewPrimaryArtistName ?? selectedPreview.artistName ?? selectedPreview.meta)
     )
     : null;
-  const selectedPreviewCanOpenArtist = selectedPreview?.kind === "track" && selectedPreviewArtists.length > 0;
+  const selectedPreviewCanOpenArtist = (selectedPreview?.kind === "track" || selectedPreview?.kind === "album") && selectedPreviewArtists.length > 0;
+  const selectedPreviewIsSharedArtistPage = selectedPreview?.kind === "artist" && selectedPreviewArtists.length > 1;
+  const selectedPreviewArtistAlbumRequestKey = selectedPreview?.kind === "artist"
+    ? JSON.stringify({
+      artistNames: selectedPreviewArtists.map((artist) => artist.name?.trim()).filter(Boolean),
+      sourceAlbumId: selectedPreview.sourceAlbumId ?? selectedPreview.sourceTrack?.album_id ?? null,
+      sourceAlbumName: selectedPreview.sourceAlbumName ?? selectedPreview.sourceTrack?.album_name ?? null,
+    })
+    : null;
   const selectedPreviewCanOpenAlbum = Boolean(
     selectedPreview?.kind === "track"
     && (selectedPreview.albumId || selectedPreview.sourceTrack?.album_id || selectedPreview.sourceTrack?.album_name || selectedPreview.detail),
@@ -770,6 +904,182 @@ export function App() {
     selectedPreview?.kind === "track"
     && recentTrackIsKnownLiked(selectedPreview.sourceTrack, selectedPreview.trackId),
   );
+  const knownPlayerTracks = profile
+    ? [
+      ...(profile.recent_tracks ?? []),
+      ...(profile.top_tracks ?? []),
+      ...(profile.recent_top_tracks ?? []),
+      ...(profile.recent_likes_tracks ?? []),
+    ]
+    : [];
+  useEffect(() => {
+    if (!selectedPreviewArtistAlbumRequestKey || selectedPreview?.kind !== "artist") {
+      setArtistAlbumEvidenceItems(null);
+      return;
+    }
+    const artistNames = selectedPreviewArtists
+      .map((artist) => artist.name?.trim())
+      .filter((name): name is string => Boolean(name));
+    if (artistNames.length === 0) {
+      setArtistAlbumEvidenceItems(null);
+      return;
+    }
+    let cancelled = false;
+    fetchArtistAlbumEvidence(
+      artistNames,
+      selectedPreview.sourceAlbumId ?? selectedPreview.sourceTrack?.album_id ?? null,
+      selectedPreview.sourceAlbumName ?? selectedPreview.sourceTrack?.album_name ?? null,
+    )
+      .then((payload) => {
+        if (!cancelled) {
+          setArtistAlbumEvidenceItems(payload.items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setArtistAlbumEvidenceItems(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPreviewArtistAlbumRequestKey, selectedPreview]);
+  const selectedPreviewArtistAlbums = useMemo<ArtistAlbumEntry[]>(() => {
+    if (!profile || selectedPreview?.kind !== "artist") {
+      return [];
+    }
+    const targetArtistNames = uniqueArtistEntries(
+      selectedPreview.targetArtists,
+      selectedPreview.artists,
+      artistEntriesFromText((selectedPreview.targetArtists?.length || selectedPreview.artists?.length) ? selectedPreview.artistName : selectedPreview.artistName ?? selectedPreview.label),
+    ).map((artist) => artist.name).filter(Boolean);
+    const artistMatchesAllTargets = (candidate: string | null | undefined) => (
+      targetArtistNames.length > 0 && targetArtistNames.every((targetName) => artistNameMatches(candidate, targetName))
+    );
+    const highlightedAlbumId = selectedPreview.sourceAlbumId ?? selectedPreview.sourceTrack?.album_id ?? null;
+    const highlightedAlbumName = selectedPreview.sourceAlbumName ?? selectedPreview.sourceTrack?.album_name ?? null;
+    const albumEntries = new Map<string, ArtistAlbumEntry>();
+    const appendAlbum = (entry: Omit<ArtistAlbumEntry, "isHighlighted">) => {
+      if (!entry.name.trim()) {
+        return;
+      }
+      const key = entry.albumId ? `id:${entry.albumId}` : `name:${entry.name.trim().toLocaleLowerCase()}::${entry.artistName?.trim().toLocaleLowerCase() ?? ""}`;
+      const existing = albumEntries.get(key);
+      const isHighlighted = Boolean(
+        (highlightedAlbumId && entry.albumId && highlightedAlbumId === entry.albumId)
+        || (!highlightedAlbumId && highlightedAlbumName && entry.name.trim().toLocaleLowerCase() === highlightedAlbumName.trim().toLocaleLowerCase())
+      );
+      if (existing) {
+        albumEntries.set(key, {
+          ...existing,
+          imageUrl: existing.imageUrl ?? entry.imageUrl,
+          url: existing.url || entry.url,
+          releaseYear: existing.releaseYear ?? entry.releaseYear,
+          trackCount: existing.trackCount ?? entry.trackCount,
+          isHighlighted: existing.isHighlighted || isHighlighted,
+        });
+        return;
+      }
+      albumEntries.set(key, { ...entry, isHighlighted });
+    };
+
+    for (const album of [...(profile.top_albums ?? []), ...(profile.recent_top_albums ?? [])]) {
+      if (!artistMatchesAllTargets(album.artist_name)) {
+        continue;
+      }
+      appendAlbum({
+        albumId: album.album_id ?? null,
+        name: album.name ?? "Unknown album",
+        artistName: album.artist_name ?? null,
+        imageUrl: album.image_url ?? null,
+        url: album.url ?? "",
+        releaseYear: album.release_year ?? null,
+        trackCount: album.track_representation_count ?? null,
+        source: "album",
+      });
+    }
+
+    const knownTracksByAlbum = new Map<string, { representative: RecentTrack; artistNames: Set<string> }>();
+    for (const track of knownPlayerTracks) {
+      if (!track.album_name) {
+        continue;
+      }
+      const albumKey = track.album_id
+        ? `id:${track.album_id}`
+        : `name:${track.album_name.trim().toLocaleLowerCase()}`;
+      const group = knownTracksByAlbum.get(albumKey) ?? {
+        representative: track,
+        artistNames: new Set<string>(),
+      };
+      const trackArtists = uniqueArtistEntries(track.artists, artistEntriesFromText(track.artist_name));
+      for (const artist of trackArtists) {
+        const artistName = artist.name?.trim();
+        if (artistName) {
+          group.artistNames.add(artistName);
+        }
+      }
+      knownTracksByAlbum.set(albumKey, group);
+    }
+
+    for (const group of knownTracksByAlbum.values()) {
+      const track = group.representative;
+      const albumArtistNames = [...group.artistNames].join(", ");
+      if (!artistMatchesAllTargets(albumArtistNames)) {
+        continue;
+      }
+      appendAlbum({
+        albumId: track.album_id ?? null,
+        name: track.album_name ?? "Unknown album",
+        artistName: (albumArtistNames || track.artist_name) ?? null,
+        imageUrl: track.image_url ?? null,
+        url: track.album_url ?? spotifyEntityUrl("album", track.album_id),
+        releaseYear: track.album_release_year ?? null,
+        trackCount: null,
+        source: "track",
+      });
+    }
+
+    return [...albumEntries.values()].sort((left, right) => {
+      if (left.isHighlighted !== right.isHighlighted) {
+        return left.isHighlighted ? -1 : 1;
+      }
+      if (left.source !== right.source) {
+        return left.source === "album" ? -1 : 1;
+      }
+      return left.name.localeCompare(right.name);
+    });
+  }, [knownPlayerTracks, profile, selectedPreview]);
+  const backendSelectedPreviewArtistAlbums = useMemo<ArtistAlbumEntry[] | null>(() => {
+    if (!artistAlbumEvidenceItems || selectedPreview?.kind !== "artist") {
+      return null;
+    }
+    return artistAlbumEvidenceItems.map((item) => ({
+      albumId: item.album_id,
+      name: item.album_name,
+      artistName: item.album_artist_names.join(", ") || null,
+      imageUrl: item.image_url,
+      url: item.url ?? "",
+      releaseYear: item.release_year,
+      trackCount: item.total_tracks ?? item.cached_track_count ?? null,
+      source: item.relationship === "album" ? "album" : "track",
+      isHighlighted: Boolean(
+        (selectedPreview.sourceAlbumId && item.album_id && selectedPreview.sourceAlbumId === item.album_id)
+        || (
+          selectedPreview.sourceAlbumName
+          && item.album_name.trim().toLocaleLowerCase() === selectedPreview.sourceAlbumName.trim().toLocaleLowerCase()
+        )
+      ),
+      relationship: item.relationship,
+      evidence: item.evidence,
+    }));
+  }, [artistAlbumEvidenceItems, selectedPreview]);
+  const selectedPreviewArtistAlbumsForDisplay = backendSelectedPreviewArtistAlbums ?? selectedPreviewArtistAlbums;
+  const selectedPreviewPrimaryArtistAlbums = backendSelectedPreviewArtistAlbums && !selectedPreviewIsSharedArtistPage
+    ? backendSelectedPreviewArtistAlbums.filter((album) => album.relationship === "album")
+    : selectedPreviewArtistAlbumsForDisplay;
+  const selectedPreviewAppearsOnAlbums = backendSelectedPreviewArtistAlbums && !selectedPreviewIsSharedArtistPage
+    ? backendSelectedPreviewArtistAlbums.filter((album) => album.relationship === "appears_on" || album.relationship === "unknown")
+    : [];
   const selectedPreviewTrackOptimisticSummary: PlayerTrackSummary | null = selectedPreview?.kind === "track"
     ? {
       name: selectedPreview.label,
@@ -780,14 +1090,6 @@ export function App() {
       durationMs: selectedPreviewTrackBaseDurationMs ?? 0,
     }
     : null;
-  const knownPlayerTracks = profile
-    ? [
-      ...(profile.recent_tracks ?? []),
-      ...(profile.top_tracks ?? []),
-      ...(profile.recent_top_tracks ?? []),
-      ...(profile.recent_likes_tracks ?? []),
-    ]
-    : [];
   const playerDisplayTrackId = playerDisplayTrack ? spotifyTrackIdFromUri(playerDisplayTrack.uri) : null;
   const playerDisplayPrimaryArtistFromDisplay = primaryArtistName(playerDisplayTrack?.artists ?? null);
   const playerDisplayKnownTrack = playerDisplayTrack && knownPlayerTracks.length > 0
@@ -812,6 +1114,8 @@ export function App() {
     recentTrackIsKnownLiked(playerDisplayKnownTrack, playerDisplayTrackId),
   );
   const playerDisplayArtistName = playerDisplayArtist?.name ?? playerDisplayPrimaryArtistFromDisplay ?? null;
+  const playerDisplayArtistNames = playerDisplayArtists.map((artist) => artist.name?.trim()).filter(Boolean);
+  const playerDisplayArtistLabel = playerDisplayArtistNames.join(", ") || playerDisplayArtistName;
   const playerDisplayArtistId = playerDisplayArtist?.artist_id ?? playerDisplayArtist?.id ?? null;
   const playerDisplayArtistImageUrl = playerDisplayArtist?.image_url ?? (playerDisplayArtistName ? findArtistImageUrl(playerDisplayArtistName) : null);
   const playerDisplayAlbumName = playerDisplayKnownTrack?.album_name ?? playerDisplayTrack?.album ?? null;
@@ -1650,59 +1954,6 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    setRepresentativeTrack(null);
-    setRepresentativeLoading(false);
-    setRepresentativeReason(null);
-
-    if (experienceMode === "local" || !hasPremiumPlayback || !selectedPreview?.entityId || spotifyCooldownActive) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    if (selectedPreview.kind !== "artist" && selectedPreview.kind !== "album") {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    const activePreview = selectedPreview;
-
-    async function loadRepresentativeTrack() {
-      setRepresentativeLoading(true);
-      try {
-        const response = await fetch(
-          `${apiBaseUrl}/preview/representative?kind=${encodeURIComponent(activePreview.kind)}&spotify_id=${encodeURIComponent(activePreview.entityId ?? "")}`,
-          { credentials: "include" },
-        );
-        if (!response.ok) {
-          throw new Error("Failed to load representative track.");
-        }
-        const data = (await response.json()) as RepresentativePreviewResponse;
-        if (!cancelled) {
-          setRepresentativeTrack(data.track);
-          setRepresentativeReason(data.reason ?? null);
-        }
-      } catch {
-        if (!cancelled) {
-          setRepresentativeTrack(null);
-          setRepresentativeReason("request_failed");
-        }
-      } finally {
-        if (!cancelled) {
-          setRepresentativeLoading(false);
-        }
-      }
-    }
-
-    void loadRepresentativeTrack();
-    return () => {
-      cancelled = true;
-    };
-  }, [experienceMode, hasPremiumPlayback, selectedPreview, spotifyCooldownActive]);
-
-  useEffect(() => {
-    let cancelled = false;
 
     if (
       experienceMode === "local"
@@ -1826,6 +2077,32 @@ export function App() {
     setHomeAlbumTrackEntriesLoading(false);
     loadedHomeAlbumTracksAlbumIdRef.current = null;
   }, [playerDisplayTrack?.uri, playerDisplayAlbumId]);
+
+  useEffect(() => {
+    setHoveredAlbumWithArtistName(null);
+    if (albumWithHoverDelayRef.current != null) {
+      window.clearTimeout(albumWithHoverDelayRef.current);
+      albumWithHoverDelayRef.current = null;
+    }
+  }, [selectedPreview]);
+
+  useEffect(() => {
+    if (!hoveredAlbumWithArtistName || !albumTrackListRef.current) {
+      return;
+    }
+    const firstMatchIndex = albumTrackEntries.findIndex((track) => artistNameMatches(track.artistName, hoveredAlbumWithArtistName));
+    if (firstMatchIndex < 0) {
+      return;
+    }
+    const row = albumTrackListRef.current.children.item(firstMatchIndex);
+    row?.scrollIntoView({ block: "nearest" });
+  }, [albumTrackEntries, hoveredAlbumWithArtistName]);
+
+  useEffect(() => () => {
+    if (albumWithHoverDelayRef.current != null) {
+      window.clearTimeout(albumWithHoverDelayRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -2162,6 +2439,43 @@ export function App() {
       trackId: null,
       albumId: null,
       artistName,
+      artists: targetArtist ? [targetArtist] : artistEntriesFromText(artistName),
+      targetArtists: targetArtist ? [targetArtist] : artistEntriesFromText(artistName),
+      sourceAlbumId: playerDisplayAlbumId,
+      sourceAlbumName: playerDisplayAlbumName,
+      sourceAlbumImage: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+      sourceAlbumUrl: playerDisplayKnownTrack?.album_url ?? spotifyEntityUrl("album", playerDisplayAlbumId),
+      sourceAlbumYear: playerDisplayAlbumYear,
+      sourceTrack: playerDisplayKnownTrack ?? null,
+    });
+  }
+
+  function openPlayerArtistsDetails() {
+    if (playerDisplayArtists.length <= 1) {
+      openPlayerArtistDetails(playerDisplayArtists[0]);
+      return;
+    }
+    const artistLabel = playerDisplayArtistLabel ?? "Artists";
+    setSelectedPreview({
+      image: playerDisplayArtistImageUrl ?? playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+      fallbackLabel: "A",
+      label: artistLabel,
+      meta: null,
+      detail: null,
+      kind: "artist",
+      entityId: null,
+      trackUri: null,
+      url: "",
+      trackId: null,
+      albumId: null,
+      artistName: artistLabel,
+      artists: playerDisplayArtists,
+      targetArtists: playerDisplayArtists,
+      sourceAlbumId: playerDisplayAlbumId,
+      sourceAlbumName: playerDisplayAlbumName,
+      sourceAlbumImage: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+      sourceAlbumUrl: playerDisplayKnownTrack?.album_url ?? spotifyEntityUrl("album", playerDisplayAlbumId),
+      sourceAlbumYear: playerDisplayAlbumYear,
       sourceTrack: playerDisplayKnownTrack ?? null,
     });
   }
@@ -2184,6 +2498,12 @@ export function App() {
       trackId: null,
       albumId: playerDisplayAlbumId,
       artistName: playerDisplayArtistName,
+      artists: playerDisplayArtists,
+      sourceAlbumId: playerDisplayAlbumId,
+      sourceAlbumName: playerDisplayAlbumName,
+      sourceAlbumImage: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+      sourceAlbumUrl: albumUrl,
+      sourceAlbumYear: playerDisplayAlbumYear,
       sourceTrack: playerDisplayKnownTrack ?? null,
     });
   }
@@ -2206,6 +2526,12 @@ export function App() {
       trackId: null,
       albumId: playerDisplayAlbumId,
       artistName: playerDisplayArtistName,
+      artists: playerDisplayArtists,
+      sourceAlbumId: playerDisplayAlbumId,
+      sourceAlbumName: playerDisplayAlbumName,
+      sourceAlbumImage: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+      sourceAlbumUrl: albumUrl,
+      sourceAlbumYear: playerDisplayAlbumYear,
       sourceTrack: playerDisplayKnownTrack ?? null,
     };
   }
@@ -3549,7 +3875,8 @@ export function App() {
       trackId: track.id ?? null,
       albumId: albumIdFromPreview(contextPreview),
       artistName: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview.artistName ?? null,
-      artists: uniqueArtistEntries(track.sourceTrack?.artists, contextPreview.artists, artistEntriesFromText(track.artistName)),
+      artists: uniqueArtistEntries(track.sourceTrack?.artists, artistEntriesFromText(track.artistName)),
+      targetArtists: null,
       sourceTrack: track.sourceTrack ?? contextPreview.sourceTrack ?? null,
     });
   }
@@ -3575,7 +3902,145 @@ export function App() {
       trackId: null,
       albumId: null,
       artistName,
+      artists: targetArtist ? [targetArtist] : artistEntriesFromText(artistName),
+      targetArtists: targetArtist ? [targetArtist] : artistEntriesFromText(artistName),
+      sourceAlbumId: sourceTrack?.album_id ?? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? null,
+      sourceAlbumName: sourceTrack?.album_name ?? selectedPreview.detail ?? selectedPreview.sourceAlbumName ?? null,
+      sourceAlbumImage: sourceTrack?.image_url ?? selectedPreview.image ?? selectedPreview.sourceAlbumImage ?? null,
+      sourceAlbumUrl: sourceTrack?.album_url ?? selectedPreview.sourceAlbumUrl ?? spotifyEntityUrl("album", sourceTrack?.album_id ?? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? null),
+      sourceAlbumYear: sourceTrack?.album_release_year ?? selectedPreview.sourceAlbumYear ?? null,
       sourceTrack,
+    });
+  }
+
+  function openSelectedAlbumArtistPreview(artist?: TrackArtistEntry) {
+    if (!selectedPreview || selectedPreview.kind !== "album") {
+      return;
+    }
+    const targetArtist = artist ?? selectedPreviewArtists[0];
+    const artistName = targetArtist?.name?.trim() || selectedPreview.artistName || selectedPreview.meta || null;
+    if (!artistName) {
+      return;
+    }
+    const artistId = targetArtist?.artist_id ?? targetArtist?.id ?? null;
+    setSelectedPreview({
+      image: targetArtist?.image_url ?? findArtistImageUrl(artistName) ?? selectedPreview.image ?? null,
+      fallbackLabel: "A",
+      label: artistName,
+      meta: null,
+      detail: null,
+      kind: "artist",
+      entityId: artistId,
+      trackUri: null,
+      url: targetArtist?.url ?? spotifyEntityUrl("artist", artistId),
+      trackId: null,
+      albumId: null,
+      artistName,
+      artists: targetArtist ? [targetArtist] : artistEntriesFromText(artistName),
+      targetArtists: targetArtist ? [targetArtist] : artistEntriesFromText(artistName),
+      sourceAlbumId: selectedPreview.albumId ?? selectedPreview.entityId ?? null,
+      sourceAlbumName: selectedPreview.label,
+      sourceAlbumImage: selectedPreview.image ?? null,
+      sourceAlbumUrl: selectedPreview.url ?? null,
+      sourceAlbumYear: selectedPreview.detail ?? null,
+      sourceTrack: selectedPreview.sourceTrack ?? null,
+    });
+  }
+
+  function openAlbumWithArtistPreview(artist: TrackArtistEntry) {
+    if (!selectedPreview || (selectedPreview.kind !== "album" && selectedPreview.kind !== "track")) {
+      return;
+    }
+    const artists = uniqueArtistEntries(selectedPreviewAlbumMainArtists, [artist]);
+    const artistNames = artists.map((entry) => entry.name?.trim()).filter((name): name is string => Boolean(name));
+    if (artistNames.length === 0) {
+      return;
+    }
+    const firstArtist = artists[0] ?? artist;
+    const firstArtistId = firstArtist.artist_id ?? firstArtist.id ?? null;
+    setSelectedPreview({
+      image: firstArtist.image_url ?? findArtistImageUrl(artistNames[0]) ?? selectedPreview.image ?? null,
+      fallbackLabel: "A",
+      label: artistNames.join(", "),
+      meta: null,
+      detail: null,
+      kind: "artist",
+      entityId: firstArtistId,
+      trackUri: null,
+      url: firstArtist.url ?? spotifyEntityUrl("artist", firstArtistId),
+      trackId: null,
+      albumId: null,
+      artistName: artistNames.join(", "),
+      artists,
+      targetArtists: artists,
+      sourceAlbumId: selectedPreview.albumId ?? (selectedPreview.kind === "album" ? selectedPreview.entityId : null) ?? selectedPreview.sourceTrack?.album_id ?? null,
+      sourceAlbumName: selectedPreview.kind === "album" ? selectedPreview.label : selectedPreview.sourceTrack?.album_name ?? selectedPreview.detail ?? null,
+      sourceAlbumImage: selectedPreview.kind === "album" ? selectedPreview.image ?? null : selectedPreview.sourceTrack?.image_url ?? selectedPreview.image ?? null,
+      sourceAlbumUrl: selectedPreview.kind === "album" ? selectedPreview.url ?? null : selectedPreview.sourceTrack?.album_url ?? null,
+      sourceAlbumYear: selectedPreview.kind === "album" ? selectedPreview.detail ?? null : selectedPreview.sourceTrack?.album_release_year ?? null,
+      sourceTrack: selectedPreview.sourceTrack ?? null,
+    });
+  }
+
+  function openSelectedArtistMemberPreview(artist: TrackArtistEntry) {
+    if (!selectedPreview || selectedPreview.kind !== "artist") {
+      return;
+    }
+    const artistName = artist.name?.trim();
+    if (!artistName) {
+      return;
+    }
+    const artistId = artist.artist_id ?? artist.id ?? null;
+    setSelectedPreview({
+      image: artist.image_url ?? findArtistImageUrl(artistName) ?? selectedPreview.image ?? null,
+      fallbackLabel: "A",
+      label: artistName,
+      meta: null,
+      detail: null,
+      kind: "artist",
+      entityId: artistId,
+      trackUri: null,
+      url: artist.url ?? spotifyEntityUrl("artist", artistId),
+      trackId: null,
+      albumId: null,
+      artistName,
+      artists: [artist],
+      targetArtists: [artist],
+      sourceAlbumId: selectedPreview.sourceAlbumId ?? null,
+      sourceAlbumName: selectedPreview.sourceAlbumName ?? null,
+      sourceAlbumImage: selectedPreview.sourceAlbumImage ?? null,
+      sourceAlbumUrl: selectedPreview.sourceAlbumUrl ?? null,
+      sourceAlbumYear: selectedPreview.sourceAlbumYear ?? null,
+      sourceTrack: selectedPreview.sourceTrack ?? null,
+    });
+  }
+
+  function openArtistAlbumPreview(album: ArtistAlbumEntry) {
+    const highlightArtistNames = selectedPreview?.kind === "artist" && album.relationship && album.relationship !== "album"
+      ? selectedPreviewArtists.map((artist) => artist.name?.trim()).filter((name): name is string => Boolean(name))
+      : null;
+    setSelectedPreview({
+      image: album.imageUrl,
+      fallbackLabel: "L",
+      label: album.name,
+      meta: album.artistName,
+      detail: album.releaseYear,
+      kind: "album",
+      entityId: album.albumId,
+      trackUri: null,
+      url: album.url,
+      trackId: null,
+      albumId: album.albumId,
+      artistName: album.artistName,
+      artists: artistEntriesFromText(album.artistName),
+      targetArtists: null,
+      sourceAlbumId: album.albumId,
+      sourceAlbumName: album.name,
+      sourceAlbumImage: album.imageUrl,
+      sourceAlbumUrl: album.url,
+      sourceAlbumYear: album.releaseYear,
+      albumHighlightArtistNames: highlightArtistNames,
+      sourceTrack: null,
     });
   }
 
@@ -3600,6 +4065,8 @@ export function App() {
       trackId: null,
       albumId,
       artistName: sourceTrack?.artist_name ?? selectedPreview.artistName ?? null,
+      artists: uniqueArtistEntries(sourceTrack?.artists, selectedPreview.artists, artistEntriesFromText(sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.meta)),
+      targetArtists: null,
       sourceTrack,
     });
   }
@@ -4376,6 +4843,12 @@ export function App() {
       trackId: null,
       albumId: spotifyAlbumId,
       artistName: item.artist_name ?? null,
+      artists: artistEntriesFromText(item.artist_name),
+      sourceAlbumId: spotifyAlbumId,
+      sourceAlbumName: item.release_album_name,
+      sourceAlbumImage: null,
+      sourceAlbumUrl: spotifyAlbumId ? `https://open.spotify.com/album/${spotifyAlbumId}` : "",
+      sourceAlbumYear: item.release_date ?? null,
       sourceTrack: null,
     });
   }
@@ -8858,7 +9331,6 @@ export function App() {
                         type="button"
                       >
                         <span>
-                          {playerDisplayKnownLiked ? <LikedBadge className="player-liked-badge" /> : null}
                           {hasReleaseSiblingForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri)) ? (
                             <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri))} />
                           ) : null}
@@ -8874,23 +9346,10 @@ export function App() {
                 </div>
                 {playerDisplayArtists.length > 0 ? (
                   <div className="player-menu-artist-row">
-                    <div className="player-menu-artist-list player-menu-line single-line-ellipsis">
+                    <button className="player-menu-meta-button player-menu-line player-menu-artist-button single-line-ellipsis" onClick={openPlayerArtistsDetails} type="button">
                       {playerDisplayArtistImageUrl ? <img alt="" className="player-menu-artist-image" src={playerDisplayArtistImageUrl} /> : null}
-                      {playerDisplayArtists.map((artist, index) => {
-                        const artistName = artist.name?.trim();
-                        if (!artistName) {
-                          return null;
-                        }
-                        return (
-                          <span className="player-menu-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                            {index > 0 ? <span className="player-menu-artist-separator">, </span> : null}
-                            <button className="player-menu-meta-button player-menu-artist-button" onClick={() => openPlayerArtistDetails(artist)} type="button">
-                              {artistName}
-                            </button>
-                          </span>
-                        );
-                      })}
-                    </div>
+                      <span className="single-line-ellipsis">{playerDisplayArtistLabel}</span>
+                    </button>
                     {playerDisplayTrack?.uri ? (
                       <a
                         aria-label="Open in Spotify"
@@ -8943,6 +9402,16 @@ export function App() {
             ) : null}
 
             <div className="actions actions-centered actions-in-card player-transport-controls">
+              <button
+                aria-label={playerDisplayKnownLiked ? "Liked song" : "Not liked"}
+                aria-pressed={playerDisplayKnownLiked}
+                className={`secondary-button player-icon-button player-liked-control-button${playerDisplayKnownLiked ? " player-liked-control-button-active" : ""}`}
+                disabled={!playerDisplayTrack}
+                title={playerDisplayKnownLiked ? "Liked" : "Not liked"}
+                type="button"
+              >
+                <span aria-hidden="true">{playerDisplayKnownLiked ? "★" : "☆"}</span>
+              </button>
               <button
                 aria-label="Previous track"
                 className={`secondary-button player-icon-button${playerTransportReadOnly ? " player-control-readonly" : ""}`}
@@ -9505,6 +9974,73 @@ export function App() {
   const heroTitle = "ListenLab";
   const heroCopy =
     "Connect your account and browse the listening, library, and profile details Spotify already makes available to ListenLab.";
+  const renderSelectedPreviewArtistAlbumSection = (
+    title: string,
+    albums: ArtistAlbumEntry[],
+  ) => {
+    if (albums.length === 0) {
+      return null;
+    }
+    return (
+      <div className="detail-modal-artist-albums">
+        <p className="detail-modal-album-title">{title}</p>
+        <ul className="detail-artist-album-list">
+          {albums.map((album) => (
+          <li
+            className={`detail-artist-album-row${album.isHighlighted ? " detail-artist-album-row-highlighted" : ""}`}
+            key={`${title}-${album.albumId ?? album.name}-${album.artistName ?? ""}`}
+            >
+              <button
+                className="detail-artist-album-button"
+                onClick={() => openArtistAlbumPreview(album)}
+                type="button"
+              >
+                {album.imageUrl ? (
+                  <img alt="" className="detail-artist-album-cover" src={album.imageUrl} />
+                ) : (
+                  <span className="detail-artist-album-cover detail-artist-album-cover-fallback" aria-hidden="true">
+                    {album.name.slice(0, 1).toUpperCase()}
+                  </span>
+                )}
+                <span className="detail-artist-album-copy">
+                  <span className="detail-artist-album-name single-line-ellipsis">{album.name}</span>
+                  <span className="detail-artist-album-meta single-line-ellipsis">
+                    {[
+                      album.releaseYear,
+                      selectedPreviewArtists.length === 1 && album.artistName
+                        ? collaboratorLabel(album.artistName, selectedPreview?.label)
+                        : null,
+                      album.evidence ?? null,
+                      album.trackCount != null ? `${album.trackCount} tracks represented` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" | ")}
+                  </span>
+                </span>
+                {album.isHighlighted ? <span className="detail-artist-album-current">Selected</span> : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+  const scheduleAlbumWithArtistHighlight = (artistName: string) => {
+    if (albumWithHoverDelayRef.current != null) {
+      window.clearTimeout(albumWithHoverDelayRef.current);
+    }
+    albumWithHoverDelayRef.current = window.setTimeout(() => {
+      setHoveredAlbumWithArtistName(artistName);
+      albumWithHoverDelayRef.current = null;
+    }, 250);
+  };
+  const clearAlbumWithArtistHighlight = () => {
+    if (albumWithHoverDelayRef.current != null) {
+      window.clearTimeout(albumWithHoverDelayRef.current);
+      albumWithHoverDelayRef.current = null;
+    }
+    setHoveredAlbumWithArtistName(null);
+  };
 
   if (showLoadingScreen) {
     return (
@@ -9915,27 +10451,14 @@ export function App() {
                               </div>
                               {playerDisplayArtists.length > 0 ? (
                                 <div className="player-menu-artist-row">
-                                  <div className="player-menu-artist-list player-menu-line single-line-ellipsis">
+                                  <button
+                                    className="player-menu-meta-button player-menu-line player-menu-artist-button single-line-ellipsis"
+                                    onClick={openPlayerArtistsDetails}
+                                    type="button"
+                                  >
                                     {playerDisplayArtistImageUrl ? <img alt="" className="player-menu-artist-image" src={playerDisplayArtistImageUrl} /> : null}
-                                    {playerDisplayArtists.map((artist, index) => {
-                                      const artistName = artist.name?.trim();
-                                      if (!artistName) {
-                                        return null;
-                                      }
-                                      return (
-                                        <span className="player-menu-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                                          {index > 0 ? <span className="player-menu-artist-separator">, </span> : null}
-                                          <button
-                                            className="player-menu-meta-button player-menu-artist-button"
-                                            onClick={() => openPlayerArtistDetails(artist)}
-                                            type="button"
-                                          >
-                                            {artistName}
-                                          </button>
-                                        </span>
-                                      );
-                                    })}
-                                  </div>
+                                    <span className="single-line-ellipsis">{playerDisplayArtistLabel}</span>
+                                  </button>
                                   {playerDisplayTrack?.uri ? (
                                     <a
                                       aria-label="Open in Spotify"
@@ -10989,20 +11512,107 @@ export function App() {
                 {hasReleaseSiblingForTrackId(selectedPreview.trackId ?? selectedPreview.sourceTrack?.track_id) ? (
                   <ReleaseSiblingBadge className="detail-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(selectedPreview.trackId ?? selectedPreview.sourceTrack?.track_id)} />
                 ) : null}
-                {selectedPreview.label}
+                {selectedPreviewIsSharedArtistPage ? (
+                  <span className="detail-modal-artist-links">
+                    {selectedPreviewArtists.map((artist, index) => {
+                      const artistName = artist.name?.trim();
+                      if (!artistName) {
+                        return null;
+                      }
+                      return (
+                        <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+                          {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+                          <button
+                            className="detail-modal-inline-link"
+                            onClick={() => openSelectedArtistMemberPreview(artist)}
+                            type="button"
+                          >
+                            {artistName}
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </span>
+                ) : selectedPreview.kind === "album" && selectedPreview.detail ? `${selectedPreview.label} (${selectedPreview.detail})` : selectedPreview.label}
               </h2>
-              {selectedPreview.meta ? (
-                <div className="detail-modal-meta detail-modal-meta-with-image">
-                  {selectedPreview.kind === "track" && selectedPreviewArtistImageUrl ? (
-                    <img
-                      alt=""
-                      className="detail-modal-artist-image"
-                      src={selectedPreviewArtistImageUrl}
-                    />
+              {selectedPreview.kind === "album" ? (
+                <div className="detail-modal-album-meta-block">
+                  {selectedPreviewAlbumSummary ? (
+                    <span className="detail-modal-meta-text detail-modal-album-summary">{selectedPreviewAlbumSummary}</span>
                   ) : null}
-                  {selectedPreviewCanOpenArtist ? (
+                  {selectedPreviewAlbumMainArtists.length > 0 ? (
+                    <div className="detail-modal-meta detail-modal-meta-with-image">
+                      {selectedPreviewArtistImageUrl ? (
+                        <img
+                          alt=""
+                          className="detail-modal-artist-image"
+                          src={selectedPreviewArtistImageUrl}
+                        />
+                      ) : null}
+                      <span className="detail-modal-artist-links detail-modal-meta-text">
+                        {selectedPreviewAlbumMainArtists.map((artist, index) => {
+                          const artistName = artist.name?.trim();
+                          if (!artistName) {
+                            return null;
+                          }
+                          return (
+                            <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+                              {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+                              <button
+                                className="detail-modal-inline-link"
+                                onClick={() => openSelectedAlbumArtistPreview(artist)}
+                                type="button"
+                              >
+                                {artistName}
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </span>
+                    </div>
+                  ) : null}
+                  {selectedPreviewAlbumGuestArtists.length > 0 ? (
+                    <p className="detail-modal-with-artists">
+                      <span>with </span>
+                      <span className="detail-modal-artist-links">
+                        {selectedPreviewAlbumGuestArtists.map((artist, index) => {
+                          const artistName = artist.name?.trim();
+                          if (!artistName) {
+                            return null;
+                          }
+                          return (
+                            <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+                              {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+                              <button
+                                className="detail-modal-inline-link"
+                                onClick={() => openSelectedAlbumArtistPreview(artist)}
+                                onMouseEnter={() => scheduleAlbumWithArtistHighlight(artistName)}
+                                onMouseLeave={clearAlbumWithArtistHighlight}
+                                onFocus={() => scheduleAlbumWithArtistHighlight(artistName)}
+                                onBlur={clearAlbumWithArtistHighlight}
+                                type="button"
+                              >
+                                {artistName}
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </span>
+                    </p>
+                  ) : null}
+                </div>
+              ) : selectedPreview.kind === "track" && selectedPreviewCanOpenArtist ? (
+                <div className="detail-modal-album-meta-block">
+                  <div className="detail-modal-meta detail-modal-meta-with-image">
+                    {(selectedPreviewTrackMainArtists[0]?.image_url ?? selectedPreviewArtistImageUrl) ? (
+                      <img
+                        alt=""
+                        className="detail-modal-artist-image"
+                        src={selectedPreviewTrackMainArtists[0]?.image_url ?? selectedPreviewArtistImageUrl ?? undefined}
+                      />
+                    ) : null}
                     <span className="detail-modal-artist-links detail-modal-meta-text">
-                      {selectedPreviewArtists.map((artist, index) => {
+                      {selectedPreviewTrackMainArtists.map((artist, index) => {
                         const artistName = artist.name?.trim();
                         if (!artistName) {
                           return null;
@@ -11021,38 +11631,91 @@ export function App() {
                         );
                       })}
                     </span>
+                  </div>
+                  {selectedPreviewTrackGuestArtists.length > 0 ? (
+                    <p className="detail-modal-with-artists">
+                      <span>with </span>
+                      <span className="detail-modal-artist-links">
+                        {selectedPreviewTrackGuestArtists.map((artist, index) => {
+                          const artistName = artist.name?.trim();
+                          if (!artistName) {
+                            return null;
+                          }
+                          return (
+                            <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+                              {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+                              <button
+                                className="detail-modal-inline-link"
+                                onClick={() => openSelectedTrackArtistPreview(artist)}
+                                type="button"
+                              >
+                                {artistName}
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </span>
+                    </p>
+                  ) : null}
+                </div>
+              ) : selectedPreview.meta ? (
+                <div className="detail-modal-meta detail-modal-meta-with-image">
+                  {selectedPreviewCanOpenArtist ? (
+                    <span className="detail-modal-artist-links detail-modal-meta-text">
+                      {selectedPreviewArtists.map((artist, index) => {
+                        const artistName = artist.name?.trim();
+                        if (!artistName) {
+                          return null;
+                        }
+                        return (
+                          <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+                            {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+                            <button
+                              className="detail-modal-inline-link"
+                              onClick={() => {
+                                if (selectedPreview.kind === "album") {
+                                  openSelectedAlbumArtistPreview(artist);
+                                  return;
+                                }
+                                openSelectedTrackArtistPreview(artist);
+                              }}
+                              type="button"
+                            >
+                              {artistName}
+                            </button>
+                          </span>
+                        );
+                      })}
+                    </span>
                   ) : (
                     <span className="detail-modal-meta-text">{selectedPreview.meta}</span>
                   )}
                 </div>
               ) : null}
-              {selectedPreview.detail && selectedPreview.kind !== "track" ? <p className="detail-modal-detail">{selectedPreview.detail}</p> : null}
+              {selectedPreview.detail && selectedPreview.kind !== "track" && selectedPreview.kind !== "album" ? <p className="detail-modal-detail">{selectedPreview.detail}</p> : null}
               {selectedPreview.kind === "track" && !selectedPreviewEffectiveTrackUri ? (
                 <p className="detail-modal-preview-missing">This track does not have a playable Spotify URI.</p>
               ) : null}
-              {hasPremiumPlayback && (selectedPreview.kind === "artist" || selectedPreview.kind === "album") && representativeLoading ? (
-                <p className="detail-modal-preview-missing">Finding a song to play...</p>
-              ) : null}
-              {hasPremiumPlayback && (selectedPreview.kind === "artist" || selectedPreview.kind === "album") && representativeTrack ? (
-                <div className="detail-modal-audio">
-                  <p className="detail-modal-audio-label">
-                    {selectedPreview.kind === "artist" ? "Top song" : "Representative song"}
-                  </p>
-                  <p className="detail-modal-related-track">
-                    {representativeTrack.track_name ?? "Unknown track"}
-                    {representativeTrack.artist_name ? ` - ${representativeTrack.artist_name}` : ""}
-                  </p>
-                  {!representativeTrack.uri ? (
-                    <p className="detail-modal-preview-missing">
-                      {representativeReasonMessage(representativeReason, selectedPreview.kind)}
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
-              {hasPremiumPlayback && (selectedPreview.kind === "artist" || selectedPreview.kind === "album") && !representativeLoading && !representativeTrack ? (
-                <p className="detail-modal-preview-missing">
-                  {representativeReasonMessage(representativeReason, selectedPreview.kind)}
-                </p>
+              {selectedPreview.kind === "artist" ? (
+                <>
+                  {selectedPreviewIsSharedArtistPage || !backendSelectedPreviewArtistAlbums ? (
+                    renderSelectedPreviewArtistAlbumSection(
+                      "Albums",
+                      selectedPreviewArtistAlbumsForDisplay,
+                    )
+                  ) : (
+                    <>
+                      {renderSelectedPreviewArtistAlbumSection(
+                        "Albums",
+                        selectedPreviewPrimaryArtistAlbums,
+                      )}
+                      {renderSelectedPreviewArtistAlbumSection(
+                        "Appears on",
+                        selectedPreviewAppearsOnAlbums,
+                      )}
+                    </>
+                  )}
+                </>
               ) : null}
               <div className="actions actions-in-card detail-modal-actions">
                 {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewEffectiveTrackUri ? (
@@ -11108,20 +11771,6 @@ export function App() {
                     </span>
                   </div>
                 ) : null}
-                {hasPremiumPlayback && (selectedPreview.kind === "artist" || selectedPreview.kind === "album") && representativeTrack?.uri ? (
-                  <button
-                    aria-label={isTrackPlaying(representativeTrack.uri ?? null) ? "Currently playing in ListenLab" : "Play in ListenLab"}
-                    className={`secondary-button detail-icon-button${isTrackPlaying(representativeTrack.uri ?? null) ? " detail-icon-button-playing" : ""}`}
-                    onClick={() => void handlePopupTrackPlayback(representativeTrack.uri ?? null)}
-                    type="button"
-                  >
-                    {isTrackPlaying(representativeTrack.uri ?? null) ? (
-                      <span className="detail-pause-bars" aria-hidden="true"><span /><span /></span>
-                    ) : (
-                      <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
-                    )}
-                  </button>
-                ) : null}
               </div>
             </div>
             {selectedPreview.kind === "track" || selectedPreview.kind === "album" ? (
@@ -11135,9 +11784,11 @@ export function App() {
                     {previewAlbumHeading(selectedPreview)}
                   </button>
                 ) : (
-                  <p className="detail-modal-album-title">
-                    {selectedPreview.kind === "album" ? selectedPreview.label : previewAlbumHeading(selectedPreview)}
-                  </p>
+                  selectedPreview.kind === "album" ? null : (
+                    <p className="detail-modal-album-title">
+                      {previewAlbumHeading(selectedPreview)}
+                    </p>
+                  )
                 )}
                 <div className="detail-modal-album-header">
                   {hasPremiumPlayback ? (
@@ -11147,7 +11798,8 @@ export function App() {
                   ) : (
                     <span aria-hidden="true" />
                   )}
-                  <span aria-hidden="true" />
+                  <span className="detail-modal-album-title-header">Title</span>
+                  <span className="detail-modal-album-with-header">With</span>
                   <span className="detail-modal-album-liked-header">Liked</span>
                   <span className="detail-modal-album-preview-header">Preview</span>
                   <span className="detail-modal-album-last-played-header">Played</span>
@@ -11159,7 +11811,7 @@ export function App() {
                   <p className="detail-modal-preview-missing">{albumTrackEntriesError}</p>
                 ) : null}
                 {!albumTrackEntriesLoading && !albumTrackEntriesError && albumTrackEntries.length > 0 ? (
-                  <ul className="detail-album-track-list">
+                  <ul className="detail-album-track-list" ref={albumTrackListRef}>
                     {albumTrackEntries.map((track) => {
                       const rowTrackUri = track.uri ?? (track.id ? `spotify:track:${track.id}` : null);
                       const rowIsCurrentTrack = Boolean(rowTrackUri && currentTrack?.uri === rowTrackUri);
@@ -11171,6 +11823,24 @@ export function App() {
                       const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                       const rowLastPlayed = formatMonthDay(track.lastPlayedAt);
                       const rowIsLiked = albumTrackIsKnownLiked(track);
+                      const mainArtistNames = new Set(
+                        selectedPreview.kind === "album" || selectedPreview.kind === "track"
+                          ? selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean)
+                          : [],
+                      );
+                      const rowWithArtists = selectedPreview.kind === "album" || selectedPreview.kind === "track"
+                        ? uniqueArtistEntries(artistEntriesFromText(track.artistName)).filter((artist) => {
+                          const artistName = artist.name?.trim().toLocaleLowerCase();
+                          return Boolean(artistName && !mainArtistNames.has(artistName));
+                        })
+                        : [];
+                      const rowMatchesHighlightedArtist = Boolean(
+                        selectedPreview.kind === "album"
+                        && selectedPreview.albumHighlightArtistNames?.some((artistName) => artistNameMatches(track.artistName, artistName)),
+                      );
+                      const rowMatchesHoveredWithArtist = Boolean(
+                        hoveredAlbumWithArtistName && artistNameMatches(track.artistName, hoveredAlbumWithArtistName),
+                      );
                       const rowBaseDurationMs = (
                         track.durationMs
                         ?? (rowIsCurrentTrack
@@ -11192,9 +11862,9 @@ export function App() {
                         )
                         : rowBaseDurationMs;
                       return (
-                        <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}`} key={track.id ?? track.name}>
-                          {hasPremiumPlayback ? (
-                            <button
+	                        <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}${rowMatchesHighlightedArtist || rowMatchesHoveredWithArtist ? " detail-album-track-row-artist-highlighted" : ""}`} key={track.id ?? track.name}>
+	                          {hasPremiumPlayback ? (
+	                            <button
                               aria-label={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
                               className={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
                               disabled={!rowTrackUri}
@@ -11214,9 +11884,9 @@ export function App() {
                               )}
                               <span className={`detail-album-track-play-time${rowPausedCurrent ? " detail-album-track-play-time-flash" : ""}`}>
                                 {rowButtonTimeMs != null ? formatPlaybackClock(rowButtonTimeMs) : "?:??"}
-                              </span>
-                            </button>
-                          ) : null}
+	                              </span>
+	                            </button>
+	                          ) : <span aria-hidden="true" />}
                           <button
                             className="detail-album-track-name-button single-line-ellipsis"
                             onClick={() => openAlbumTrackPreview(track)}
@@ -11229,6 +11899,26 @@ export function App() {
                             </span>
                             <span className="single-line-ellipsis">{track.name}</span>
                           </button>
+                          <span className="detail-album-track-with single-line-ellipsis">
+                            {rowWithArtists.map((artist, index) => {
+                              const artistName = artist.name?.trim();
+                              if (!artistName) {
+                                return null;
+                              }
+                              return (
+                                <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+                                  {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+                                  <button
+                                    className="detail-modal-inline-link"
+                                    onClick={() => openAlbumWithArtistPreview(artist)}
+                                    type="button"
+                                  >
+                                    {artistName}
+                                  </button>
+                                </span>
+                              );
+                            })}
+                          </span>
                           <span className="detail-album-track-liked-cell">
                             {rowIsLiked ? <LikedBadge className="detail-album-track-liked-badge" /> : null}
                           </span>

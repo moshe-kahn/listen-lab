@@ -2,6 +2,7 @@ import type {
   AlbumCatalogLookupResponse,
   AlbumDuplicateLookupResponse,
   AlbumNameDuplicateLookupResponse,
+  ArtistAlbumEvidenceResponse,
   CatalogBackfillCoverageResponse,
   CatalogBackfillEnqueueResponse,
   CatalogBackfillQueueReasonFilter,
@@ -138,6 +139,42 @@ export async function fetchReleaseTrackMetadata(spotifyTrackIds: string[]): Prom
       throw new Error(`Release Track Metadata (${response.status}): ${detail}`);
     }
     return (await response.json()) as ReleaseTrackMetadataResponse;
+  }
+
+export async function fetchArtistAlbumEvidence(
+    artistNames: string[],
+    sourceAlbumId?: string | null,
+    sourceAlbumName?: string | null,
+  ): Promise<ArtistAlbumEvidenceResponse> {
+    const params = new URLSearchParams();
+    for (const artistName of artistNames) {
+      const cleanName = artistName.trim();
+      if (cleanName) {
+        params.append("artist_names", cleanName);
+      }
+    }
+    if (sourceAlbumId?.trim()) {
+      params.set("source_album_id", sourceAlbumId.trim());
+    }
+    if (sourceAlbumName?.trim()) {
+      params.set("source_album_name", sourceAlbumName.trim());
+    }
+    const response = await fetch(`${apiBaseUrl}/auth/artist-albums?${params.toString()}`, {
+      credentials: "include",
+    });
+    if (!response.ok) {
+      let detail = "Failed to load artist albums.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      throw new Error(`Artist Albums (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ArtistAlbumEvidenceResponse;
   }
 
 export async function fetchCatalogBackfillCoverage(): Promise<CatalogBackfillCoverageResponse> {

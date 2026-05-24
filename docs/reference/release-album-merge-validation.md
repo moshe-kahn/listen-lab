@@ -53,7 +53,7 @@ Dry run reuses preview and returns:
 Default local DB:
 
 ```bash
-DB=/Users/kahntra/Documents/ListenLab/listen-lab-main/backend/data/listenlabs.sqlite3
+DB=/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main/backend/data/listenlabs.sqlite3
 ```
 
 ## List Candidate Duplicate Groups
@@ -167,7 +167,7 @@ python3 - <<'PY'
 import json
 import sqlite3
 
-DB = "/Users/kahntra/Documents/ListenLab/listen-lab-main/backend/data/listenlabs.sqlite3"
+DB = "/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main/backend/data/listenlabs.sqlite3"
 
 def norm(value: str | None) -> str:
     if not value:
@@ -232,13 +232,13 @@ PY
 Python helper path:
 
 ```bash
-cd /Users/kahntra/Documents/ListenLab/listen-lab-main
+cd /Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main
 python3 - <<'PY'
 import json
 import sys
 from pathlib import Path
 
-repo = Path("/Users/kahntra/Documents/ListenLab/listen-lab-main")
+repo = Path("/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main")
 sys.path.insert(0, str(repo))
 
 from backend.app.spotify_catalog_backfill import preview_release_album_merge, dry_run_release_album_merge
@@ -319,13 +319,13 @@ Validated against the local dev DB on `2026-05-01`:
 Useful local one-liners:
 
 ```bash
-cd /Users/kahntra/Documents/ListenLab/listen-lab-main
+cd /Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main
 python3 - <<'PY'
 import json
 import sys
 from pathlib import Path
 
-repo = Path("/Users/kahntra/Documents/ListenLab/listen-lab-main")
+repo = Path("/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main")
 sys.path.insert(0, str(repo))
 
 from backend.app.spotify_catalog_backfill import preview_release_album_merge, dry_run_release_album_merge

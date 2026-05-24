@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+import json
+import os
+import time
+import unittest
+
+from backend.app.artist_album_evidence import list_artist_album_evidence
+from backend.app.db import apply_pending_migrations, ensure_sqlite_db, sqlite_connection
+
+
+def _artists(*names: str) -> str:
+    return json.dumps([{"name": name} for name in names])
+
+
+def _images(url: str) -> str:
+    return json.dumps([{"url": url}])
+
+
+class ArtistAlbumEvidenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.db_path = os.path.join(os.getcwd(), "backend", "tests", "_tmp_artist_album_evidence.sqlite3")
+        for suffix in ("", "-wal", "-shm"):
+            path = f"{self.db_path}{suffix}"
+            if os.path.exists(path):
+                os.remove(path)
+        os.environ["SQLITE_DB_PATH"] = self.db_path
+        ensure_sqlite_db()
+        apply_pending_migrations()
+        self._seed_catalog()
+
+    def tearDown(self) -> None:
+        for suffix in ("", "-wal", "-shm"):
+            path = f"{self.db_path}{suffix}"
+            if os.path.exists(path):
+                for _ in range(5):
+                    try:
+                        os.remove(path)
+                        break
+                    except PermissionError:
+                        time.sleep(0.1)
+
+    def _insert_album(
+        self,
+        album_id: str,
+        name: str,
+        album_artists: tuple[str, ...],
+        total_tracks: int,
+    ) -> None:
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, release_date, total_tracks, artists_json, images_json, raw_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    album_id,
+                    name,
+                    "2026-01-01",
+                    total_tracks,
+                    _artists(*album_artists),
+                    _images(f"https://images.example/{album_id}.jpg"),
+                    "{}",
+                    "2026-05-01T00:00:00Z",
+                    "ok",
+                ),
+            )
+
+    def _insert_track(self, album_id: str, track_id: str, track_number: int, track_artists: tuple[str, ...]) -> None:
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_track (
+                  spotify_album_id, spotify_track_id, disc_number, track_number, name, duration_ms, artists_json, raw_json, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    album_id,
+                    track_id,
+                    1,
+                    track_number,
+                    f"Track {track_number}",
+                    180000,
+                    _artists(*track_artists),
+                    "{}",
+                    "2026-05-01T00:00:00Z",
+                    "ok",
+                ),
+            )
+
+    def _seed_catalog(self) -> None:
+        self._insert_album("album-primary", "Primary Album", ("Primary Artist",), 3)
+        for index in range(1, 4):
+            self._insert_track("album-primary", f"primary-{index}", index, ("Primary Artist",))
+
+        self._insert_album("album-guest", "Guest Album", ("Main Artist",), 4)
+        self._insert_track("album-guest", "guest-1", 1, ("Main Artist", "Guest Artist"))
+        for index in range(2, 5):
+            self._insert_track("album-guest", f"guest-{index}", index, ("Main Artist",))
+
+        self._insert_album("album-incomplete", "Incomplete Album", ("Another Artist",), 4)
+        self._insert_track("album-incomplete", "incomplete-1", 1, ("Another Artist", "Unknown Guest"))
+
+        self._insert_album("album-shared", "Shared Album", ("Shared Main",), 3)
+        self._insert_track("album-shared", "shared-1", 1, ("Shared Main", "Alpha"))
+        self._insert_track("album-shared", "shared-2", 2, ("Shared Main", "Beta"))
+        self._insert_track("album-shared", "shared-3", 3, ("Shared Main",))
+
+    def test_single_album_artist_match(self) -> None:
+        items = list_artist_album_evidence(["Primary Artist"])
+        self.assertEqual("album-primary", items[0]["album_id"])
+        self.assertEqual("album", items[0]["relationship"])
+        self.assertEqual("Album artist match", items[0]["evidence"])
+
+    def test_single_appears_on_match(self) -> None:
+        items = list_artist_album_evidence(["Guest Artist"])
+        self.assertEqual(1, len(items))
+        self.assertEqual("album-guest", items[0]["album_id"])
+        self.assertEqual("appears_on", items[0]["relationship"])
+        self.assertEqual({"Guest Artist": 1}, items[0]["matching_track_count_by_artist"])
+
+    def test_incomplete_tracklist_unknown(self) -> None:
+        items = list_artist_album_evidence(["Unknown Guest"])
+        self.assertEqual(1, len(items))
+        self.assertEqual("album-incomplete", items[0]["album_id"])
+        self.assertEqual("unknown", items[0]["relationship"])
+        self.assertFalse(items[0]["tracklist_complete"])
+
+    def test_shared_artist_filters_to_all_targets_present(self) -> None:
+        items = list_artist_album_evidence(["Alpha", "Beta"])
+        self.assertEqual(["album-shared"], [item["album_id"] for item in items])
+        self.assertTrue(items[0]["all_targets_present"])
+
+    def test_shared_artist_relationship_is_album_or_unknown_only(self) -> None:
+        relationships = {item["relationship"] for item in list_artist_album_evidence(["Alpha", "Beta"])}
+        self.assertEqual({"unknown"}, relationships)
+
+    def test_source_album_sorting_by_id_and_name(self) -> None:
+        items_by_id = list_artist_album_evidence(["Main Artist"], source_album_id="album-guest")
+        self.assertEqual("album-guest", items_by_id[0]["album_id"])
+        items_by_name = list_artist_album_evidence(["Shared Main"], source_album_name="Shared Album")
+        self.assertEqual("album-shared", items_by_name[0]["album_id"])
+
+    def test_stable_response_shape(self) -> None:
+        item = list_artist_album_evidence(["Guest Artist"])[0]
+        self.assertEqual(
+            {
+                "album_id",
+                "album_name",
+                "album_artist_names",
+                "image_url",
+                "url",
+                "release_year",
+                "total_tracks",
+                "cached_track_count",
+                "matching_artist_names",
+                "matching_track_count_by_artist",
+                "all_targets_present",
+                "tracklist_complete",
+                "relationship",
+                "evidence",
+            },
+            set(item.keys()),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -6,8 +6,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Request, status
+from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 
+from backend.app.artist_album_evidence import list_artist_album_evidence
 from backend.app.auth.session import _require_user_id
 from backend.app.auth.token import _require_token
 from backend.app.db import (
@@ -145,6 +146,25 @@ async def _fetch_and_cache_album_tracks(access_token: str, album_id: str, market
 async def auth_current_playback(request: Request) -> dict[str, Any]:
     user_id = _require_user_id(request)
     return await get_current_playback_for_user(user_id)
+
+
+@router.get("/auth/artist-albums")
+async def auth_artist_albums(
+    request: Request,
+    artist_names: list[str] | None = Query(default=None),
+    source_album_id: str | None = None,
+    source_album_name: str | None = None,
+) -> dict[str, Any]:
+    _require_user_id(request)
+    try:
+        items = list_artist_album_evidence(
+            artist_names=artist_names or [],
+            source_album_id=source_album_id,
+            source_album_name=source_album_name,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Artist album evidence could not be loaded.") from exc
+    return {"items": items}
 
 
 @router.post("/auth/playback/queue-playlist/sync")

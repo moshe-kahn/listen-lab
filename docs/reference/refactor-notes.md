@@ -61,6 +61,13 @@ Extracted route modules:
 - `backend/app/routes/playback_routes.py`
 - `backend/app/routes/auth_routes.py`
 
+Current playback-route addition:
+- `GET /auth/artist-albums`
+  - implemented with `backend/app/artist_album_evidence.py`
+  - read-only cache query for artist overlay album evidence
+  - accepts repeated `artist_names` plus optional `source_album_id` / `source_album_name`
+  - returns album metadata, matching track counts, all-target presence, tracklist completeness, relationship, and evidence text
+
 Remaining route groups:
 - `dashboard_routes.py`
 - `ingest_routes.py`
@@ -232,6 +239,19 @@ Current uncommitted playback UI behavior:
 - Delay menu behavior:
   - `After this song` advances to the next queued song at 0:00 and pauses it.
   - `15 minutes` is an exact sleep timer.
+- Artist overlay behavior:
+  - artist pages call `/auth/artist-albums` and use profile/local arrays only as request-failure fallback
+  - single artists split backend evidence into `Albums` and `Appears on`
+  - shared artist pages show one combined album list
+  - empty album sections do not render headings
+- Album/track overlay behavior:
+  - album title shows year inline and album summary shows loaded track count/runtime
+  - album main artists are derived from majority-of-loaded-track evidence, falling back to album metadata artists before tracklist evidence is available
+  - album and track overlays split artists into main artist(s) plus `with ...` guests
+  - album tracklist has `Title`, `With`, `Liked`, `Preview`, and `Played` columns
+  - top `with ...` list controls delayed row highlighting and scrolls the first matching row into view
+  - row-level `With` artists are clickable but do not trigger hover highlighting
+  - row-level `With` clicks open a shared artist page for derived album main artist(s) plus the clicked guest
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.
 

@@ -74,33 +74,12 @@ export function firstArtistFromRecentTrack(track: RecentTrack | null | undefined
 
 export function previewAlbumHeading(preview: PreviewItem): string {
   const albumName = preview.sourceTrack?.album_name ?? preview.detail ?? "Album";
-  const albumYear = preview.sourceTrack?.album_release_year ?? null;
+  const albumYear = preview.sourceTrack?.album_release_year ?? preview.sourceAlbumYear ?? null;
   return albumYear ? `${albumYear} - ${albumName}` : albumName;
 }
 
 export function recentRangeLabel(range: RecentRange) {
   return RECENT_RANGE_OPTIONS.find((option) => option.value === range)?.label ?? "Recent";
-}
-
-export function representativeReasonMessage(reason: string | null, kind: "artist" | "album") {
-  switch (reason) {
-    case "spotify_rejected_lookup":
-      return "Spotify rejected the lookup for this item, so no representative song could be loaded.";
-    case "item_not_found":
-      return `Spotify did not return a matching ${kind} for this item.`;
-    case "rate_limited":
-      return "Spotify rate-limited this lookup. Try again in a moment.";
-    case "spotify_lookup_failed":
-      return "Spotify did not return usable data for this lookup.";
-    case "no_representative_track":
-      return kind === "artist"
-        ? "Spotify did not return a top song for this artist."
-        : "Spotify did not return a representative song for this album.";
-    case "request_failed":
-      return "The app could not load a representative song for this item.";
-    default:
-      return "No representative song was found for this item.";
-  }
 }
 
 export function albumLookupRowIsNotBackfilled(item: AlbumCatalogLookupItem): boolean {
@@ -302,8 +281,16 @@ export function previewItems(
         trackUri: item.uri ?? null,
         url: item.url ?? item.album_url ?? item.playlist_url ?? "",
         trackId: isTrack ? item.track_id ?? null : null,
-        albumId: isTrack ? item.album_id ?? null : null,
-        artistName: isTrack ? item.artist_name ?? null : null,
+        albumId: isTrack || kind === "album" ? item.album_id ?? null : null,
+        artistName: isTrack || kind === "album" ? item.artist_name ?? null : null,
+        artists: kind === "album" && item.artist_name
+          ? item.artist_name.split(",").map((name) => ({ name: name.trim() })).filter((artist) => Boolean(artist.name))
+          : null,
+        sourceAlbumId: kind === "album" ? item.album_id ?? null : null,
+        sourceAlbumName: kind === "album" ? label : null,
+        sourceAlbumImage: kind === "album" ? item.image_url ?? null : null,
+        sourceAlbumUrl: kind === "album" ? item.url ?? item.album_url ?? "" : null,
+        sourceAlbumYear: kind === "album" ? item.release_year ?? null : null,
         sourceTrack: null,
       } satisfies PreviewItem;
     })
@@ -620,15 +607,16 @@ export function capTracksPerAlbum(items: RecentTrack[], maxPerAlbum: number) {
 
 export function collapseRecentPreviewTracks(items: RecentTrack[]) {
   const collapsed: RecentTrack[] = [];
-  let previousAlbumKey: string | null = null;
+  const seenAlbumKeys = new Set<string>();
   for (const track of items) {
-    const albumKey = track.album_id
-      ?? (track.album_name && track.artist_name ? `${track.album_name}::${track.artist_name}` : null);
-    if (albumKey && previousAlbumKey && albumKey === previousAlbumKey) {
-      continue;
+    const albumKey = albumGroupingKey(track);
+    if (albumKey) {
+      if (seenAlbumKeys.has(albumKey)) {
+        continue;
+      }
+      seenAlbumKeys.add(albumKey);
     }
     collapsed.push(track);
-    previousAlbumKey = albumKey;
   }
   return collapsed;
 }

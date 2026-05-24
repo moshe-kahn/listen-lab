@@ -143,6 +143,29 @@ export type ReleaseTrackMetadataResponse = {
   items: Record<string, ReleaseTrackMetadataItem>;
 };
 
+export type ArtistAlbumRelationship = "album" | "appears_on" | "unknown";
+
+export type ArtistAlbumEvidenceItem = {
+  album_id: string | null;
+  album_name: string;
+  album_artist_names: string[];
+  image_url: string | null;
+  url: string | null;
+  release_year: string | null;
+  total_tracks: number | null;
+  cached_track_count: number;
+  matching_artist_names: string[];
+  matching_track_count_by_artist: Record<string, number>;
+  all_targets_present: boolean;
+  tracklist_complete: boolean;
+  relationship: ArtistAlbumRelationship;
+  evidence: string;
+};
+
+export type ArtistAlbumEvidenceResponse = {
+  items: ArtistAlbumEvidenceItem[];
+};
+
 export type MatchCounts = {
   short_term_top: number;
   long_term_top: number;
@@ -1060,12 +1083,21 @@ export type PreviewItem = {
     url?: string | null;
     image_url?: string | null;
   }> | null;
+  sourceAlbumId?: string | null;
+  sourceAlbumName?: string | null;
+  sourceAlbumImage?: string | null;
+  sourceAlbumUrl?: string | null;
+  sourceAlbumYear?: string | null;
+  albumHighlightArtistNames?: string[] | null;
+  targetArtists?: Array<{
+    artist_id?: string | null;
+    id?: string | null;
+    name?: string | null;
+    uri?: string | null;
+    url?: string | null;
+    image_url?: string | null;
+  }> | null;
   sourceTrack?: RecentTrack | null;
-};
-
-export type RepresentativePreviewResponse = {
-  track: RecentTrack | null;
-  reason?: string | null;
 };
 
 export type AuthTokenResponse = {
