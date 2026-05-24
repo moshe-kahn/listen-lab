@@ -9948,6 +9948,13 @@ export function App() {
     trackId ? (releaseTrackSiblingById.get(trackId) ?? 0) : 0;
   const hasReleaseSiblingForTrackId = (trackId: string | null | undefined) =>
     releaseSiblingSourceCountForTrackId(trackId) > 1;
+  const selectedPreviewReleaseSiblingSourceCount = selectedPreview?.hasReleaseTrackSiblings
+    ? selectedPreview.releaseTrackSourceCount ?? 0
+    : releaseSiblingSourceCountForTrackId(selectedPreview?.trackId ?? selectedPreview?.sourceTrack?.track_id);
+  const selectedPreviewHasReleaseSibling = selectedPreviewReleaseSiblingSourceCount > 1;
+  const selectedPreviewReleaseSiblingNote = selectedPreviewHasReleaseSibling
+    ? `Grouped with ${selectedPreviewReleaseSiblingSourceCount} source ${selectedPreviewReleaseSiblingSourceCount === 1 ? "version" : "versions"}`
+    : null;
   const allTimeLikedMatchCount = (profile?.top_tracks ?? []).filter((track) => recentTrackIsKnownLiked(track)).length;
   const allTimeTrackIdCount = (profile?.top_tracks ?? []).filter((track) => Boolean(track.track_id)).length;
   const likedTracksTotalCount = Number(likedTracksCache?.metadata?.last_active_count ?? (cachedLikedTracks.length > 0 ? cachedLikedTracks.length : likedTracksForActivitySource.length));
@@ -11509,8 +11516,8 @@ export function App() {
             <div className="detail-modal-copy">
               <h2>
                 {selectedPreviewIsKnownLiked ? <LikedBadge className="detail-liked-badge" /> : null}
-                {hasReleaseSiblingForTrackId(selectedPreview.trackId ?? selectedPreview.sourceTrack?.track_id) ? (
-                  <ReleaseSiblingBadge className="detail-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(selectedPreview.trackId ?? selectedPreview.sourceTrack?.track_id)} />
+                {selectedPreviewHasReleaseSibling ? (
+                  <ReleaseSiblingBadge className="detail-release-sibling-badge" sourceCount={selectedPreviewReleaseSiblingSourceCount} />
                 ) : null}
                 {selectedPreviewIsSharedArtistPage ? (
                   <span className="detail-modal-artist-links">
@@ -11691,6 +11698,9 @@ export function App() {
                     <span className="detail-modal-meta-text">{selectedPreview.meta}</span>
                   )}
                 </div>
+              ) : null}
+              {selectedPreview.kind === "track" && selectedPreviewReleaseSiblingNote ? (
+                <p className="detail-modal-release-note">{selectedPreviewReleaseSiblingNote}</p>
               ) : null}
               {selectedPreview.detail && selectedPreview.kind !== "track" && selectedPreview.kind !== "album" ? <p className="detail-modal-detail">{selectedPreview.detail}</p> : null}
               {selectedPreview.kind === "track" && !selectedPreviewEffectiveTrackUri ? (

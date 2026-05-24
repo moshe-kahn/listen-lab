@@ -1073,6 +1073,10 @@ export type PreviewItem = {
   trackUri: string | null;
   url: string;
   trackId?: string | null;
+  releaseTrackId?: number | null;
+  releaseTrackName?: string | null;
+  releaseTrackSourceCount?: number | null;
+  hasReleaseTrackSiblings?: boolean | null;
   albumId?: string | null;
   artistName?: string | null;
   artists?: Array<{

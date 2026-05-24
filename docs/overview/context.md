@@ -69,7 +69,9 @@ Current note:
   - `release_track`
   - `track_family` (implemented in schema/code as `analysis_track`)
 - release-track identity is now exposed in track-like payloads and is the intended UI identity for same-song semantics; Spotify track IDs remain provider/playback identifiers
-- liked stars are release-track-aware where release identity exists, while Activity grouping is still pending
+- Activity/Listened grouping now prefers `release_track_id`, while keeping representative Spotify track IDs/URIs for playback
+- track overlays can show a read-only source-version note such as `Grouped with 4 source versions` when release-track siblings exist
+- liked stars are release-track-aware where release identity exists
 - raw Spotify history may include podcast episode rows; keep them in raw history, but exclude them from the current music fact layer unless building podcast features
 - track variant grouping is now policy-driven, with an explicit ambiguous-review queue generated after refresh passes so borderline title families can be inspected with artist context
 - source Spotify catalog enrichment now exists as an evidence-gathering layer for identity review:
@@ -111,7 +113,7 @@ The internal release-level song identity used for display/state semantics when m
 Current rule:
 - UI liked state should prefer `release_track_id`.
 - Spotify track ID remains necessary for playback and source/version provenance.
-- Activity `Listened` grouping by `release_track_id` is the next planned semantic step.
+- Activity `Listened` grouping now prefers `release_track_id`.
 
 ### Source catalog metadata
 Provider metadata fetched for known source identifiers, such as Spotify track duration, ISRC, album id, album release date, and external IDs. This metadata is evidence for review and diagnostics, not an identity decision by itself.
@@ -210,7 +212,6 @@ The MVP succeeds when:
 - Fix the incorrect track count still shown for "Chronicles of a Diamond."
 - Improve local-mode image persistence and hydration so artist and album artwork survives mode switches more reliably.
 - Improve recent album ranking so 4-week and 6-month windows do not collapse to overly sparse results.
-- Group Activity `Listened` display rows by `release_track_id`, preserving event counts and concrete Spotify playback targets.
 - Later, group Activity `Liked` by `release_track_id` with clear wording because Spotify liked-track count and internal liked-release-track count can differ.
 - Later, inspect sibling/Track Family album appearances for current playback and consider a small related-album-art strip beside the home playback album art.
 - Use the Tracks page as the track-level formula comparison surface: canonical track rows/cards, side-by-side ranking formulas, and aggregate play metrics rather than event/session inspection.

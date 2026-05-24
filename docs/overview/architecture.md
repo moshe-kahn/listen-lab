@@ -74,8 +74,8 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend tracks-only comparison page for current vs new all-time ranking formulas
 - frontend recent-ingest controls for connect+ingest, before-cursor probe, backfill probe, and post-track-end polling
 - frontend recent-debug page for grouped recent-play inspection plus DB-archive pagination
-- frontend track-detail overlay enhancements for album-song browsing, playback toggles, and same-album track switching without full overlay reset
-- frontend liked-star state is release-track-aware where release identity is available, while playback still uses concrete Spotify track IDs/URIs
+- frontend track-detail overlay enhancements for album-song browsing, playback toggles, same-album track switching without full overlay reset, and release-track source-version notes
+- frontend liked-star state and Activity/Listened display grouping are release-track-aware where release identity is available, while playback still uses concrete Spotify track IDs/URIs
 - frontend helper extraction for API wrappers, shared constants/types, and Identity Audit support components is in progress; see `docs/reference/refactor-notes.md`
 - backend OAuth endpoints
 - backend token exchange and session storage

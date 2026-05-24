@@ -252,6 +252,8 @@ Current uncommitted playback UI behavior:
   - top `with ...` list controls delayed row highlighting and scrolls the first matching row into view
   - row-level `With` artists are clickable but do not trigger hover highlighting
   - row-level `With` clicks open a shared artist page for derived album main artist(s) plus the clicked guest
+  - track preview payloads expose top-level release-track metadata copied from the representative `RecentTrack`
+  - track overlays show a small `Grouped with N source versions` note when release-track siblings exist, while title/artist/album/image and playback remain representative Spotify-source based
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.
 

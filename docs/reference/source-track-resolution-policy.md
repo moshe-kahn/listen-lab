@@ -26,6 +26,7 @@ This policy is evidence and review guidance only. It does not authorize schema c
 Current UI direction:
 - release-track identity is the preferred same-song identity for liked/display state.
 - Activity/Listened display grouping prefers `release_track_id`, then falls back to Spotify track id, then normalized text identity.
+- Track preview payloads expose release-track metadata separately from Spotify track id/URI, and track overlays may show release-track sibling/source-version notes without changing playback identity.
 - Spotify track IDs remain concrete playback and provider-version identifiers.
 - Track Family should not be used for playback substitution without returning a playable representative Spotify URI.
 - Future related-album UI should first expose read-only related album appearances from the backend, with exact release-track siblings before broader Track Family matches.

@@ -193,7 +193,8 @@ UI identity direction:
 - `release_track_id` is the preferred UI identity for same-song state.
 - Spotify track ID remains source/version/playback identity.
 - Current frontend liked stars are release-track-aware.
-- Activity `Listened` grouping by `release_track_id` is planned next.
+- Activity `Listened` grouping now prefers `release_track_id`.
+- Track preview payloads expose release-track sibling metadata so overlays can show source-version transparency without changing playback identity.
 - Activity `Liked` grouping should remain a separate phase because displayed internal liked-release-track count can differ from Spotify liked-track count.
 
 ### Albums
