@@ -262,6 +262,9 @@ Current uncommitted recent-listening behavior:
 - Activity filter options are `Listened` and `All`; default is `Listened`.
 - `Listened` means at least 65% of the track was played.
 - Activity applies the filter before repeat/dedupe counting.
+- Activity display grouping uses `release_track_id` first, then Spotify track id, then normalized text identity.
+- Activity grouped rows keep a representative Spotify track id/uri from an actual `RecentTrack` row for playback.
+- Player recent dedupe remains Spotify-first and should not be widened without a separate QA pass.
 - Activity removed the visible `Recently played` label and the `Skipped` option.
 - Activity places the `Listen Log` button at the far right of the header.
 

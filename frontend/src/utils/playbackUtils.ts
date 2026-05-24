@@ -43,6 +43,18 @@ function playerRecentTrackKey(track: RecentTrack) {
   return `text:${(track.track_name ?? "").trim().toLocaleLowerCase()}::${(track.artist_name ?? "").trim().toLocaleLowerCase()}`;
 }
 
+export function activityRecentTrackKey(track: RecentTrack) {
+  const releaseTrackId = track.release_track_id;
+  if (typeof releaseTrackId === "number" && Number.isFinite(releaseTrackId) && releaseTrackId > 0) {
+    return `release_track:${releaseTrackId}`;
+  }
+  const id = track.track_id?.trim();
+  if (id) {
+    return `spotify_track:${id}`;
+  }
+  return `text:${(track.track_name ?? "").trim().toLocaleLowerCase()}::${(track.artist_name ?? "").trim().toLocaleLowerCase()}`;
+}
+
 function recentTrackIsComplete(track: RecentTrack) {
   if (typeof track.estimated_completion_ratio === "number" && track.estimated_completion_ratio >= 0.98) {
     return true;
@@ -100,7 +112,7 @@ export function filterAndDedupeRecentTracksForActivity(
     } else if (!recentTrackMatchesFilter(track, filter)) {
       continue;
     }
-    const key = playerRecentTrackKey(track);
+    const key = activityRecentTrackKey(track);
     const group = groups.get(key);
     if (group) {
       group.push(track);
