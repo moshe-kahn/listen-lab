@@ -11,6 +11,7 @@ from backend.app.track_sections import CanonicalTrackSectionItem, CanonicalTrack
 
 class RecentTopTrackQueryRow(TypedDict):
     track_identity: str
+    release_track_id: int | None
     spotify_track_id: str | None
     spotify_track_uri: str | None
     spotify_album_id: str | None
@@ -48,20 +49,36 @@ def query_recent_top_track_rows(
             """
             WITH normalized AS (
               SELECT
-                id,
-                canonical_ended_at AS played_at,
+                v_fact_play_event_with_sources.id,
+                v_fact_play_event_with_sources.canonical_ended_at AS played_at,
                 CASE
-                  WHEN spotify_track_id IS NOT NULL AND spotify_track_id != '' THEN spotify_track_id
-                  WHEN spotify_track_uri IS NOT NULL AND spotify_track_uri != '' THEN spotify_track_uri
+                  WHEN source_release.release_track_id IS NOT NULL THEN 'release_track:' || source_release.release_track_id
+                  WHEN v_fact_play_event_with_sources.spotify_track_id IS NOT NULL AND v_fact_play_event_with_sources.spotify_track_id != '' THEN v_fact_play_event_with_sources.spotify_track_id
+                  WHEN v_fact_play_event_with_sources.spotify_track_uri IS NOT NULL AND v_fact_play_event_with_sources.spotify_track_uri != '' THEN v_fact_play_event_with_sources.spotify_track_uri
                   ELSE '__unknown__:' || LOWER(TRIM(COALESCE(track_name_canonical, ''))) || ':' || LOWER(TRIM(COALESCE(artist_name_canonical, '')))
                 END AS track_identity,
-                spotify_track_id,
-                spotify_track_uri,
-                spotify_album_id,
-                track_name_canonical AS track_name_raw,
-                artist_name_canonical AS artist_name_raw,
-                album_name_canonical AS album_name_raw
+                source_release.release_track_id,
+                v_fact_play_event_with_sources.spotify_track_id,
+                v_fact_play_event_with_sources.spotify_track_uri,
+                v_fact_play_event_with_sources.spotify_album_id,
+                v_fact_play_event_with_sources.track_name_canonical AS track_name_raw,
+                v_fact_play_event_with_sources.artist_name_canonical AS artist_name_raw,
+                v_fact_play_event_with_sources.album_name_canonical AS album_name_raw
               FROM v_fact_play_event_with_sources
+              LEFT JOIN (
+                SELECT DISTINCT
+                  CASE
+                    WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+                    ELSE st.external_id
+                  END AS spotify_track_id,
+                  stm.release_track_id
+                FROM source_track_map stm
+                JOIN source_track st
+                  ON st.id = stm.source_track_id
+                WHERE stm.status = 'accepted'
+                  AND st.source_name IN ('spotify', 'spotify_uri')
+              ) source_release
+                ON source_release.spotify_track_id = v_fact_play_event_with_sources.spotify_track_id
               WHERE canonical_ended_at IS NOT NULL
             ),
             agg AS (
@@ -77,6 +94,14 @@ def query_recent_top_track_rows(
             )
             SELECT
               agg.track_identity AS track_identity,
+              (
+                SELECT n.release_track_id
+                FROM normalized n
+                WHERE n.track_identity = agg.track_identity
+                  AND n.release_track_id IS NOT NULL
+                ORDER BY n.played_at DESC, n.id DESC
+                LIMIT 1
+              ) AS release_track_id,
               (
                 SELECT n.spotify_track_id
                 FROM normalized n
@@ -145,6 +170,7 @@ def query_recent_top_track_rows(
         rows.append(
             {
                 "track_identity": str(row["track_identity"]),
+                "release_track_id": int(row["release_track_id"]) if row["release_track_id"] is not None else None,
                 "spotify_track_id": row["spotify_track_id"],
                 "spotify_track_uri": row["spotify_track_uri"],
                 "spotify_album_id": row["spotify_album_id"],
@@ -165,6 +191,7 @@ def map_recent_top_track_row_to_canonical_item(row: RecentTopTrackQueryRow) -> C
     all_time_play_count = int(row["all_time_play_count"])
     return {
         "track_id": row.get("spotify_track_id") or row["track_identity"],
+        "release_track_id": row.get("release_track_id"),
         "track_name": row.get("track_name_raw"),
         "artist_name": row.get("artist_name_raw"),
         "album_name": row.get("album_name_raw"),

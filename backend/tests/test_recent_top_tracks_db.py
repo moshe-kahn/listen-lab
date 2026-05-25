@@ -10,6 +10,7 @@ from backend.app.db import (
     ensure_sqlite_db,
     insert_ingest_run,
     insert_raw_spotify_history_observation,
+    sqlite_connection,
 )
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
 from backend.app.recent_top_tracks_db import build_recent_top_tracks_section_from_db
@@ -171,6 +172,64 @@ class RecentTopTracksDbTests(unittest.TestCase):
         self.assertIsNone(payload["items"][0]["uri"])
         self.assertEqual(2, payload["items"][0]["recent_play_count"])
 
+    def test_build_recent_top_tracks_section_groups_accepted_release_track_sources(self) -> None:
+        run_id = "history-run-release-track"
+        insert_ingest_run(
+            run_id=run_id,
+            source_type="export",
+            started_at="2026-04-20T12:00:00Z",
+            source_ref="test",
+        )
+
+        self._insert_history_row(
+            run_id=run_id,
+            source_row_key="track-a-source-1",
+            played_at="2026-04-19T08:00:00Z",
+            spotify_track_id="track-a",
+            spotify_track_uri="spotify:track:track-a",
+            track_name="Shared Song",
+            artist_name="Shared Artist",
+            album_name="Album A",
+        )
+        self._insert_history_row(
+            run_id=run_id,
+            source_row_key="track-a-source-2",
+            played_at="2026-04-18T08:00:00Z",
+            spotify_track_id="track-a-alt",
+            spotify_track_uri="spotify:track:track-a-alt",
+            track_name="Shared Song",
+            artist_name="Shared Artist",
+            album_name="Album B",
+        )
+        self._insert_history_row(
+            run_id=run_id,
+            source_row_key="track-b",
+            played_at="2026-04-20T08:00:00Z",
+            spotify_track_id="track-b",
+            spotify_track_uri="spotify:track:track-b",
+            track_name="Separate Song",
+            artist_name="Other Artist",
+            album_name="Album C",
+        )
+        release_track_id = self._insert_release_track_mapping("Shared Song", ["track-a", "track-a-alt"])
+
+        reconcile_fact_play_events_for_ingest_run(source_type="export", run_id=run_id)
+
+        payload = build_recent_top_tracks_section_from_db(
+            limit=5,
+            recent_range="short_term",
+            recent_window_days=28,
+            as_of_iso="2026-04-20T12:00:00Z",
+        )
+
+        self.assertEqual(2, len(payload["items"]))
+        self.assertEqual(release_track_id, payload["items"][0]["release_track_id"])
+        self.assertEqual(2, payload["items"][0]["recent_play_count"])
+        self.assertEqual(2, payload["items"][0]["all_time_play_count"])
+        self.assertEqual(2, payload["items"][0]["play_count"])
+        self.assertEqual("track-a", payload["items"][0]["track_id"])
+        self.assertEqual("track-b", payload["items"][1]["track_id"])
+
     def _insert_history_row(
         self,
         *,
@@ -205,6 +264,35 @@ class RecentTopTracksDbTests(unittest.TestCase):
             private_session=0,
             raw_payload_json="{}",
         )
+
+    def _insert_release_track_mapping(self, release_track_name: str, spotify_track_ids: list[str]) -> int:
+        with sqlite_connection() as connection:
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?) RETURNING id",
+                    (release_track_name, release_track_name.lower()),
+                ).fetchone()[0]
+            )
+            for track_id in spotify_track_ids:
+                source_track_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw)
+                        VALUES ('spotify', ?, ?, ?)
+                        RETURNING id
+                        """,
+                        (track_id, f"spotify:track:{track_id}", release_track_name),
+                    ).fetchone()[0]
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (source_track_id, release_track_id, match_method, confidence, status)
+                    VALUES (?, ?, 'test', 1.0, 'accepted')
+                    """,
+                    (source_track_id, release_track_id),
+                )
+            connection.commit()
+        return release_track_id
 
 
 if __name__ == "__main__":

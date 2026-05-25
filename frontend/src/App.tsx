@@ -733,7 +733,7 @@ export function App() {
     if (track.isLiked === true) {
       return true;
     }
-    const releaseTrackId = releaseTrackIdForSpotifyTrackId(track.trackId);
+    const releaseTrackId = track.releaseTrackId ?? releaseTrackIdForSpotifyTrackId(track.trackId);
     if (typeof releaseTrackId === "number" && likedReleaseTrackIdsForDisplay.has(releaseTrackId)) {
       return true;
     }
@@ -9816,8 +9816,8 @@ export function App() {
                       <div className="player-recent-copy player-queue-drag-copy">
                         <span className="player-recent-track single-line-ellipsis">
                           {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                          {hasReleaseSiblingForTrackId(track.trackId) ? (
-                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                          {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
+                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
                           ) : null}
                           {track.name}
                         </span>
@@ -9827,8 +9827,8 @@ export function App() {
                       <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
                         <span className="player-recent-track single-line-ellipsis">
                           {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                          {hasReleaseSiblingForTrackId(track.trackId) ? (
-                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                          {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
+                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
                           ) : null}
                           {track.name}
                         </span>
@@ -10876,8 +10876,8 @@ export function App() {
                                     <div className="player-recent-copy player-queue-drag-copy">
                                       <span className="player-recent-track single-line-ellipsis">
                                         {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                                        {hasReleaseSiblingForTrackId(track.trackId) ? (
-                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                                        {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
+                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
                                         ) : null}
                                         {track.name}
                                       </span>
@@ -10893,8 +10893,8 @@ export function App() {
                                     >
                                       <span className="player-recent-track single-line-ellipsis">
                                         {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                                        {hasReleaseSiblingForTrackId(track.trackId) ? (
-                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.trackId)} />
+                                        {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
+                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
                                         ) : null}
                                         {track.name}
                                       </span>

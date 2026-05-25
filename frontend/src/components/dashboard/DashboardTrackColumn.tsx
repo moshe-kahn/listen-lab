@@ -87,8 +87,12 @@ export function DashboardTrackColumn({
       || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
       || (track.track_id && likedTrackIds?.has(track.track_id)),
     );
-  const releaseSiblingSourceCount = (track: RecentTrack) =>
-    track.track_id ? (releaseTrackSiblingById?.get(track.track_id) ?? 0) : 0;
+  const releaseSiblingSourceCount = (track: RecentTrack) => {
+    if (track.has_release_track_siblings) {
+      return track.release_track_source_count ?? 0;
+    }
+    return track.track_id ? (releaseTrackSiblingById?.get(track.track_id) ?? 0) : 0;
+  };
 
   const cappedRows = isAllTimeTrackSection || section === "tracksRecent"
     ? capTracksPerAlbum(rankedItems, 1)

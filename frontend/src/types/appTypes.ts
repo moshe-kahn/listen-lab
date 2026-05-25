@@ -1238,6 +1238,10 @@ export type PlayerTrackSummary = {
 
 export type PlayerQueueTrack = PlayerTrackSummary & {
   trackId: string | null;
+  releaseTrackId?: number | null;
+  releaseTrackName?: string | null;
+  releaseTrackSourceCount?: number | null;
+  hasReleaseTrackSiblings?: boolean | null;
   albumId: string | null;
   isLiked?: boolean | null;
   likedAt?: string | null;
