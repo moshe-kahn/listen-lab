@@ -25,6 +25,12 @@ import type {
   TrackIdentityAuditResponse,
   TrackMappingLineageResponse,
   AmbiguousReviewResponse,
+  RecordingTrackCandidateFilters,
+  RecordingTrackCandidatesResponse,
+  RecordingTrackCandidatesSummary,
+  RecordingTrackCandidateReviewsResponse,
+  RecordingTrackCandidateReviewSaveRequest,
+  RecordingTrackCandidateReviewSaveResponse,
 } from "../types/appTypes";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
@@ -648,6 +654,128 @@ export async function fetchIdentityAuditAmbiguousReview(): Promise<AmbiguousRevi
       throw new Error(`Identity Audit Ambiguous Review (${response.status}): ${detail}`);
     }
     return (await response.json()) as AmbiguousReviewResponse;
+  }
+
+export async function fetchRecordingTrackCandidates(
+    filters: RecordingTrackCandidateFilters = {},
+  ): Promise<RecordingTrackCandidatesResponse> {
+    const params = new URLSearchParams();
+    params.set("limit", String(filters.limit ?? 50));
+    params.set("offset", String(filters.offset ?? 0));
+    if (filters.safety_status) {
+      params.set("safety_status", filters.safety_status);
+    }
+    if (filters.candidate_type) {
+      params.set("candidate_type", filters.candidate_type);
+    }
+    if (filters.relationship_kind?.trim()) {
+      params.set("relationship_kind", filters.relationship_kind.trim());
+    }
+    if (typeof filters.min_confidence === "number" && Number.isFinite(filters.min_confidence)) {
+      params.set("min_confidence", String(filters.min_confidence));
+    }
+    if (typeof filters.include_track_family_candidates === "boolean") {
+      params.set("include_track_family_candidates", String(filters.include_track_family_candidates));
+    }
+    if (filters.q?.trim()) {
+      params.set("q", filters.q.trim());
+    }
+    if (filters.artist?.trim()) {
+      params.set("artist", filters.artist.trim());
+    }
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/recording-track-candidates?${params.toString()}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load recording track candidates.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Recording Track Candidates (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as RecordingTrackCandidatesResponse;
+  }
+
+export async function fetchRecordingTrackCandidatesSummary(): Promise<RecordingTrackCandidatesSummary> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/recording-track-candidates/summary`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load recording track candidate summary.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Recording Track Candidate Summary (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as RecordingTrackCandidatesSummary;
+  }
+
+export async function fetchRecordingTrackCandidateReviews(limit: number = 2000, offset: number = 0): Promise<RecordingTrackCandidateReviewsResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/recording-track-candidate-reviews?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load recording track candidate reviews.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Recording Track Candidate Reviews (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as RecordingTrackCandidateReviewsResponse;
+  }
+
+export async function saveRecordingTrackCandidateReview(
+    payload: RecordingTrackCandidateReviewSaveRequest,
+  ): Promise<RecordingTrackCandidateReviewSaveResponse> {
+    const response = await fetch(`${apiBaseUrl}/debug/tracks/recording-track-candidate-reviews`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      let detail = "Failed to save recording track candidate review.";
+      try {
+        const errorPayload = (await response.json()) as { detail?: string };
+        if (errorPayload.detail) {
+          detail = errorPayload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Recording Track Candidate Review Save (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as RecordingTrackCandidateReviewSaveResponse;
   }
 
 export async function fetchIdentityAuditSavedSubmissions(limit: number = 20, offset: number = 0): Promise<IdentityAuditSavedSubmissionListResponse> {

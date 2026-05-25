@@ -170,15 +170,22 @@ Artists are simpler than tracks and albums, but still need source mapping.
 - `release_track`
   - the display-level track
   - distinguishes version and release context when we care
+- `recording_track`
+  - proposed normal-listening track identity between `release_track` and `track_family`
+  - groups release tracks that represent the same core recorded performance or master lineage across albums, singles, compilations, soundtracks, rereleases, remasters, and compatible mono/stereo cases
+  - preserves release appearances and source provenance while allowing one representative release/playback choice
 - `track_family`
-  - the grouping-level track used for conservative same-composition candidates, scoring, and rollups
+  - the broader grouping-level track used for related variants, scoring, and rollups
+  - contains variants that should not collapse into one `recording_track`, such as meaningful radio edits, alternate takes, demos, live versions, acoustic versions, remixes, and rerecordings
   - current schema/code term: `analysis_track`
 - `source_track`
   - one provider-specific track object
 
 Mapping direction:
 - many `source_track` -> one `release_track`
-- many `release_track` -> one `track_family`
+- many `release_track` -> one `recording_track` (proposed; not current schema)
+- many `recording_track` -> one `track_family` (proposed)
+- current schema maps many `release_track` -> one `analysis_track`
 
 Current implementation note:
 - `source_track -> release_track` dedupe is intentionally conservative and rerunnable
@@ -187,7 +194,10 @@ Current implementation note:
   - no-Spotify-ID music rows with title text use the existing `history_raw` fallback key
   - Spotify podcast episodes are not mapped into `release_track`
 - `release_track -> track_family` is now driven by a policy/config layer plus variant-title interpretation, not by one hardcoded title-heuristic block
+- future `recording_track` should split the current broad jump from release-level identity to family-level identity into a normal-listening same-recording layer and a broader related-version layer
 - `track_family` should still be treated as a conservative grouping layer, not as the final universal canonical track identity for every downstream analysis
+- current recording-track support is read-only/debug only: candidate endpoints, summary evidence buckets, CLI inspection, and saved review decisions exist, but no durable `recording_track` table or promotion/apply path exists
+- saved recording-track candidate reviews preserve the reviewed candidate snapshot and manual judgment metadata, but they are not active identity mappings
 
 UI identity direction:
 - `release_track_id` is the preferred UI identity for same-song state.
@@ -196,6 +206,8 @@ UI identity direction:
 - Activity `Listened` grouping now prefers `release_track_id`.
 - Track preview payloads expose release-track sibling metadata so overlays can show source-version transparency without changing playback identity.
 - Activity `Liked` grouping should remain a separate phase because displayed internal liked-release-track count can differ from Spotify liked-track count.
+- Future `recording_track_id` can become the default normal-song aggregation identity after read-only evidence, review UI, and representative playback rules exist.
+- Current `recording_track` review decisions should be treated as evidence for future classifier tuning and schema design, not as product identity.
 
 ### Albums
 - `release_album`
@@ -373,6 +385,19 @@ CREATE TABLE release_track (
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
+-- Proposed future layer; not current schema.
+CREATE TABLE recording_track (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  primary_name TEXT NOT NULL,
+  normalized_name TEXT,
+  representative_release_track_id INTEGER REFERENCES release_track(id),
+  representative_source_track_id INTEGER REFERENCES source_track(id),
+  representative_reason TEXT,
+  grouping_note TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
 CREATE TABLE analysis_track (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   primary_name TEXT NOT NULL,
@@ -406,6 +431,23 @@ CREATE TABLE source_track_map (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(source_track_id, release_track_id)
+);
+
+-- Proposed future layer; not current schema.
+CREATE TABLE recording_track_map (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  release_track_id INTEGER NOT NULL REFERENCES release_track(id),
+  recording_track_id INTEGER NOT NULL REFERENCES recording_track(id),
+  relationship_kind TEXT NOT NULL,
+  match_method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL,
+  is_user_confirmed INTEGER NOT NULL DEFAULT 0,
+  explanation TEXT,
+  evidence_json TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(release_track_id, recording_track_id)
 );
 
 CREATE TABLE analysis_track_map (

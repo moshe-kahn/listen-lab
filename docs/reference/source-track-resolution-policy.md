@@ -19,17 +19,22 @@ This policy is evidence and review guidance only. It does not authorize schema c
 
 - `source_track`: provider/source identity. One Spotify track ID remains one source row.
 - `release_track`: ListenLab release-level track identity. Multiple Spotify source tracks may map here when they appear to be the same recording in the same album-track role.
-- Track Family (`analysis_track` in current code): broader song or analysis grouping. Alternate recordings, demos, remixes, live versions, and clean/explicit variants may relate here even when they should not collapse into one release track.
+- `recording_track` (proposed layer): normal listening identity for the same core recorded performance or master lineage across releases. This can group separate `release_track` rows for album version, single release, compilation appearance, soundtrack appearance, rerelease, remaster, and mono/stereo cases when evidence supports same core recording. It should not include materially different performances or arrangements.
+- Track Family (`analysis_track` in current code): broader song or analysis grouping above `recording_track`. Radio edits, alternate takes, demos, acoustic versions, live versions, remixes, rerecordings, and clean/explicit variants may relate here even when they should not collapse into one `recording_track`.
 - Album family: related album/release variants. Deluxe, regional, reissue, and label variants may belong to one family while remaining separate album releases.
 - Representative display metadata: derived display values chosen from evidence, not a blind copy of one Spotify album or track.
+- Representative playback metadata: a concrete playable source-track choice for a `release_track` or future `recording_track`; this may differ from the best representative display row.
 
 Current UI direction:
 - release-track identity is the preferred same-song identity for liked/display state.
 - Activity/Listened display grouping prefers `release_track_id`, then falls back to Spotify track id, then normalized text identity.
 - Track preview payloads expose release-track metadata separately from Spotify track id/URI, and track overlays may show release-track sibling/source-version notes without changing playback identity.
 - Spotify track IDs remain concrete playback and provider-version identifiers.
+- Future `recording_track` identity should become the default normal-song aggregation layer only after read-only evidence, review policy, and representative playback selection are defined.
+- Current Recording Tracks Identity Audit support is read-only/manual-review only: candidate evidence and saved decisions help inspect quality, but saved reviews do not create or apply `recording_track` identity.
+- `recording_track` should expose release appearances and selectable playback source versions without hiding the underlying `release_track` provenance.
 - Track Family should not be used for playback substitution without returning a playable representative Spotify URI.
-- Future related-album UI should first expose read-only related album appearances from the backend, with exact release-track siblings before broader Track Family matches.
+- Future related-album UI should first expose read-only related album appearances from the backend, with exact release-track siblings, then `recording_track` release appearances, then broader Track Family matches.
 
 ## Classification Checklist
 
@@ -120,6 +125,55 @@ For overlapping original-album tracks:
 - map related alternate versions to the same Track Family only when the track-variant policy supports it
 
 Do not choose the original or deluxe album as a global canonical album by default.
+
+### Recording-Track Candidate
+
+Classify separate release tracks as the same future `recording_track` when evidence supports the same core recorded performance or master lineage across releases.
+
+Strong candidate signals:
+
+- same ISRC
+- compatible title, artist, duration, and release context even when ISRC differs or is missing, especially for remaster, reissue, single, compilation, or soundtrack appearances
+- same or near-identical duration
+- same primary artist
+- compatible title after removing non-identity release/version annotations
+- album relationship is original/single/compilation/soundtrack/rerelease/remaster, not a clearly different performance context
+- no demo, live, acoustic, remix, alternate-take, rerecording, or materially different edit signal
+
+Potential same-`recording_track` relationships include:
+
+- album release and single release of the same track
+- compilation or soundtrack appearance of the same track
+- regional rerelease with the same core track
+- remaster or reissue where the song structure and performance are the same
+- mono/stereo variants when evidence supports the same session or master lineage
+
+Do not use `recording_track` to hide provenance. A `recording_track` should preserve each release appearance, album context, source Spotify identity, and evidence reason. It may choose a representative release track and a separate concrete playable source track, but Spotify source track id/URI remain the playback identity.
+
+Current debug candidate evidence buckets:
+
+- `same_isrc`
+- `conflicting_isrc_but_compatible_metadata`
+- `missing_isrc_but_compatible_metadata`
+- `partial_isrc_match`
+- `variant_flag_excluded`
+- `metadata_review_required`
+
+Different ISRC is expected for some remasters and alternate masters. Treat compatible different-ISRC candidates as review-required unless future manual review findings justify a narrower safe path.
+
+Saved recording-track candidate reviews may record `accepted`, `rejected`, `unsure`, `needs_more_metadata`, `wrong_representative`, `maybe_split`, or `maybe_merge_more`, with notes and candidate snapshots. These saved reviews are audit evidence only and must not be interpreted as active canonical identity.
+
+Escalate to Track Family, not same `recording_track`, when the candidate appears to be:
+
+- a live performance
+- a demo
+- an acoustic or session version
+- an alternate take
+- a remix or rework
+- a rerecording
+- a radio/edit version with meaningful structural or duration changes
+
+Radio edits and clean/explicit variants are borderline. Treat them as review-required and record the relationship strength rather than auto-collapsing into `recording_track`.
 
 ### Explicit, Clean, Video, Demo, Or Remix Variant
 
@@ -293,4 +347,6 @@ Do not add as part of this policy:
 - backend endpoints
 - automatic canonical album selection
 - automatic canonical source-track selection
+- automatic `recording_track` creation or representative playback selection
 - identity mutation from catalog metadata alone
+- identity mutation from saved recording-track candidate reviews alone

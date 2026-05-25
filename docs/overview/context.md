@@ -64,16 +64,19 @@ Current note:
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
 - the dashboard now also includes a track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, and a merged-event `Listening Log` page for chronology/source inspection
-- track identity work now also includes a conservative three-layer model:
+- track identity work now includes a conservative identity model:
   - `source_track`
   - `release_track`
+  - proposed `recording_track` layer for normal same-song identity across releases/remasters/compilations while preserving release provenance
   - `track_family` (implemented in schema/code as `analysis_track`)
+- the Recording Tracks Identity Audit tab is now a read-only/manual-review surface for proposed `recording_track` candidates; saved reviews preserve candidate snapshots and reviewer notes but do not apply identity changes
 - release-track identity is now exposed in track-like payloads and is the intended UI identity for same-song semantics; Spotify track IDs remain provider/playback identifiers
 - Activity/Listened grouping now prefers `release_track_id`, while keeping representative Spotify track IDs/URIs for playback
 - track overlays can show a read-only source-version note such as `Grouped with 4 source versions` when release-track siblings exist
 - liked stars are release-track-aware where release identity exists
 - raw Spotify history may include podcast episode rows; keep them in raw history, but exclude them from the current music fact layer unless building podcast features
 - track variant grouping is now policy-driven, with an explicit ambiguous-review queue generated after refresh passes so borderline title families can be inspected with artist context
+- recording-track candidate discovery has debug endpoints, summary evidence buckets, and local review persistence for manual judgment collection before any durable `recording_track` promotion path exists
 - source Spotify catalog enrichment now exists as an evidence-gathering layer for identity review:
   - priority metadata runs fetch Spotify track and album metadata into source catalog tables
   - track metadata backfill prioritizes duplicate/split/suggested identity candidates before broad backlog

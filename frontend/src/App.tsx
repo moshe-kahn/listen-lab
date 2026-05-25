@@ -159,6 +159,7 @@ import {
   renderIdentityAuditGroup,
   type TrackIdentityAuditExample,
 } from "./components/identityAudit/IdentityAuditDiagnostics";
+import { RecordingTrackCandidatesTab } from "./components/identityAudit/RecordingTrackCandidatesTab";
 import { FormulaLabPage } from "./components/formulaLab/FormulaLabPage";
 import {
   IssueFeed,
@@ -8209,6 +8210,7 @@ export function App() {
       { value: "problems", label: "Problems" },
       { value: "mapping", label: "Mapping" },
       { value: "review_queue", label: "Review Queue" },
+      { value: "recording_tracks", label: "Recording Tracks" },
     ];
     const albumTabs: Array<{ value: AlbumIdentityAuditTab; label: string }> = [
       { value: "problems", label: "Problems" },
@@ -8307,6 +8309,7 @@ export function App() {
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "problems" ? renderTrackIdentityAuditProblemsTab() : null}
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "mapping" ? renderTrackIdentityAuditMappingTab() : null}
         {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "review_queue" ? renderTrackIdentityAuditAmbiguousTab() : null}
+        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "recording_tracks" ? <RecordingTrackCandidatesTab /> : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "problems" ? renderAlbumIdentityAuditProblemsTab() : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "merge_review" ? renderAlbumIdentityAuditMergeReviewTab() : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "catalog" ? renderAlbumIdentityAuditCatalogTab() : null}

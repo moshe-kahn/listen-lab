@@ -7,6 +7,12 @@ from fastapi.responses import JSONResponse
 
 from backend.app.auth.session import _require_local_data_session
 from backend.app.merged_track_aggregate import _merged_track_aggregate_payload
+from backend.app.recording_track_candidates import query_recording_track_candidates, summarize_recording_track_candidates
+from backend.app.recording_track_candidate_reviews import (
+    get_recording_track_candidate_review,
+    list_recording_track_candidate_reviews,
+    save_recording_track_candidate_review,
+)
 from backend.app.track_identity_audit import (
     build_track_identity_audit,
     build_track_identity_readiness_report,
@@ -95,6 +101,93 @@ async def debug_tracks_identity_audit_suggested_groups(
         offset=offset,
         status=status_filter,
     )
+
+
+@router.get("/debug/tracks/recording-track-candidates")
+async def debug_tracks_recording_track_candidates(
+    request: Request,
+    limit: int = 50,
+    offset: int = 0,
+    safety_status: str | None = None,
+    candidate_type: str | None = None,
+    relationship_kind: str | None = None,
+    min_confidence: float | None = None,
+    include_track_family_candidates: bool = True,
+    same_isrc_only: bool = False,
+    q: str | None = None,
+    artist: str | None = None,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return query_recording_track_candidates(
+        limit=limit,
+        offset=offset,
+        safety_status=safety_status,
+        candidate_type=candidate_type,
+        relationship_kind=relationship_kind,
+        min_confidence=min_confidence,
+        include_track_family_candidates=include_track_family_candidates,
+        same_isrc_only=same_isrc_only,
+        q=q,
+        artist=artist,
+    )
+
+
+@router.get("/debug/tracks/recording-track-candidates/summary")
+async def debug_tracks_recording_track_candidates_summary(
+    request: Request,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return summarize_recording_track_candidates(sample_limit=sample_limit)
+
+
+@router.post("/debug/tracks/recording-track-candidate-reviews")
+async def debug_tracks_recording_track_candidate_reviews_create(
+    request: Request,
+    payload: Any = Body(...),
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payload must be a JSON object.",
+        )
+    try:
+        return save_recording_track_candidate_review(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/debug/tracks/recording-track-candidate-reviews")
+async def debug_tracks_recording_track_candidate_reviews_list(
+    request: Request,
+    limit: int = 500,
+    offset: int = 0,
+    decision: str | None = None,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return list_recording_track_candidate_reviews(limit=limit, offset=offset, decision=decision)
+
+
+@router.get("/debug/tracks/recording-track-candidate-reviews/{review_id}")
+async def debug_tracks_recording_track_candidate_reviews_read(
+    request: Request,
+    review_id: int,
+) -> Any:
+    _require_local_data_session(request)
+    payload = get_recording_track_candidate_review(review_id)
+    if payload is None:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "ok": False,
+                "error": {
+                    "code": "recording_track_candidate_review_not_found",
+                    "message": f"Recording track candidate review {review_id} was not found.",
+                },
+            },
+        )
+    return payload
 
 
 @router.post("/debug/tracks/identity-audit/submission-preview/validate")

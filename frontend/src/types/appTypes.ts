@@ -426,6 +426,177 @@ export type AmbiguousReviewResponse = {
   parse_warning: string;
 };
 
+export type RecordingTrackCandidateType = "recording_track_candidate" | "track_family_candidate";
+export type RecordingTrackSafetyStatus = "safe_candidate" | "needs_review" | "unsafe";
+export type RecordingTrackReviewDecision =
+  | "accepted"
+  | "rejected"
+  | "unsure"
+  | "needs_more_metadata"
+  | "wrong_representative"
+  | "maybe_split"
+  | "maybe_merge_more";
+
+export type RecordingTrackCandidateFilters = {
+  limit?: number;
+  offset?: number;
+  safety_status?: RecordingTrackSafetyStatus;
+  candidate_type?: RecordingTrackCandidateType;
+  relationship_kind?: string;
+  min_confidence?: number;
+  include_track_family_candidates?: boolean;
+  q?: string;
+  artist?: string;
+};
+
+export type RecordingTrackCandidateRepresentative = {
+  release_track_id: number | null;
+  source_track_id: number | string | null;
+  reason: string;
+};
+
+export type RecordingTrackCandidateEvidence = {
+  normalized_title?: string;
+  version_tokens?: string[];
+  album_context?: string;
+  duration_delta_ms?: number | null;
+};
+
+export type RecordingTrackCandidateMember = {
+  release_track_id: number;
+  title: string;
+  artist: string;
+  album: string;
+  release_album_ids?: number[];
+  spotify_album_ids?: string[];
+  album_release_dates?: string[];
+  album_types?: string[];
+  source_track_ids: string[];
+  source_track_db_ids?: number[];
+  source_track_uris?: string[];
+  isrc: string | null;
+  isrc_values?: string[];
+  duration_ms: number | null;
+  duration_values_ms?: number[];
+  evidence: RecordingTrackCandidateEvidence;
+};
+
+export type RecordingTrackCandidateItem = {
+  candidate_key: string;
+  display_name: string;
+  candidate_type: RecordingTrackCandidateType;
+  safety_status: RecordingTrackSafetyStatus;
+  confidence: number;
+  relationship_kind: string;
+  relationship_strength: string;
+  evidence_bucket?: string;
+  representative: RecordingTrackCandidateRepresentative;
+  members: RecordingTrackCandidateMember[];
+  why_grouped: string[];
+  why_review: string[];
+};
+
+export type RecordingTrackCandidatesResponse = {
+  items: RecordingTrackCandidateItem[];
+  limit: number;
+  offset: number;
+  total: number;
+  returned: number;
+  has_more: boolean;
+  filters: {
+    safety_status: string | null;
+    candidate_type: string | null;
+    relationship_kind: string | null;
+    min_confidence: number | null;
+    include_track_family_candidates: boolean;
+    same_isrc_only?: boolean;
+    q: string | null;
+    artist: string | null;
+  };
+  source: {
+    kind: string;
+    uses_spotify_api: boolean;
+    mutates_identity: boolean;
+  };
+};
+
+export type RecordingTrackCandidatesSummary = {
+  total_candidate_groups: number;
+  source_tracks_with_isrc_available?: number;
+  release_tracks_with_isrc_available?: number;
+  release_tracks_with_multiple_isrcs?: number;
+  count_by_candidate_type: Record<string, number>;
+  count_by_safety_status: Record<string, number>;
+  count_by_relationship_kind: Record<string, number>;
+  count_by_relationship_strength: Record<string, number>;
+  count_by_evidence_bucket?: Record<string, number>;
+  count_with_same_isrc_evidence: number;
+  count_with_missing_isrc: number;
+  count_by_has_isrc_evidence?: Record<string, number>;
+  count_by_same_isrc?: Record<string, number>;
+  count_with_duration_delta_over_threshold?: number;
+  duration_delta_threshold_ms?: number;
+  top_needs_review_reasons?: Record<string, number>;
+  sample_safe_candidate_groups?: RecordingTrackCandidateItem[];
+  sample_needs_review_groups?: RecordingTrackCandidateItem[];
+  sample_track_family_candidate_groups?: RecordingTrackCandidateItem[];
+  sample_same_isrc_groups?: RecordingTrackCandidateItem[];
+  sample_metadata_missing_groups?: RecordingTrackCandidateItem[];
+  sample_conflicting_isrc_compatible_metadata_groups?: RecordingTrackCandidateItem[];
+  sample_missing_isrc_compatible_metadata_groups?: RecordingTrackCandidateItem[];
+  sample_partial_isrc_match_groups?: RecordingTrackCandidateItem[];
+  sample_variant_flag_excluded_groups?: RecordingTrackCandidateItem[];
+  source: {
+    kind: string;
+    uses_spotify_api: boolean;
+    mutates_identity: boolean;
+  };
+};
+
+export type RecordingTrackCandidateReviewItem = {
+  id: number;
+  candidate_key: string;
+  decision: RecordingTrackReviewDecision;
+  reviewer_note: string | null;
+  preferred_representative_release_track_id: number | null;
+  preferred_playback_source_track_id: number | null;
+  candidate_snapshot: RecordingTrackCandidateItem | Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RecordingTrackCandidateReviewsResponse = {
+  ok: boolean;
+  items: RecordingTrackCandidateReviewItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  source: {
+    kind: string;
+    uses_spotify_api: boolean;
+    mutates_identity: boolean;
+  };
+};
+
+export type RecordingTrackCandidateReviewSaveRequest = {
+  candidate_key: string;
+  decision: RecordingTrackReviewDecision;
+  reviewer_note?: string | null;
+  preferred_representative_release_track_id?: number | null;
+  preferred_playback_source_track_id?: number | null;
+  candidate_snapshot: RecordingTrackCandidateItem;
+};
+
+export type RecordingTrackCandidateReviewSaveResponse = {
+  ok: boolean;
+  item: RecordingTrackCandidateReviewItem;
+  source: {
+    kind: string;
+    uses_spotify_api: boolean;
+    mutates_identity: boolean;
+  };
+};
+
 export type SuggestedGroupReleaseTrack = {
   release_track_id: number;
   release_track_name: string;

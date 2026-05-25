@@ -8,6 +8,7 @@
 - If the user's command ends with the word `now`, skip the review/wait step and execute the task directly.
 - When the user asks to change assistant behavior, ask whether to save that behavior rule to this file.
 - At the start of a new session or after context compaction, read `docs/current-handoff.md` first if available, then follow only the doc pointers relevant to the task.
+- Frontend compartmentalization: do not add substantial new UI directly to `frontend/src/App.tsx`. Keep `App.tsx` for high-level routing/layout/wiring. Put feature UI in focused components under `frontend/src/components/...`, API calls in `frontend/src/api/appApi.ts`, and shared types in `frontend/src/types/appTypes.ts`. Prefer minimal, compartmentalized diffs. If a change would add a large block to `App.tsx`, create or extract a component instead. Avoid broad refactors unless explicitly requested.
 - Force-stop any test/dev server processes you start before ending the turn, unless you explicitly need to leave one running for the user; if leaving one running, say which process/port and why.
 - If the user says `end session`, update `docs/current-handoff.md` with current state, tests, and next task, then give a short resume prompt for the next chat.
 - If the user says `end session and commit`, first do the `end session` handoff update, then update relevant overview/reference docs for the full uncommitted scope, summarize the staged-ready changes, and propose a commit message. Do not actually create the commit unless the user explicitly confirms committing.

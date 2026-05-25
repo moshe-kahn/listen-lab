@@ -1407,6 +1407,35 @@ ALTER TABLE spotify_liked_track_cache
 ALTER TABLE spotify_liked_track_cache
   ADD COLUMN artist_ids TEXT;
 """,
+    30: """
+CREATE TABLE IF NOT EXISTS recording_track_candidate_review (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_key TEXT NOT NULL UNIQUE,
+  decision TEXT NOT NULL CHECK (
+    decision IN (
+      'accepted',
+      'rejected',
+      'unsure',
+      'needs_more_metadata',
+      'wrong_representative',
+      'maybe_split',
+      'maybe_merge_more'
+    )
+  ),
+  reviewer_note TEXT,
+  preferred_representative_release_track_id INTEGER,
+  preferred_playback_source_track_id INTEGER,
+  candidate_snapshot_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_recording_track_candidate_review_decision
+  ON recording_track_candidate_review(decision);
+
+CREATE INDEX IF NOT EXISTS idx_recording_track_candidate_review_updated_at
+  ON recording_track_candidate_review(updated_at);
+""",
 }
 
 
