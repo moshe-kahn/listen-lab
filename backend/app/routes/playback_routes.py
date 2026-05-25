@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 
 from backend.app.artist_album_evidence import list_artist_album_evidence
-from backend.app.auth.session import _require_user_id
+from backend.app.auth.session import _require_local_data_session, _require_user_id
 from backend.app.auth.token import _require_token
 from backend.app.db import (
     complete_ingest_run,
@@ -19,6 +19,7 @@ from backend.app.db import (
     update_listenlab_player_play_progress,
 )
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
+from backend.app.release_track_detail import ReleaseTrackDetailNotFound, get_release_track_detail
 from backend.app.release_track_metadata import enrich_album_track_rows_with_release_metadata
 from backend.app.spotify_catalog_backfill import (
     _upsert_album_track,
@@ -57,6 +58,24 @@ def _spotify_track_id_from_uri(track_uri: str | None) -> str | None:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+@router.get("/tracks/release-track/{release_track_id}")
+async def tracks_release_track_detail(
+    request: Request,
+    release_track_id: int,
+    context_spotify_track_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    if release_track_id <= 0:
+        raise HTTPException(status_code=400, detail="release_track_id must be a positive integer.")
+    try:
+        return get_release_track_detail(
+            release_track_id,
+            context_spotify_track_id=context_spotify_track_id,
+        )
+    except ReleaseTrackDetailNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _cached_album_id_for_track(spotify_track_id: str) -> str | None:
