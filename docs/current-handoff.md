@@ -15,85 +15,117 @@ Avoid reading every doc by default.
 ## Current State
 Active branch: `frontend-app-refactor`.
 
-Latest committed baseline before this handoff update:
-- `8668edf` `Group Activity listens by release track`
+Worktree status at handoff update start:
+- Clean before editing this handoff.
 
-Scope in latest commit:
-- Track preview payloads now expose release-track metadata at top level on `PreviewItem`.
-- Track detail overlays use those explicit preview fields for RT badge/source-count reads before falling back to the existing Spotify track-id metadata lookup.
-- Track overlays show a small read-only note, `Grouped with N source versions`, when the selected preview has release-track siblings.
-- Spotify `track_id` / `uri` remain the playback identity.
-- Overlay title, artist, album, image, and Spotify URL behavior remain source/representative-row based.
-- No backend endpoint, identity write, merge, promotion, or Activity grouping behavior was changed in this scope.
+Latest commits:
+- `072e863` `Add release-track detail endpoint`
+- `2d2a8b5` `Show release-track detail in track overlays`
+
+Release-track overlay work is committed end to end:
+- Backend exposes a read-only canonical release-track detail endpoint.
+- Frontend track overlays fetch that endpoint when a selected preview has `releaseTrackId`.
+- Activity/Listened grouping by `release_track_id` remains unchanged.
+- Spotify source track id / URI remain the playback identity.
+- No write, merge, promotion, raw event mutation, liked sync change, or identity semantics change exists in this scope.
 
 Known local processes:
-- Codex started frontend Vite on `127.0.0.1:5174` for QA and stopped it.
-- Backend was already running on `127.0.0.1:8000` during checkpoint QA and returned HTTP 200 for `/auth/session`; Codex did not start or stop that process. It was no longer listening during the final pre-commit recheck.
+- Backend and frontend dev servers started for normal-proxy QA were stopped before commit.
+- No dev server is intentionally left running.
 
-## Work Completed
-Committed before this handoff:
-- Phase 3 Activity/Listened display grouping now prefers internal `release_track_id`.
-- `activityRecentTrackKey` in `frontend/src/utils/playbackUtils.ts` groups Activity rows by:
-  1. `release_track:<release_track_id>` when the id is a positive finite number.
-  2. `spotify_track:<track_id>` when Spotify/source track id is present.
-  3. normalized `track_name` / `artist_name` text key.
-- Grouped Activity rows still use an actual `RecentTrack` representative row, preserving Spotify `track_id` / `uri` for playback actions.
-- Player recent dedupe remains Spotify-first.
+## Endpoint
+Backend endpoint:
+- `GET /tracks/release-track/{release_track_id}?context_spotify_track_id=...`
 
-Current overlay polish:
-- Added top-level optional `PreviewItem` fields:
-  - `releaseTrackId`
-  - `releaseTrackName`
-  - `releaseTrackSourceCount`
-  - `hasReleaseTrackSiblings`
-- `DashboardListCard` copies those fields from `previewTrack` when building a track preview.
-- `selectedPreviewReleaseSiblingSourceCount` and `selectedPreviewHasReleaseSibling` prefer the explicit preview fields.
-- The track overlay displays `Grouped with N source versions` only for track previews with sibling source versions.
-- `sourceTrack`, `trackId`, `url`, `trackUri`, and playback handling are preserved.
+Behavior:
+- Returns canonical ListenLab release-track data under `release_track`.
+- Returns source-backed display fields under `display`.
+- Returns explicit playback choice metadata under `playback`.
+- Returns mapped Spotify source versions under `source_versions`.
+- Chooses playback from `context_spotify_track_id` when it belongs to the release track and has usable Spotify identity, with `playback.reason = "context_source"`.
+- Otherwise chooses a deterministic preferred playable source, with `playback.reason = "preferred_playable_source"`.
+- Returns `playback.reason = "unavailable"` with null Spotify identity when no usable source exists.
+- Marks source-version rows with `is_context` and `is_playback_choice`.
+- Does not call Spotify APIs.
+- Does not mutate data.
 
-## Files Changed
-Frontend:
-- `frontend/src/App.tsx`
-- `frontend/src/components/dashboard/DashboardListCard.tsx`
-- `frontend/src/styles.css`
+Backend files from `072e863`:
+- `backend/app/release_track_detail.py`
+- `backend/app/routes/playback_routes.py`
+- `backend/tests/test_release_track_detail.py`
+
+## Frontend Overlay
+Frontend behavior from `2d2a8b5`:
+- Adds API/types for release-track detail:
+  - `fetchReleaseTrackDetail(...)`
+  - `ReleaseTrackDetailResponse`
+  - source-version and artist detail types.
+- When selected track preview has `releaseTrackId`, the overlay fetches release-track detail without blocking the overlay from opening.
+- Sends selected preview Spotify track id as `context_spotify_track_id` when available.
+- Uses canonical release-track name in the overlay once detail loads.
+- Keeps representative/source title, artist, album, image, and Spotify URL as loading/error/no-release fallback.
+- Shows `Playing source version: ...` so the playback source remains explicit.
+- Uses `releaseTrackDetail.playback.uri` / `spotify_track_id` for `Play in ListenLab` only when detail loads and playback is not unavailable.
+- Falls back to the selected preview Spotify playback URI/id when detail is missing, failed, or unavailable.
+- Shows a compact source versions section when multiple source versions are present.
+- Shows `Selected` for the context source and `Playback` for the chosen playback source.
+- Suppresses the older `Grouped with N source versions` note when the full source versions section is loaded.
+- Keeps the old note only as fallback before detail is loaded or when detail fails.
+- No release-track id is used as a playback identity.
+
+Frontend files from `2d2a8b5`:
+- `frontend/src/api/appApi.ts`
 - `frontend/src/types/appTypes.ts`
-
-Docs:
-- `docs/current-handoff.md`
-- `docs/overview/architecture.md`
-- `docs/overview/context.md`
-- `docs/reference/drafts/entity-model-draft.md`
-- `docs/reference/refactor-notes.md`
-- `docs/reference/source-track-resolution-policy.md`
+- `frontend/src/App.tsx`
+- `frontend/src/styles.css`
+- `frontend/src/utils/dashboardUtils.ts`
 
 ## Verification
-Passed during this scope:
-- `npm run build --prefix frontend`
-- `git diff --check`
-- Backend smoke during checkpoint: `GET /auth/session` returned HTTP 200 with authenticated session.
+Backend endpoint verification:
+- `.venv` unittest passed for `backend.tests.test_release_track_detail`.
+- `py_compile` passed for changed backend files.
+- `git diff --check` passed.
+- Real-data smoke passed on `127.0.0.1:8765` before backend commit:
+  - `release_track_id=252`
+  - `Innocent Love`
+  - context Spotify track `6BE1ayeoIJQHPPqJN79AvU`
+  - context source selected with `playback.reason = "context_source"`
+  - no-context call returned `preferred_playable_source`
+  - invalid id returned `404`
 
-Manual browser QA:
-- Activity/Listened rendered.
-- Activity row `Lory` opened the track overlay.
-- Activity sibling row `Dreaming` opened the track overlay with Spotify track URL `https://open.spotify.com/track/3gLacTBcajZXTxzBWfDRTK`.
-- `Dreaming` overlay showed RT badge and `Grouped with 4 source versions`.
-- `Play in ListenLab` used the Spotify track URI/ID path and updated player state during QA.
-- Liked stars rendered in overlay, album rows, player, and queue.
-- Artist overlay from a track artist opened and showed album entries.
-- Browser console warn/error logs were empty.
+Frontend verification:
+- `npm run build --prefix frontend` passed.
+- `git diff --check` passed.
+- Normal-proxy QA passed with frontend on `127.0.0.1:5174` and backend on `127.0.0.1:8000`.
+- Direct backend `8000` checks passed:
+  - `/auth/session` returned `200`.
+  - `/tracks/release-track/252?context_spotify_track_id=6BE1ayeoIJQHPPqJN79AvU` returned `200`, `playback.reason = "context_source"`, one context flag, and one playback-choice flag.
+- Browser QA passed with `Dreaming`:
+  - release-track detail loaded through the normal frontend/proxy path.
+  - source versions section appeared.
+  - exactly one `Selected` badge in the source versions list.
+  - exactly one source-version `Playback` badge in the source versions list.
+  - old grouped note was not duplicated when full detail loaded.
+  - `Play in ListenLab` stayed on Spotify source playback identity, not `releaseTrackId`.
+  - browser console warn/error logs were empty.
+- No-release fallback QA passed with `Useless Information`:
+  - overlay opened without a source versions section.
 
-Known limitation:
-- Final pre-commit backend recheck could not connect because no process was listening on `127.0.0.1:8000`; earlier checkpoint smoke had passed while the existing backend was running.
-- A fresh Activity list DOM snapshot did not expose a liked star on the visible row checked during QA, while the same track showed liked state correctly in overlay/album/player surfaces. Treat this as a residual visual/DOM verification gap, not a confirmed regression.
-- No frontend unit tests were added because this repo has no frontend test harness or existing `*.test.ts(x)` pattern.
+## Known Limitations
+- `playable` is currently null from cached data.
+- Display art and Spotify URL are source-version-backed, not canonical release-track fields.
+- No write, merge, promotion, raw event mutation, or identity-edit behavior exists.
+- Frontend has no dedicated test harness yet, so overlay verification is browser/build based.
 
 ## Recommended Next Task
-After commit, start a new chat for the next task to reduce stale context.
+Start a new chat for the next task to reduce stale context.
 
-Suggested follow-ups:
-1. Decide whether to group Activity `Liked` by `release_track_id`, with explicit wording because Spotify liked-track count and internal liked-release-track count can differ.
-2. If overlay identity work continues, design a read-only release-track detail endpoint separately from playback behavior.
-3. Consider adding a frontend test harness before more UI identity behavior changes.
+Recommended next task:
+- Add focused frontend tests or a lightweight component/integration test harness for track overlay identity behavior, especially release-track detail loading, playback fallback, and source-version badge rendering.
+
+Other possible follow-ups:
+- Decide whether Activity `Liked` should group by `release_track_id`; be explicit because Spotify liked-track count and internal liked-release-track count can differ.
+- Improve cached source-version `playable` coverage if reliable local data is available.
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.
@@ -105,4 +137,4 @@ Suggested follow-ups:
 - Do not add merge, promotion, or write behavior for release-track identity without explicit scope.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Activity/Listened display grouping by `release_track_id` is committed in `8668edf`; overlay source-version polish is the latest commit, `Show release-track source versions in overlay`. The latest scope adds top-level release-track metadata to `PreviewItem`, populates it from representative `RecentTrack` rows, and shows a read-only track overlay note like `Grouped with 4 source versions` when release-track siblings exist. Playback still uses Spotify track id/URI. Verification passed with `npm run build --prefix frontend`, `git diff --check`, backend `/auth/session` smoke during checkpoint, and browser QA for Activity overlays, the source-version note, liked badges, player/queue, and artist album overlay.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`; worktree was clean before this handoff update. Latest commits are `072e863 Add release-track detail endpoint` and `2d2a8b5 Show release-track detail in track overlays`. Backend now has read-only `GET /tracks/release-track/{release_track_id}?context_spotify_track_id=...`, returning canonical release-track data, source-backed display fields, explicit playback choice metadata, and mapped source versions with `is_context` / `is_playback_choice` flags. Frontend track overlays fetch this detail when `releaseTrackId` exists, show canonical release-track identity plus compact source versions, keep source-backed art/Spotify URL explicit, and preserve Spotify URI/id playback identity. Verification passed with backend unit/compile checks, real-data smoke for release track `252`, frontend build, `git diff --check`, and normal-proxy browser QA on `5174 -> 8000`. Known limitations: `playable` is currently null from cached data, display art/Spotify URL are source-version-backed, and no write/merge/promotion behavior exists. Recommended next task: add focused frontend tests or a lightweight overlay test harness for release-track detail loading, playback fallback, and source-version badge rendering.
