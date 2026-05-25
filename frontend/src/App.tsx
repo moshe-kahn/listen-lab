@@ -10008,14 +10008,6 @@ export function App() {
     ? `Grouped with ${selectedPreviewReleaseSiblingSourceCount} source ${selectedPreviewReleaseSiblingSourceCount === 1 ? "version" : "versions"}`
     : null;
   const selectedPreviewCanonicalTrackTitle = selectedPreviewReleaseTrackDetailReady?.release_track.name?.trim() || null;
-  const selectedPreviewSourceVersionLabel = selectedPreviewReleasePlaybackSourceVersion
-    ? (
-      selectedPreviewReleasePlaybackSourceVersion.album_name
-      ?? selectedPreviewReleasePlaybackSourceVersion.spotify_track_id
-      ?? selectedPreviewReleasePlaybackSourceVersion.name
-      ?? null
-    )
-    : null;
   const selectedPreviewReleaseSourceVersions = selectedPreviewReleaseTrackDetailReady?.source_versions ?? [];
   const releaseSourceVersionArtistText = (version: ReleaseTrackDetailSourceVersion) => {
     const names = version.artists.map((artist) => artist.name?.trim()).filter(Boolean);
@@ -11772,11 +11764,6 @@ export function App() {
               ) : null}
               {selectedPreview.kind === "track" && !selectedPreviewReleaseTrackDetailReady && selectedPreviewReleaseTrackDetailError ? (
                 <p className="detail-modal-release-note">{selectedPreviewReleaseTrackDetailError}</p>
-              ) : null}
-              {selectedPreview.kind === "track" && selectedPreviewReleaseTrackDetailReady && selectedPreviewSourceVersionLabel ? (
-                <p className="detail-modal-release-note">
-                  Playing source version: {selectedPreviewSourceVersionLabel}
-                </p>
               ) : null}
               {selectedPreview.kind === "track" && !selectedPreviewReleaseTrackDetailReady && selectedPreviewReleaseSiblingNote ? (
                 <p className="detail-modal-release-note">{selectedPreviewReleaseSiblingNote}</p>
