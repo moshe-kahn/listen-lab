@@ -223,6 +223,10 @@ export function previewItems(
     name?: string | null;
     track_name?: string | null;
     track_id?: string | null;
+    release_track_id?: number | null;
+    release_track_name?: string | null;
+    release_track_source_count?: number | null;
+    has_release_track_siblings?: boolean | null;
     artist_id?: string | null;
     artist_name?: string | null;
     album_name?: string | null;
@@ -281,6 +285,10 @@ export function previewItems(
         trackUri: item.uri ?? null,
         url: item.url ?? item.album_url ?? item.playlist_url ?? "",
         trackId: isTrack ? item.track_id ?? null : null,
+        releaseTrackId: isTrack ? item.release_track_id ?? null : null,
+        releaseTrackName: isTrack ? item.release_track_name ?? null : null,
+        releaseTrackSourceCount: isTrack ? item.release_track_source_count ?? null : null,
+        hasReleaseTrackSiblings: isTrack ? item.has_release_track_siblings ?? null : null,
         albumId: isTrack || kind === "album" ? item.album_id ?? null : null,
         artistName: isTrack || kind === "album" ? item.artist_name ?? null : null,
         artists: kind === "album" && item.artist_name
@@ -291,7 +299,7 @@ export function previewItems(
         sourceAlbumImage: kind === "album" ? item.image_url ?? null : null,
         sourceAlbumUrl: kind === "album" ? item.url ?? item.album_url ?? "" : null,
         sourceAlbumYear: kind === "album" ? item.release_year ?? null : null,
-        sourceTrack: null,
+        sourceTrack: isTrack ? item as RecentTrack : null,
       } satisfies PreviewItem;
     })
     .filter((item) => Boolean(item.label && item.url))

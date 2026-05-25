@@ -143,6 +143,53 @@ export type ReleaseTrackMetadataResponse = {
   items: Record<string, ReleaseTrackMetadataItem>;
 };
 
+export type ReleaseTrackDetailArtist = {
+  name: string;
+  role?: string | null;
+  billing_index?: number | null;
+};
+
+export type ReleaseTrackDetailSourceVersion = {
+  source_track_id: number;
+  spotify_track_id: string | null;
+  uri: string | null;
+  name: string | null;
+  artists: ReleaseTrackDetailArtist[];
+  album_id: string | null;
+  album_name: string | null;
+  album_image_url: string | null;
+  duration_ms: number | null;
+  explicit: boolean | null;
+  playable: boolean | null;
+  spotify_url: string | null;
+  is_context: boolean;
+  is_playback_choice: boolean;
+};
+
+export type ReleaseTrackDetailResponse = {
+  release_track: {
+    id: number;
+    name: string;
+    artists: ReleaseTrackDetailArtist[];
+    duration_ms: number | null;
+    source_count: number;
+  };
+  display: {
+    title: string;
+    artist_name: string | null;
+    image_url: string | null;
+    album_name: string | null;
+    spotify_url: string | null;
+    source_spotify_track_id: string | null;
+  };
+  playback: {
+    spotify_track_id: string | null;
+    uri: string | null;
+    reason: "context_source" | "preferred_playable_source" | "unavailable";
+  };
+  source_versions: ReleaseTrackDetailSourceVersion[];
+};
+
 export type ArtistAlbumRelationship = "album" | "appears_on" | "unknown";
 
 export type ArtistAlbumEvidenceItem = {

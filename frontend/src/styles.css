@@ -3510,6 +3510,80 @@ h1 {
   line-height: 1.35;
 }
 
+.detail-modal-source-versions {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.detail-modal-source-versions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #8fb6a0;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.detail-modal-source-version-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detail-modal-source-version-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  padding: 8px 10px;
+  border: 1px solid rgba(223, 248, 232, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.detail-modal-source-version-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.detail-modal-source-version-main strong {
+  color: #f6fff9;
+  font-size: 0.94rem;
+}
+
+.detail-modal-source-version-main span,
+.detail-modal-source-version-meta {
+  color: rgba(223, 248, 232, 0.72);
+  font-size: 0.8rem;
+}
+
+.detail-modal-source-version-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.detail-modal-source-version-badge {
+  padding: 3px 6px;
+  border: 1px solid rgba(125, 255, 172, 0.3);
+  border-radius: 999px;
+  color: #dff8e8;
+  background: rgba(125, 255, 172, 0.1);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .detail-modal-inline-link {
   border: none;
   background: transparent;

@@ -82,6 +82,8 @@ import type {
   FullAvailabilityResponse,
   CurrentPlaybackSnapshot,
   CurrentPlaybackResponse,
+  ReleaseTrackDetailResponse,
+  ReleaseTrackDetailSourceVersion,
   PlayerTrackSummary,
   PlayerQueueTrack,
   SpotifyPlayerState,
@@ -134,6 +136,7 @@ import {
   fetchIdentityAuditSavedSubmissionDryRun,
   fetchAllLikedTracks,
   fetchArtistAlbumEvidence,
+  fetchReleaseTrackDetail,
   fetchReleaseTrackMetadata,
   postLikedTracksSync
 } from "./api/appApi";
@@ -340,6 +343,9 @@ export function App() {
   const [playerMenuOpen, setPlayerMenuOpen] = useState(false);
   const [rateLimitMenuOpen, setRateLimitMenuOpen] = useState(false);
   const [selectedPreview, setSelectedPreview] = useState<PreviewItem | null>(null);
+  const [selectedPreviewReleaseTrackDetail, setSelectedPreviewReleaseTrackDetail] = useState<ReleaseTrackDetailResponse | null>(null);
+  const [selectedPreviewReleaseTrackDetailLoading, setSelectedPreviewReleaseTrackDetailLoading] = useState(false);
+  const [selectedPreviewReleaseTrackDetailError, setSelectedPreviewReleaseTrackDetailError] = useState<string | null>(null);
   const [artistAlbumEvidenceItems, setArtistAlbumEvidenceItems] = useState<ArtistAlbumEvidenceItem[] | null>(null);
   const [albumTrackEntries, setAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [albumTrackEntriesLoading, setAlbumTrackEntriesLoading] = useState(false);
@@ -874,14 +880,26 @@ export function App() {
       selectedPreview.trackId ?? selectedPreviewMatchedAlbumTrack?.id ?? null,
     )
     : null;
+  const selectedPreviewReleaseTrackDetailReady = selectedPreview?.kind === "track" && selectedPreviewReleaseTrackDetail
+    ? selectedPreviewReleaseTrackDetail
+    : null;
+  const selectedPreviewReleasePlaybackSourceVersion = selectedPreviewReleaseTrackDetailReady?.source_versions.find((version) => version.is_playback_choice) ?? null;
+  const selectedPreviewReleaseDetailPlaybackUri = selectedPreviewReleaseTrackDetailReady?.playback.reason !== "unavailable"
+    ? trackUriWithFallback(
+      selectedPreviewReleaseTrackDetailReady?.playback.uri ?? null,
+      selectedPreviewReleaseTrackDetailReady?.playback.spotify_track_id ?? null,
+    )
+    : null;
+  const selectedPreviewPlaybackTrackUri = selectedPreviewReleaseDetailPlaybackUri ?? selectedPreviewEffectiveTrackUri;
   const selectedPreviewTrackIsCurrent = Boolean(
     selectedPreview?.kind === "track"
-    && selectedPreviewEffectiveTrackUri
-    && currentTrack?.uri === selectedPreviewEffectiveTrackUri,
+    && selectedPreviewPlaybackTrackUri
+    && currentTrack?.uri === selectedPreviewPlaybackTrackUri,
   );
   const selectedPreviewTrackBaseDurationMs = selectedPreview?.kind === "track"
     ? (
-      selectedPreviewMatchedAlbumTrack?.durationMs
+      selectedPreviewReleasePlaybackSourceVersion?.duration_ms
+      ?? selectedPreviewMatchedAlbumTrack?.durationMs
       ?? selectedPreview.sourceTrack?.duration_ms
       ?? (selectedPreviewTrackIsCurrent
         ? (playbackDurationMs > 0 ? playbackDurationMs : currentTrack?.durationMs ?? null)
@@ -1084,9 +1102,9 @@ export function App() {
     ? {
       name: selectedPreview.label,
       artists: selectedPreviewArtists.map((artist) => artist.name).filter(Boolean).join(", ") || selectedPreview.meta || "Unknown artist",
-      album: selectedPreview.sourceTrack?.album_name ?? selectedPreview.detail ?? "Unknown album",
-      image: selectedPreview.image ?? null,
-      uri: selectedPreviewEffectiveTrackUri,
+      album: selectedPreviewReleasePlaybackSourceVersion?.album_name ?? selectedPreview.sourceTrack?.album_name ?? selectedPreview.detail ?? "Unknown album",
+      image: selectedPreviewReleasePlaybackSourceVersion?.album_image_url ?? selectedPreview.image ?? null,
+      uri: selectedPreviewPlaybackTrackUri,
       durationMs: selectedPreviewTrackBaseDurationMs ?? 0,
     }
     : null;
@@ -1617,6 +1635,40 @@ export function App() {
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = previousOverflow;
+    };
+  }, [selectedPreview]);
+
+  useEffect(() => {
+    const releaseTrackId = selectedPreview?.kind === "track" ? selectedPreview.releaseTrackId : null;
+    if (typeof releaseTrackId !== "number" || !Number.isFinite(releaseTrackId) || releaseTrackId <= 0) {
+      setSelectedPreviewReleaseTrackDetail(null);
+      setSelectedPreviewReleaseTrackDetailLoading(false);
+      setSelectedPreviewReleaseTrackDetailError(null);
+      return;
+    }
+    const contextTrackId = selectedPreview?.trackId ?? spotifyTrackIdFromUri(selectedPreview?.trackUri ?? null);
+    let cancelled = false;
+    setSelectedPreviewReleaseTrackDetail(null);
+    setSelectedPreviewReleaseTrackDetailLoading(true);
+    setSelectedPreviewReleaseTrackDetailError(null);
+    fetchReleaseTrackDetail(releaseTrackId, contextTrackId)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        setSelectedPreviewReleaseTrackDetail(payload);
+        setSelectedPreviewReleaseTrackDetailLoading(false);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setSelectedPreviewReleaseTrackDetail(null);
+        setSelectedPreviewReleaseTrackDetailLoading(false);
+        setSelectedPreviewReleaseTrackDetailError(formatUiErrorMessage(error, "Release-track detail could not be loaded."));
+      });
+    return () => {
+      cancelled = true;
     };
   }, [selectedPreview]);
 
@@ -9955,6 +10007,20 @@ export function App() {
   const selectedPreviewReleaseSiblingNote = selectedPreviewHasReleaseSibling
     ? `Grouped with ${selectedPreviewReleaseSiblingSourceCount} source ${selectedPreviewReleaseSiblingSourceCount === 1 ? "version" : "versions"}`
     : null;
+  const selectedPreviewCanonicalTrackTitle = selectedPreviewReleaseTrackDetailReady?.release_track.name?.trim() || null;
+  const selectedPreviewSourceVersionLabel = selectedPreviewReleasePlaybackSourceVersion
+    ? (
+      selectedPreviewReleasePlaybackSourceVersion.album_name
+      ?? selectedPreviewReleasePlaybackSourceVersion.spotify_track_id
+      ?? selectedPreviewReleasePlaybackSourceVersion.name
+      ?? null
+    )
+    : null;
+  const selectedPreviewReleaseSourceVersions = selectedPreviewReleaseTrackDetailReady?.source_versions ?? [];
+  const releaseSourceVersionArtistText = (version: ReleaseTrackDetailSourceVersion) => {
+    const names = version.artists.map((artist) => artist.name?.trim()).filter(Boolean);
+    return names.length > 0 ? names.join(", ") : null;
+  };
   const allTimeLikedMatchCount = (profile?.top_tracks ?? []).filter((track) => recentTrackIsKnownLiked(track)).length;
   const allTimeTrackIdCount = (profile?.top_tracks ?? []).filter((track) => Boolean(track.track_id)).length;
   const likedTracksTotalCount = Number(likedTracksCache?.metadata?.last_active_count ?? (cachedLikedTracks.length > 0 ? cachedLikedTracks.length : likedTracksForActivitySource.length));
@@ -11540,7 +11606,9 @@ export function App() {
                       );
                     })}
                   </span>
-                ) : selectedPreview.kind === "album" && selectedPreview.detail ? `${selectedPreview.label} (${selectedPreview.detail})` : selectedPreview.label}
+                ) : selectedPreview.kind === "track" && selectedPreviewCanonicalTrackTitle
+                  ? selectedPreviewCanonicalTrackTitle
+                  : selectedPreview.kind === "album" && selectedPreview.detail ? `${selectedPreview.label} (${selectedPreview.detail})` : selectedPreview.label}
               </h2>
               {selectedPreview.kind === "album" ? (
                 <div className="detail-modal-album-meta-block">
@@ -11699,11 +11767,22 @@ export function App() {
                   )}
                 </div>
               ) : null}
-              {selectedPreview.kind === "track" && selectedPreviewReleaseSiblingNote ? (
+              {selectedPreview.kind === "track" && selectedPreviewReleaseTrackDetailLoading ? (
+                <p className="detail-modal-release-note">Loading release-track source versions...</p>
+              ) : null}
+              {selectedPreview.kind === "track" && !selectedPreviewReleaseTrackDetailReady && selectedPreviewReleaseTrackDetailError ? (
+                <p className="detail-modal-release-note">{selectedPreviewReleaseTrackDetailError}</p>
+              ) : null}
+              {selectedPreview.kind === "track" && selectedPreviewReleaseTrackDetailReady && selectedPreviewSourceVersionLabel ? (
+                <p className="detail-modal-release-note">
+                  Playing source version: {selectedPreviewSourceVersionLabel}
+                </p>
+              ) : null}
+              {selectedPreview.kind === "track" && !selectedPreviewReleaseTrackDetailReady && selectedPreviewReleaseSiblingNote ? (
                 <p className="detail-modal-release-note">{selectedPreviewReleaseSiblingNote}</p>
               ) : null}
               {selectedPreview.detail && selectedPreview.kind !== "track" && selectedPreview.kind !== "album" ? <p className="detail-modal-detail">{selectedPreview.detail}</p> : null}
-              {selectedPreview.kind === "track" && !selectedPreviewEffectiveTrackUri ? (
+              {selectedPreview.kind === "track" && !selectedPreviewPlaybackTrackUri ? (
                 <p className="detail-modal-preview-missing">This track does not have a playable Spotify URI.</p>
               ) : null}
               {selectedPreview.kind === "artist" ? (
@@ -11728,16 +11807,16 @@ export function App() {
                 </>
               ) : null}
               <div className="actions actions-in-card detail-modal-actions">
-                {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewEffectiveTrackUri ? (
+                {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewPlaybackTrackUri ? (
                   <div className={`detail-top-play-control${overlayTrackPlaybackExpanded ? " detail-top-play-control-expanded" : ""}`}>
                     <button
-                      aria-label={isTrackPlaying(selectedPreviewEffectiveTrackUri) ? "Pause in ListenLab" : "Play in ListenLab"}
-                      className={`secondary-button detail-icon-button detail-top-play-toggle${isTrackPlaying(selectedPreviewEffectiveTrackUri) ? " detail-icon-button-playing" : ""}`}
-                      onClick={() => handleSelectedPreviewTrackPlay(selectedPreviewEffectiveTrackUri)}
+                      aria-label={isTrackPlaying(selectedPreviewPlaybackTrackUri) ? "Pause in ListenLab" : "Play in ListenLab"}
+                      className={`secondary-button detail-icon-button detail-top-play-toggle${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-icon-button-playing" : ""}`}
+                      onClick={() => handleSelectedPreviewTrackPlay(selectedPreviewPlaybackTrackUri)}
                       type="button"
                     >
-                      <span className={`detail-top-play-glyph${isTrackPlaying(selectedPreviewEffectiveTrackUri) ? " detail-top-play-glyph-active" : ""}`} aria-hidden="true">
-                        {isTrackPlaying(selectedPreviewEffectiveTrackUri) ? (
+                      <span className={`detail-top-play-glyph${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-top-play-glyph-active" : ""}`} aria-hidden="true">
+                        {isTrackPlaying(selectedPreviewPlaybackTrackUri) ? (
                           <span className="detail-pause-bars"><span /><span /></span>
                         ) : (
                           <span className="detail-play-icon">{"\u25B6"}</span>
@@ -11751,7 +11830,7 @@ export function App() {
                         </span>
                         <span className="detail-top-play-inline-progress">
                           <span className="detail-top-play-inline-progress-fill" style={{ width: `${selectedPreviewTrackProgressPercent}%` }} />
-                          <span className={`detail-top-play-inline-wave${isTrackPlaying(selectedPreviewEffectiveTrackUri) ? " detail-top-play-inline-wave-active" : ""}`} />
+                          <span className={`detail-top-play-inline-wave${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-top-play-inline-wave-active" : ""}`} />
                           <input
                             aria-label="Seek selected track"
                             className="detail-top-play-inline-slider"
@@ -11783,6 +11862,36 @@ export function App() {
                 ) : null}
               </div>
             </div>
+            {selectedPreview.kind === "track" && selectedPreviewReleaseSourceVersions.length > 1 ? (
+              <div className="detail-modal-source-versions">
+                <div className="detail-modal-source-versions-header">
+                  <span>Source versions</span>
+                  <span>{selectedPreviewReleaseSourceVersions.length}</span>
+                </div>
+                <ul className="detail-modal-source-version-list">
+                  {selectedPreviewReleaseSourceVersions.map((version) => {
+                    const artistText = releaseSourceVersionArtistText(version);
+                    return (
+                      <li className="detail-modal-source-version-row" key={version.source_track_id}>
+                        <div className="detail-modal-source-version-main">
+                          <strong className="single-line-ellipsis">{version.name ?? version.spotify_track_id ?? "Unknown source"}</strong>
+                          <span className="single-line-ellipsis">
+                            {[artistText, version.album_name].filter(Boolean).join(" · ") || version.spotify_track_id || "Spotify source"}
+                          </span>
+                        </div>
+                        <div className="detail-modal-source-version-meta">
+                          {typeof version.duration_ms === "number" ? (
+                            <span>{formatPlaybackClock(version.duration_ms)}</span>
+                          ) : null}
+                          {version.is_context ? <span className="detail-modal-source-version-badge">Selected</span> : null}
+                          {version.is_playback_choice ? <span className="detail-modal-source-version-badge">Playback</span> : null}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
             {selectedPreview.kind === "track" || selectedPreview.kind === "album" ? (
               <div className="detail-modal-album-tracks detail-modal-album-tracks-full">
                 {selectedPreview.kind === "track" && selectedPreviewCanOpenAlbum ? (

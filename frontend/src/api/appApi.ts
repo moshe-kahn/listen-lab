@@ -15,6 +15,7 @@ import type {
   LikedTracksResponse,
   LikedTracksSyncResponse,
   MergedTrackAggregateResponse,
+  ReleaseTrackDetailResponse,
   ReleaseTrackMetadataResponse,
   ReleaseAlbumMergeDryRunResponse,
   ReleaseAlbumMergePreviewResponse,
@@ -139,6 +140,35 @@ export async function fetchReleaseTrackMetadata(spotifyTrackIds: string[]): Prom
       throw new Error(`Release Track Metadata (${response.status}): ${detail}`);
     }
     return (await response.json()) as ReleaseTrackMetadataResponse;
+  }
+
+export async function fetchReleaseTrackDetail(
+    releaseTrackId: number,
+    contextSpotifyTrackId?: string | null,
+  ): Promise<ReleaseTrackDetailResponse> {
+    const params = new URLSearchParams();
+    const contextId = contextSpotifyTrackId?.trim();
+    if (contextId) {
+      params.set("context_spotify_track_id", contextId);
+    }
+    const query = params.toString();
+    const response = await fetch(
+      `${apiBaseUrl}/tracks/release-track/${encodeURIComponent(String(releaseTrackId))}${query ? `?${query}` : ""}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load release track detail.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      throw new Error(`Release Track Detail (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ReleaseTrackDetailResponse;
   }
 
 export async function fetchArtistAlbumEvidence(
