@@ -81,7 +81,7 @@ Current note:
 - source Spotify catalog enrichment now exists as an evidence-gathering layer for identity review:
   - priority metadata runs fetch Spotify track and album metadata into source catalog tables
   - track metadata backfill prioritizes duplicate/split/suggested identity candidates before broad backlog
-  - Spotify track catalog writes now propagate missing `release_track.duration_ms` through accepted source mappings; a one-time repair filled conservative existing null durations while leaving conflicting rows for review
+  - Spotify track catalog writes now propagate missing `release_track.duration_ms` through accepted source mappings and record duration provenance/confidence; accepted mappings with conflicting catalog durations are marked `uncertain_catalog_conflict`
   - a local track metadata worker can run bounded one-shot or looped batches with cooldown, JSONL logging, and rolling request-budget protection
   - catalog enrichment remains evidence-only and must not create, merge, promote, or apply identity decisions
 - current implementation note:
@@ -119,7 +119,7 @@ Current rule:
 - UI liked state should prefer `release_track_id`.
 - Spotify track ID remains necessary for playback and source/version provenance.
 - Activity `Listened` grouping now prefers `release_track_id`.
-- `release_track.duration_ms` may be filled from accepted Spotify source catalog metadata when mapped durations agree closely; large duration conflicts stay unresolved for manual audit.
+- `release_track.duration_ms` may be filled from accepted Spotify source catalog metadata. `duration_source`, `duration_confidence`, and `duration_evidence_json` indicate whether the value came from agreeing catalog evidence or an uncertain accepted-mapping conflict. When already-accepted same-release source mappings disagree on duration, manual review can keep the release join and use a representative duration because Spotify duration metadata can drift from playback reality; that representative value is not authoritative playback length.
 
 ### Source catalog metadata
 Provider metadata fetched for known source identifiers, such as Spotify track duration, ISRC, album id, album release date, and external IDs. This metadata is evidence for review and diagnostics, not an identity decision by itself.

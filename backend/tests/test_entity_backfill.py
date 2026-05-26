@@ -1160,6 +1160,60 @@ class EntityBackfillTests(unittest.TestCase):
         self.assertEqual(1, result["release_tracks_deleted"])
         self.assertEqual(1, result["merge_logs_created"])
 
+    def test_merge_conservative_same_album_release_track_duplicates_skips_mono_stereo_split(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_id = int(
+                connection.execute(
+                    "INSERT INTO artist (canonical_name, sort_name) VALUES (?, ?)",
+                    ("Artist Mono", "artist mono"),
+                ).lastrowid
+            )
+            album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Album Mono", "album mono"),
+                ).lastrowid
+            )
+            for external_id, release_track_name in (
+                ("spotify-track-mono-1", "Song Mono - Mono"),
+                ("spotify-track-mono-2", "Song Mono"),
+            ):
+                release_track_id = int(
+                    connection.execute(
+                        "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                        (release_track_name, "song mono"),
+                    ).lastrowid
+                )
+                source_track_id = int(
+                    connection.execute(
+                        "INSERT INTO source_track (source_name, external_id, source_name_raw) VALUES (?, ?, ?)",
+                        ("spotify", external_id, release_track_name),
+                    ).lastrowid
+                )
+                connection.execute(
+                    "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                    (release_track_id, artist_id),
+                )
+                connection.execute(
+                    "INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)",
+                    (album_id, release_track_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_track_map (
+                      source_track_id, release_track_id, match_method, confidence, status, explanation
+                    ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 'Exact Spotify track ID backfill')
+                    """,
+                    (source_track_id, release_track_id),
+                )
+            connection.commit()
+
+        result = merge_conservative_same_album_release_track_duplicates()
+
+        self.assertEqual(1, result["groups_considered"])
+        self.assertEqual(0, result["groups_merged"])
+        self.assertEqual(0, result["release_tracks_deleted"])
+
     def test_merge_conservative_same_album_release_track_duplicates_is_idempotent(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
             artist_id = int(

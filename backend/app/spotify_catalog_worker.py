@@ -8,7 +8,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from backend.app.db import list_spotify_auth_users, sqlite_connection
-from backend.app.spotify_catalog_backfill import run_spotify_catalog_backfill, run_spotify_track_metadata_canary
+from backend.app.spotify_catalog_backfill import (
+    repair_release_track_durations_from_spotify_catalog,
+    run_spotify_catalog_backfill,
+    run_spotify_track_metadata_canary,
+)
 from backend.app.spotify_token_store import SpotifyTokenStoreError, refresh_access_token_if_needed
 
 
@@ -705,6 +709,14 @@ def run_spotify_track_metadata_worker(
         if progress_callback is not None:
             backfill_kwargs["progress_callback"] = progress_callback
         result = backfill_runner(access_token=access_token, **backfill_kwargs)
+        try:
+            result["release_track_duration_repair"] = repair_release_track_durations_from_spotify_catalog(apply=True)
+        except Exception as exc:
+            result["release_track_duration_repair"] = {
+                "ok": False,
+                "error": str(exc),
+                "performed_action": "none",
+            }
         completed = _utc_now()
         completed_at = _iso_utc(completed)
         status = str(result.get("status") or "failed")

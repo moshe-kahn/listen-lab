@@ -56,7 +56,7 @@ export function ReleaseTrackDurationConflictsTab() {
           <div>
             <h3>Duration Conflicts</h3>
             <p className="identity-audit-tab-copy">
-              Release tracks skipped by duration repair because accepted Spotify source durations differ by more than 2 seconds.
+              Release tracks whose accepted Spotify source durations differ by more than 2 seconds. Filled representative durations are marked uncertain.
             </p>
           </div>
           <button className="secondary-button" disabled={loading} onClick={() => void loadConflicts()} type="button">
@@ -79,10 +79,11 @@ export function ReleaseTrackDurationConflictsTab() {
                   <h4>{item.release_track_name}</h4>
                   <p>
                     release {item.release_track_id} · {item.source_track_count} source tracks · delta {formatDelta(item.duration_delta_ms)}
+                    {item.release_track_duration_ms == null ? "" : ` · representative ${formatDelta(item.release_track_duration_ms)}`}
                   </p>
                 </div>
                 <span className="identity-audit-type-badge recording-track-risk">
-                  {formatDelta(item.min_duration_ms)} - {formatDelta(item.max_duration_ms)}
+                  {item.duration_confidence || "duration conflict"}
                 </span>
               </div>
               <div className="identity-audit-variant-list">

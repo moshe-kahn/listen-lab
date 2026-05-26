@@ -254,12 +254,14 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         )
 
         with closing(sqlite3.connect(self.db_path)) as connection:
-            duration_ms = connection.execute(
-                "SELECT duration_ms FROM release_track WHERE id = ?",
+            duration_ms, duration_source, duration_confidence = connection.execute(
+                "SELECT duration_ms, duration_source, duration_confidence FROM release_track WHERE id = ?",
                 (release_track_id,),
-            ).fetchone()[0]
+            ).fetchone()
 
         self.assertEqual(123000, duration_ms)
+        self.assertEqual("spotify_track_catalog", duration_source)
+        self.assertEqual("catalog_agrees", duration_confidence)
 
     def test_upsert_track_catalog_preserves_existing_release_track_duration(self) -> None:
         release_track_id = self._seed_accepted_source_track("track-duration-preserve", name="Duration Preserve")
@@ -321,14 +323,16 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         result = repair_release_track_durations_from_spotify_catalog(apply=True)
 
         with closing(sqlite3.connect(self.db_path)) as connection:
-            duration_ms = connection.execute(
-                "SELECT duration_ms FROM release_track WHERE id = ?",
+            duration_ms, duration_source, duration_confidence = connection.execute(
+                "SELECT duration_ms, duration_source, duration_confidence FROM release_track WHERE id = ?",
                 (first_release_track_id,),
-            ).fetchone()[0]
+            ).fetchone()
         self.assertEqual(1, result["updated_count"])
         self.assertEqual(180000, duration_ms)
+        self.assertEqual("spotify_track_catalog", duration_source)
+        self.assertEqual("catalog_agrees", duration_confidence)
 
-    def test_repair_release_track_durations_from_spotify_catalog_skips_large_conflicts(self) -> None:
+    def test_repair_release_track_durations_from_spotify_catalog_uses_longest_accepted_conflict(self) -> None:
         first_release_track_id = self._seed_accepted_source_track("repair-conflict-a", name="Repair Conflict")
         second_release_track_id = self._seed_accepted_source_track("repair-conflict-b", name="Repair Conflict B")
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -359,13 +363,62 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         result = repair_release_track_durations_from_spotify_catalog(apply=True)
 
         with closing(sqlite3.connect(self.db_path)) as connection:
-            duration_ms = connection.execute(
-                "SELECT duration_ms FROM release_track WHERE id = ?",
+            duration_ms, duration_source, duration_confidence, evidence_json = connection.execute(
+                "SELECT duration_ms, duration_source, duration_confidence, duration_evidence_json FROM release_track WHERE id = ?",
                 (first_release_track_id,),
-            ).fetchone()[0]
+            ).fetchone()
+        self.assertEqual(1, result["updated_count"])
+        self.assertEqual(1, result["annotated_uncertain_count"])
+        self.assertEqual(0, result["conflict_count"])
+        self.assertEqual(1, result["accepted_mapping_conflict_count"])
+        self.assertEqual(185000, duration_ms)
+        self.assertEqual("accepted_source_catalog_conflict", duration_source)
+        self.assertEqual("uncertain_catalog_conflict", duration_confidence)
+        self.assertIn("representative", evidence_json)
+
+    def test_repair_release_track_durations_from_spotify_catalog_marks_existing_conflict_uncertain(self) -> None:
+        first_release_track_id = self._seed_accepted_source_track("repair-existing-conflict-a", name="Repair Existing Conflict")
+        second_release_track_id = self._seed_accepted_source_track("repair-existing-conflict-b", name="Repair Existing Conflict B")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE source_track_map SET release_track_id = ? WHERE release_track_id = ?",
+                (first_release_track_id, second_release_track_id),
+            )
+            connection.execute(
+                "UPDATE release_track SET duration_ms = ? WHERE id = ?",
+                (180000, first_release_track_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (spotify_track_id, name, duration_ms, fetched_at, last_status)
+                VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)
+                """,
+                (
+                    "repair-existing-conflict-a",
+                    "Repair Existing Conflict A",
+                    180000,
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                    "repair-existing-conflict-b",
+                    "Repair Existing Conflict B",
+                    185000,
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.commit()
+
+        result = repair_release_track_durations_from_spotify_catalog(apply=True)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            duration_ms, duration_confidence = connection.execute(
+                "SELECT duration_ms, duration_confidence FROM release_track WHERE id = ?",
+                (first_release_track_id,),
+            ).fetchone()
         self.assertEqual(0, result["updated_count"])
-        self.assertEqual(1, result["conflict_count"])
-        self.assertIsNone(duration_ms)
+        self.assertEqual(1, result["annotated_uncertain_count"])
+        self.assertEqual(180000, duration_ms)
+        self.assertEqual("uncertain_catalog_conflict", duration_confidence)
 
     def test_query_release_track_duration_conflicts_returns_spotify_links(self) -> None:
         first_release_track_id = self._seed_accepted_source_track("duration-conflict-a", name="Duration Conflict")
@@ -408,6 +461,8 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(1, payload["total"])
         item = payload["items"][0]
         self.assertEqual(first_release_track_id, item["release_track_id"])
+        self.assertIsNone(item["release_track_duration_ms"])
+        self.assertEqual("unknown", item["duration_confidence"])
         self.assertEqual(5000, item["duration_delta_ms"])
         self.assertEqual(2, len(item["source_tracks"]))
         self.assertEqual(

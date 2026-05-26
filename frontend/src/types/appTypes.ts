@@ -542,6 +542,9 @@ export type ReleaseTrackDurationConflictItem = {
   release_track_id: number;
   release_track_name: string;
   release_track_normalized_name: string;
+  release_track_duration_ms: number | null;
+  duration_source: string;
+  duration_confidence: string;
   min_duration_ms: number;
   max_duration_ms: number;
   duration_delta_ms: number;

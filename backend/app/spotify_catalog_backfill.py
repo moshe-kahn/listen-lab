@@ -48,6 +48,10 @@ TOP_ALBUM_PRIORITY_LIMIT = 100
 TOP_ARTIST_PRIORITY_LIMIT = 100
 RECENT_TRACK_REPEAT_DAYS = 90
 RECENT_TRACK_REPEAT_MIN_PLAYS = 3
+RELEASE_TRACK_DURATION_SOURCE_SPOTIFY_CATALOG = "spotify_track_catalog"
+RELEASE_TRACK_DURATION_SOURCE_ACCEPTED_CONFLICT = "accepted_source_catalog_conflict"
+RELEASE_TRACK_DURATION_CONFIDENCE_CATALOG_AGREES = "catalog_agrees"
+RELEASE_TRACK_DURATION_CONFIDENCE_UNCERTAIN_CONFLICT = "uncertain_catalog_conflict"
 
 
 class _PartialStop(Exception):
@@ -4047,6 +4051,7 @@ def repair_release_track_durations_from_spotify_catalog(
     apply: bool = False,
     max_duration_delta_ms: int = 2_000,
     sample_limit: int = 25,
+    allow_accepted_mapping_conflicts: bool = True,
 ) -> dict[str, Any]:
     bounded_delta = max(0, int(max_duration_delta_ms))
     bounded_sample_limit = max(1, min(int(sample_limit), 100))
@@ -4057,11 +4062,18 @@ def repair_release_track_durations_from_spotify_catalog(
             SELECT
               rt.id AS release_track_id,
               rt.primary_name AS release_track_name,
-              min(stc.duration_ms) AS repaired_duration_ms,
+              rt.duration_ms AS current_duration_ms,
+              rt.duration_confidence AS current_duration_confidence,
+              CASE
+                WHEN max(stc.duration_ms) - min(stc.duration_ms) > ?
+                THEN max(stc.duration_ms)
+                ELSE min(stc.duration_ms)
+              END AS repaired_duration_ms,
               min(stc.duration_ms) AS min_duration_ms,
               max(stc.duration_ms) AS max_duration_ms,
               count(DISTINCT stc.duration_ms) AS distinct_duration_count,
-              count(DISTINCT st.external_id) AS source_track_count
+              count(DISTINCT st.external_id) AS source_track_count,
+              max(stc.duration_ms) - min(stc.duration_ms) AS duration_delta_ms
             FROM release_track rt
             JOIN source_track_map stm
               ON stm.release_track_id = rt.id
@@ -4071,13 +4083,30 @@ def repair_release_track_durations_from_spotify_catalog(
              AND st.source_name IN ('spotify', 'spotify_uri')
             JOIN spotify_track_catalog stc
               ON stc.spotify_track_id = st.external_id
-            WHERE rt.duration_ms IS NULL
-              AND stc.duration_ms IS NOT NULL
+            WHERE stc.duration_ms IS NOT NULL
             GROUP BY rt.id
-            HAVING max(stc.duration_ms) - min(stc.duration_ms) <= ?
+            HAVING (
+                rt.duration_ms IS NULL
+                AND (
+                  max(stc.duration_ms) - min(stc.duration_ms) <= ?
+                  OR ? = 1
+                )
+              )
+              OR (
+                max(stc.duration_ms) - min(stc.duration_ms) > ?
+                AND COALESCE(rt.duration_confidence, '') != ?
+                AND ? = 1
+              )
             ORDER BY rt.id ASC
             """,
-            (bounded_delta,),
+            (
+                bounded_delta,
+                bounded_delta,
+                1 if allow_accepted_mapping_conflicts else 0,
+                bounded_delta,
+                RELEASE_TRACK_DURATION_CONFIDENCE_UNCERTAIN_CONFLICT,
+                1 if allow_accepted_mapping_conflicts else 0,
+            ),
         ).fetchall()
         conflict_count = int(
             connection.execute(
@@ -4098,54 +4127,109 @@ def repair_release_track_durations_from_spotify_catalog(
                     AND stc.duration_ms IS NOT NULL
                   GROUP BY rt.id
                   HAVING max(stc.duration_ms) - min(stc.duration_ms) > ?
+                     AND ? = 0
                 ) conflicted
                 """,
-                (bounded_delta,),
+                (bounded_delta, 1 if allow_accepted_mapping_conflicts else 0),
             ).fetchone()["conflict_count"]
         )
         updated_count = 0
+        annotated_uncertain_count = 0
         if apply and rows:
             updated_at = _utc_now()
             for row in rows:
+                is_conflict = int(row["duration_delta_ms"]) > bounded_delta
+                evidence = {
+                    "min_duration_ms": int(row["min_duration_ms"]),
+                    "max_duration_ms": int(row["max_duration_ms"]),
+                    "duration_delta_ms": int(row["duration_delta_ms"]),
+                    "distinct_duration_count": int(row["distinct_duration_count"]),
+                    "source_track_count": int(row["source_track_count"]),
+                    "selected_duration_ms": int(row["repaired_duration_ms"]),
+                    "selected_strategy": (
+                        "max_catalog_duration_representative"
+                        if is_conflict
+                        else "min_catalog_duration_close_match"
+                    ),
+                }
+                if is_conflict:
+                    evidence["note"] = (
+                        "Accepted source mappings disagree on Spotify catalog duration; "
+                        "selected duration is a representative display value, not verified playback length."
+                    )
                 cursor = connection.execute(
                     """
                     UPDATE release_track
                     SET
-                      duration_ms = ?,
+                      duration_ms = CASE WHEN duration_ms IS NULL THEN ? ELSE duration_ms END,
+                      duration_source = ?,
+                      duration_confidence = ?,
+                      duration_evidence_json = ?,
                       updated_at = ?
                     WHERE id = ?
-                      AND duration_ms IS NULL
                     """,
-                    (int(row["repaired_duration_ms"]), updated_at, int(row["release_track_id"])),
+                    (
+                        int(row["repaired_duration_ms"]),
+                        (
+                            RELEASE_TRACK_DURATION_SOURCE_ACCEPTED_CONFLICT
+                            if is_conflict
+                            else RELEASE_TRACK_DURATION_SOURCE_SPOTIFY_CATALOG
+                        ),
+                        (
+                            RELEASE_TRACK_DURATION_CONFIDENCE_UNCERTAIN_CONFLICT
+                            if is_conflict
+                            else RELEASE_TRACK_DURATION_CONFIDENCE_CATALOG_AGREES
+                        ),
+                        _json_dump(evidence),
+                        updated_at,
+                        int(row["release_track_id"]),
+                    ),
                 )
-                updated_count += int(cursor.rowcount or 0)
+                if row["current_duration_ms"] is None:
+                    updated_count += int(cursor.rowcount or 0)
+                if is_conflict:
+                    annotated_uncertain_count += int(cursor.rowcount or 0)
 
     sample_items = [
         {
             "release_track_id": int(row["release_track_id"]),
             "release_track_name": str(row["release_track_name"] or ""),
+            "current_duration_ms": (
+                int(row["current_duration_ms"]) if row["current_duration_ms"] is not None else None
+            ),
             "repaired_duration_ms": int(row["repaired_duration_ms"]),
             "min_duration_ms": int(row["min_duration_ms"]),
             "max_duration_ms": int(row["max_duration_ms"]),
+            "duration_delta_ms": int(row["duration_delta_ms"]),
             "distinct_duration_count": int(row["distinct_duration_count"]),
             "source_track_count": int(row["source_track_count"]),
+            "used_conflicting_accepted_mapping": int(row["duration_delta_ms"]) > bounded_delta,
+            "duration_confidence": (
+                RELEASE_TRACK_DURATION_CONFIDENCE_UNCERTAIN_CONFLICT
+                if int(row["duration_delta_ms"]) > bounded_delta
+                else RELEASE_TRACK_DURATION_CONFIDENCE_CATALOG_AGREES
+            ),
         }
         for row in rows[:bounded_sample_limit]
     ]
+    would_update_count = sum(1 for row in rows if row["current_duration_ms"] is None)
     return {
         "ok": True,
         "mode": "apply" if apply else "dry_run",
         "performed_action": "updated_release_track_durations" if apply else "none",
         "max_duration_delta_ms": bounded_delta,
         "candidate_count": len(rows),
-        "would_update_count": len(rows),
+        "would_update_count": would_update_count,
         "updated_count": updated_count,
+        "annotated_uncertain_count": annotated_uncertain_count,
         "conflict_count": conflict_count,
+        "accepted_mapping_conflict_count": sum(1 for row in rows if int(row["duration_delta_ms"]) > bounded_delta),
         "selected_items": sample_items,
         "notes": [
-            "Only fills release_track.duration_ms when it is currently null.",
+            "Fills release_track.duration_ms only when it is currently null.",
+            "Always records duration_source, duration_confidence, and duration_evidence_json for repaired or uncertain rows.",
             "Uses accepted Spotify source mappings with spotify_track_catalog.duration_ms.",
-            "Skips release tracks whose mapped catalog durations differ by more than max_duration_delta_ms.",
+            "When accepted same-release source mappings disagree on duration, the longest duration is only a representative display value and is marked uncertain.",
         ],
     }
 
@@ -4176,8 +4260,7 @@ def query_release_track_duration_conflicts(
                    AND st.source_name IN ('spotify', 'spotify_uri')
                   JOIN spotify_track_catalog stc
                     ON stc.spotify_track_id = st.external_id
-                  WHERE rt.duration_ms IS NULL
-                    AND stc.duration_ms IS NOT NULL
+                  WHERE stc.duration_ms IS NOT NULL
                   GROUP BY rt.id
                   HAVING max(stc.duration_ms) - min(stc.duration_ms) > ?
                 ) conflicts
@@ -4191,6 +4274,9 @@ def query_release_track_duration_conflicts(
               rt.id AS release_track_id,
               rt.primary_name AS release_track_name,
               rt.normalized_name AS release_track_normalized_name,
+              rt.duration_ms AS release_track_duration_ms,
+              rt.duration_source AS duration_source,
+              rt.duration_confidence AS duration_confidence,
               min(stc.duration_ms) AS min_duration_ms,
               max(stc.duration_ms) AS max_duration_ms,
               max(stc.duration_ms) - min(stc.duration_ms) AS duration_delta_ms,
@@ -4205,8 +4291,7 @@ def query_release_track_duration_conflicts(
              AND st.source_name IN ('spotify', 'spotify_uri')
             JOIN spotify_track_catalog stc
               ON stc.spotify_track_id = st.external_id
-            WHERE rt.duration_ms IS NULL
-              AND stc.duration_ms IS NOT NULL
+            WHERE stc.duration_ms IS NOT NULL
             GROUP BY rt.id
             HAVING max(stc.duration_ms) - min(stc.duration_ms) > ?
             ORDER BY duration_delta_ms DESC, rt.id ASC
@@ -4263,6 +4348,13 @@ def query_release_track_duration_conflicts(
                     "release_track_id": release_track_id,
                     "release_track_name": str(row["release_track_name"] or ""),
                     "release_track_normalized_name": str(row["release_track_normalized_name"] or ""),
+                    "release_track_duration_ms": (
+                        int(row["release_track_duration_ms"])
+                        if row["release_track_duration_ms"] is not None
+                        else None
+                    ),
+                    "duration_source": str(row["duration_source"] or ""),
+                    "duration_confidence": str(row["duration_confidence"] or ""),
                     "min_duration_ms": int(row["min_duration_ms"]),
                     "max_duration_ms": int(row["max_duration_ms"]),
                     "duration_delta_ms": int(row["duration_delta_ms"]),
@@ -4309,6 +4401,127 @@ def query_release_track_duration_conflicts(
             "mutates_identity": False,
         },
     }
+
+
+def append_candidate_identity_metadata_queue(
+    *,
+    apply: bool = False,
+    priority: int = 95,
+    sample_limit: int = 25,
+) -> dict[str, Any]:
+    from backend.app.recording_track_candidates import query_recording_track_candidates
+
+    bounded_priority = int(priority)
+    bounded_sample_limit = max(1, min(int(sample_limit), 100))
+    source_track_ids: set[int] = set()
+    offset = 0
+    while True:
+        payload = query_recording_track_candidates(limit=500, offset=offset)
+        for item in payload.get("items", []):
+            for member in item.get("members", []):
+                source_track_ids.update(int(value) for value in member.get("source_track_db_ids", []) if value is not None)
+        if not payload.get("has_more"):
+            break
+        offset += int(payload.get("returned") or 0)
+
+    selected_items: list[dict[str, Any]] = []
+    if source_track_ids:
+        placeholders = ",".join("?" for _ in source_track_ids)
+        with sqlite_connection(row_factory=sqlite3.Row) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                  st.id AS source_track_id,
+                  st.external_id AS spotify_track_id,
+                  st.source_name_raw AS source_track_name,
+                  q.id AS queue_id,
+                  q.status AS queue_status,
+                  q.reason AS queue_reason,
+                  q.priority AS queue_priority
+                FROM source_track st
+                LEFT JOIN spotify_catalog_backfill_queue q
+                  ON q.entity_type = 'track'
+                 AND q.spotify_id = st.external_id
+                WHERE st.id IN ({placeholders})
+                  AND st.source_name IN ('spotify', 'spotify_uri')
+                ORDER BY st.id ASC
+                """,
+                tuple(sorted(source_track_ids)),
+            ).fetchall()
+            for row in rows:
+                spotify_track_id = str(row["spotify_track_id"] or "").strip()
+                if not spotify_track_id:
+                    continue
+                if _is_track_metadata_complete(connection=connection, spotify_track_id=spotify_track_id):
+                    continue
+                queue_status = str(row["queue_status"] or "").strip().lower()
+                queue_priority = int(row["queue_priority"] or 0) if row["queue_priority"] is not None else None
+                if queue_status == "pending" and str(row["queue_reason"] or "") == "identity_metadata" and (
+                    queue_priority is not None and queue_priority >= bounded_priority
+                ):
+                    plan_status = "already_queued_pending"
+                elif row["queue_id"] is not None:
+                    plan_status = "upgrade_existing_queue_row"
+                else:
+                    plan_status = "insert_queue_row"
+                selected_items.append(
+                    {
+                        "source_track_id": int(row["source_track_id"]),
+                        "spotify_track_id": spotify_track_id,
+                        "source_track_name": str(row["source_track_name"] or ""),
+                        "queue_id": int(row["queue_id"]) if row["queue_id"] is not None else None,
+                        "queue_status": row["queue_status"],
+                        "queue_reason": row["queue_reason"],
+                        "queue_priority": queue_priority,
+                        "plan_status": plan_status,
+                    }
+                )
+
+    result = {
+        "ok": True,
+        "mode": "apply" if apply else "dry_run",
+        "performed_action": "prioritized_candidate_identity_metadata" if apply else "none",
+        "priority": bounded_priority,
+        "selected_count": len(selected_items),
+        "insert_count": sum(1 for item in selected_items if item["plan_status"] == "insert_queue_row"),
+        "upgrade_count": sum(1 for item in selected_items if item["plan_status"] == "upgrade_existing_queue_row"),
+        "already_queued_pending_count": sum(
+            1 for item in selected_items if item["plan_status"] == "already_queued_pending"
+        ),
+        "selected_items": selected_items[:bounded_sample_limit],
+        "source": {
+            "kind": "sqlite",
+            "uses_spotify_api": False,
+            "mutates_identity": False,
+        },
+    }
+    if not apply or not selected_items:
+        return result
+
+    requested_at = _utc_now()
+    with sqlite_connection(write=True) as connection:
+        for item in selected_items:
+            if item["plan_status"] == "already_queued_pending":
+                continue
+            connection.execute(
+                """
+                INSERT INTO spotify_catalog_backfill_queue (
+                  entity_type, spotify_id, reason, priority, status, requested_at, attempts, last_error
+                ) VALUES ('track', ?, 'identity_metadata', ?, 'pending', ?, 0, NULL)
+                ON CONFLICT(entity_type, spotify_id) DO UPDATE SET
+                  reason = 'identity_metadata',
+                  priority = max(COALESCE(spotify_catalog_backfill_queue.priority, 0), excluded.priority),
+                  status = 'pending',
+                  requested_at = CASE
+                    WHEN spotify_catalog_backfill_queue.status = 'pending'
+                    THEN spotify_catalog_backfill_queue.requested_at
+                    ELSE excluded.requested_at
+                  END,
+                  last_error = NULL
+                """,
+                (item["spotify_track_id"], bounded_priority, requested_at),
+            )
+    return result
 
 
 def _artist_json_has_id_without_name(value: Any) -> bool:
@@ -8111,11 +8324,21 @@ def _sync_release_track_duration_from_catalog_with_connection(
 ) -> int:
     if duration_ms is None:
         return 0
+    evidence_json = _json_dump(
+        {
+            "spotify_track_id": spotify_track_id,
+            "selected_duration_ms": int(duration_ms),
+            "selected_strategy": "single_catalog_track_sync",
+        }
+    )
     cursor = connection.execute(
         """
         UPDATE release_track
         SET
           duration_ms = ?,
+          duration_source = ?,
+          duration_confidence = ?,
+          duration_evidence_json = ?,
           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
         WHERE duration_ms IS NULL
           AND id IN (
@@ -8128,7 +8351,13 @@ def _sync_release_track_duration_from_catalog_with_connection(
               AND st.external_id = ?
           )
         """,
-        (duration_ms, spotify_track_id),
+        (
+            duration_ms,
+            RELEASE_TRACK_DURATION_SOURCE_SPOTIFY_CATALOG,
+            RELEASE_TRACK_DURATION_CONFIDENCE_CATALOG_AGREES,
+            evidence_json,
+            spotify_track_id,
+        ),
     )
     return int(cursor.rowcount or 0)
 

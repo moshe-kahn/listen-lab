@@ -221,17 +221,19 @@ Classify as same release track only when evidence shows the flag is a metadata a
 
 ### Duration Mismatch
 
-Small `duration_ms` differences can be metadata noise, but duration is stronger than label/copyright evidence.
+Small `duration_ms` differences can be metadata noise. Larger Spotify catalog duration differences are review signals, not automatic split proof, because unavailable tracks, edition drift, and Spotify display/playback disagreement can make stored duration unreliable.
 
 Review rules:
 
 - same playback length despite Spotify metadata drift can still be same release track
 - one-to-two second differences require stronger corroborating evidence
 - larger differences require playback evidence, ISRC match, or other strong evidence
+- if source mappings are already accepted into the same release track and manual review explains the drift, keep the release join and use a representative duration instead of reopening identity
+- representative durations chosen from conflicting catalog values must be marked uncertain; do not treat the longest or shortest source duration as authoritative without stronger playback evidence
 - consistent duration differences across many sibling tracks may indicate systematic provider metadata drift
 - isolated large duration differences should remain unresolved or separate until explained
 
-When playback evidence is used, record that it came from manual review and should be treated as reviewer evidence, not catalog metadata.
+When playback evidence is used, record that it came from manual review or a future observed-playback source and should be treated separately from catalog metadata.
 
 ### Unresolved
 

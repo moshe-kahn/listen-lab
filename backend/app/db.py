@@ -1436,6 +1436,16 @@ CREATE INDEX IF NOT EXISTS idx_recording_track_candidate_review_decision
 CREATE INDEX IF NOT EXISTS idx_recording_track_candidate_review_updated_at
   ON recording_track_candidate_review(updated_at);
 """,
+    31: """
+ALTER TABLE release_track
+  ADD COLUMN duration_source TEXT;
+
+ALTER TABLE release_track
+  ADD COLUMN duration_confidence TEXT NOT NULL DEFAULT 'unknown';
+
+ALTER TABLE release_track
+  ADD COLUMN duration_evidence_json TEXT;
+""",
 }
 
 
@@ -5313,6 +5323,9 @@ def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
               rt.primary_name,
               rt.normalized_name,
               rt.duration_ms,
+              rt.duration_source,
+              rt.duration_confidence,
+              rt.duration_evidence_json,
               sat.release_album_id
             FROM release_track rt
             JOIN single_album_tracks sat
@@ -5337,6 +5350,19 @@ def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
             if len(group_rows) < 2:
                 continue
             counts["groups_considered"] += 1
+
+            format_signatures = {
+                tuple(
+                    sorted(
+                        component.normalized_label
+                        for component in classify_label_families(str(row["primary_name"] or ""))
+                        if component.family == "format"
+                    )
+                )
+                for row in group_rows
+            }
+            if len(format_signatures) > 1:
+                continue
 
             non_null_durations = [
                 int(row["duration_ms"])
@@ -5490,11 +5516,20 @@ def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
                     """
                     UPDATE release_track
                     SET
+                      duration_source = CASE WHEN duration_ms IS NULL THEN COALESCE(duration_source, ?) ELSE duration_source END,
+                      duration_confidence = CASE WHEN duration_ms IS NULL THEN COALESCE(?, duration_confidence) ELSE duration_confidence END,
+                      duration_evidence_json = CASE WHEN duration_ms IS NULL THEN COALESCE(duration_evidence_json, ?) ELSE duration_evidence_json END,
                       duration_ms = COALESCE(duration_ms, ?),
                       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
                     WHERE id = ?
                     """,
-                    (loser_row["duration_ms"], winner_release_track_id),
+                    (
+                        loser_row["duration_source"],
+                        loser_row["duration_confidence"],
+                        loser_row["duration_evidence_json"],
+                        loser_row["duration_ms"],
+                        winner_release_track_id,
+                    ),
                 )
 
                 connection.execute(

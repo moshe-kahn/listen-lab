@@ -186,6 +186,32 @@ class SpotifyCatalogWorkerTests(unittest.TestCase):
         self.assertIsNotNone(state)
         self.assertIsNone(state["cooldown_until"])
 
+    def test_successful_backfill_runs_release_duration_repair(self) -> None:
+        repair_result = {
+            "ok": True,
+            "mode": "apply",
+            "performed_action": "updated_release_track_durations",
+            "updated_count": 3,
+        }
+
+        with patch(
+            "backend.app.spotify_catalog_worker.repair_release_track_durations_from_spotify_catalog",
+            return_value=repair_result,
+        ) as repair_mock:
+            result = run_spotify_track_metadata_worker(
+                now=self.now,
+                backfill_runner=self._ok_backfill,
+                user_lister=self._token_lister,
+                token_refresher=self._token_refresher,
+            )
+
+        self.assertEqual("ok", result["status"])
+        repair_mock.assert_called_once_with(apply=True)
+        invocation = self._row("spotify_catalog_worker_invocation")
+        self.assertIsNotNone(invocation)
+        result_json = json.loads(str(invocation["result_json"]))
+        self.assertEqual(repair_result, result_json["release_track_duration_repair"])
+
     def test_rate_limited_result_stores_cooldown_from_retry_after(self) -> None:
         completed = self.now + timedelta(seconds=5)
 
