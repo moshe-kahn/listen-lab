@@ -27,15 +27,48 @@ FAMILY_VERSION_FAMILIES = {
     "live",
     "demo",
     "acoustic",
+    "instrumental",
     "remix",
     "rework",
     "cover",
     "session",
     "recording_context",
     "performance_style",
+    "structural",
+    "commentary",
+    "wellness_frequency",
 }
 RERECORDING_SEMANTIC_CATEGORIES = {"rerecorded_version", "recording_lineage_change"}
 RADIO_EDIT_SEMANTIC_CATEGORIES = {"broadcast_length_or_content_edit"}
+RECORDING_COMPATIBLE_SEMANTIC_CATEGORIES = {
+    "mastering_or_reissue_label",
+    "packaging_version",
+    "content_or_format_version",
+    "generic_originality_label",
+    "format_or_presentation_change",
+    "release_packaging",
+    "credit_annotation_or_collab_delta",
+    "inline_credit_annotation",
+    "placement_or_context_label",
+}
+RECORDING_DISTINCT_SEMANTIC_CATEGORIES = {
+    "arrangement_change",
+    "arrangement_or_vocal_subtraction",
+    "attributed_derived_version",
+    "broadcast_length_or_content_edit",
+    "recording_lineage_change",
+    "alternate_take_or_arrangement",
+    "dated_revision",
+    "ambiguous_version_misc",
+    "ambiguous_edit_misc",
+    "mix_treatment",
+    "ambiguous_mix_misc",
+    "special_recording_context",
+    "capture_context",
+    "distinct_track_form",
+    "spoken_context_track",
+    "wellness_or_frequency_program",
+}
 
 
 class RecordingTrackCandidateMember(TypedDict):
@@ -121,11 +154,46 @@ def _component_semantic_categories(components: tuple[TrackVariantComponent, ...]
     return {component.semantic_category for component in components}
 
 
+def _component_signature(components: tuple[TrackVariantComponent, ...]) -> tuple[tuple[str, str, str], ...]:
+    return tuple(sorted((component.family, component.semantic_category, component.normalized_label) for component in components))
+
+
+def _component_is_recording_distinct(component: TrackVariantComponent) -> bool:
+    if component.family in FAMILY_VERSION_FAMILIES:
+        return True
+    if component.semantic_category in RECORDING_DISTINCT_SEMANTIC_CATEGORIES:
+        return True
+    if component.groupable_by_default:
+        return False
+    return component.semantic_category not in RECORDING_COMPATIBLE_SEMANTIC_CATEGORIES
+
+
+def _has_recording_distinct_variant_mismatch(members: list[RecordingTrackCandidateMember]) -> bool:
+    signatures: set[tuple[tuple[str, str, str], ...]] = set()
+    has_distinct_component = False
+    for member in members:
+        components = _variant_components(member["title"])
+        signatures.add(_component_signature(components))
+        if any(_component_is_recording_distinct(component) for component in components):
+            has_distinct_component = True
+    return has_distinct_component and len(signatures) > 1
+
+
 def _album_context(album_names: list[str]) -> str:
     normalized = " | ".join(_normalize_text(album_name) for album_name in album_names)
     if "soundtrack" in normalized or "motion picture" in normalized or "original score" in normalized:
         return "soundtrack"
-    if "compilation" in normalized or "collection" in normalized or "best of" in normalized or "greatest hits" in normalized:
+    if (
+        "compilation" in normalized
+        or "collection" in normalized
+        or "best of" in normalized
+        or "greatest hits" in normalized
+        or "very best" in normalized
+        or "essential" in normalized
+        or "anthology" in normalized
+        or "golden age" in normalized
+        or "soundway presents" in normalized
+    ):
         return "compilation"
     if re.search(r"\bsingle\b", normalized):
         return "single"
@@ -153,8 +221,16 @@ def _relationship_kind(
         return "demo"
     if "acoustic" in families:
         return "acoustic"
+    if "instrumental" in families:
+        return "instrumental"
+    if "structural" in families:
+        return "structural_segment"
     if "session" in families or "recording_context" in families:
         return "alternate_take"
+    if "mix" in families:
+        return "mix"
+    if "version" in families and "attributed_derived_version" in semantics:
+        return "derived_version"
     if RERECORDING_SEMANTIC_CATEGORIES & semantics:
         return "rerecording"
     if RADIO_EDIT_SEMANTIC_CATEGORIES & semantics:
@@ -210,18 +286,61 @@ def _member_metadata_score(member: RecordingTrackCandidateMember) -> int:
 
 
 def _member_album_context(member: RecordingTrackCandidateMember) -> str:
-    return _album_context(_split_aggregate(member["album"].replace(", ", "|")))
+    album_types = {_normalize_text(album_type) for album_type in member.get("album_types", [])}
+    if "compilation" in album_types:
+        return "compilation"
+    if "single" in album_types:
+        return "single"
+    context = _album_context(_split_aggregate(member["album"].replace(", ", "|")))
+    if context == "album" and _normalize_text(member["album"]) == _base_title(member["title"]):
+        return "single"
+    return context
+
+
+def _earliest_release_year(member: RecordingTrackCandidateMember) -> int | None:
+    years: list[int] = []
+    for raw_date in member.get("album_release_dates", []):
+        match = re.match(r"^\s*(\d{4})", str(raw_date or ""))
+        if not match:
+            continue
+        years.append(int(match.group(1)))
+    return min(years) if years else None
+
+
+def _representative_context_rank(context: str) -> int:
+    ranks = {
+        "album": 0,
+        "rerelease": 1,
+        "single": 2,
+        "soundtrack": 3,
+        "compilation": 4,
+    }
+    return ranks.get(context, 5)
+
+
+def _representative_variant_rank(member: RecordingTrackCandidateMember) -> int:
+    components = _variant_components(member["title"])
+    if not components:
+        return 0
+    families = _component_families(components)
+    if families <= {"content_rating"}:
+        return 1
+    if families & {"format", "remaster", "packaging"}:
+        return 2
+    return 3
 
 
 def _representative_member(members: list[RecordingTrackCandidateMember]) -> tuple[RecordingTrackCandidateMember, int | None, str]:
-    def sort_key(member: RecordingTrackCandidateMember) -> tuple[int, int, int, int]:
+    def sort_key(member: RecordingTrackCandidateMember) -> tuple[int, int, int, int, int, int]:
         playable = 1 if member["source_track_uris"] or member["source_track_ids"] else 0
         context = _member_album_context(member)
-        preferred_context = 1 if context in {"album", "single"} else 0
+        release_year = _earliest_release_year(member)
         return (
             -playable,
+            _representative_context_rank(context),
+            _representative_variant_rank(member),
+            9999 if release_year is None else release_year,
             -_member_metadata_score(member),
-            -preferred_context,
             member["release_track_id"],
         )
 
@@ -230,6 +349,22 @@ def _representative_member(members: list[RecordingTrackCandidateMember]) -> tupl
     reasons: list[str] = []
     if representative["source_track_uris"] or representative["source_track_ids"]:
         reasons.append("playable/source-backed candidate")
+    context = _member_album_context(representative)
+    if context == "album":
+        reasons.append("preferred original album context")
+    elif context == "single":
+        reasons.append("single release preferred over compilation/soundtrack fallback")
+    elif context == "rerelease":
+        reasons.append("rerelease/remaster preferred over compilation fallback")
+    elif context == "soundtrack":
+        reasons.append("soundtrack fallback; no stronger album/single source-backed representative")
+    elif context == "compilation":
+        reasons.append("compilation fallback; no stronger source-backed representative")
+    release_year = _earliest_release_year(representative)
+    if release_year is not None:
+        reasons.append(f"earliest release year {release_year}")
+    if _representative_variant_rank(representative) == 0:
+        reasons.append("clean base title preferred for display")
     if representative["isrc"]:
         reasons.append("has ISRC evidence")
     if representative["album"]:
@@ -271,8 +406,7 @@ def classify_recording_track_candidate_group(
     review_duration = duration_delta_ms is None or duration_delta_ms <= REVIEW_DURATION_MS
     same_base_title = len(normalized_titles) == 1
     same_artist = len(artists) <= 1
-    has_family_variant = bool(FAMILY_VERSION_FAMILIES & families or RERECORDING_SEMANTIC_CATEGORIES & semantics)
-    has_radio_edit = bool(RADIO_EDIT_SEMANTIC_CATEGORIES & semantics)
+    has_recording_distinct_variant_mismatch = _has_recording_distinct_variant_mismatch(sorted_members)
     has_recording_variant = bool(RECORDING_VERSION_FAMILIES & families or album_contexts & {"single", "compilation", "soundtrack", "rerelease"})
     has_any_isrc = bool(isrcs)
     has_partial_isrc = has_any_isrc and not all_members_have_isrc
@@ -312,14 +446,14 @@ def classify_recording_track_candidate_group(
     if album_count > 2 and not (same_isrc or near_duration):
         why_review.append("same title appears across many albums without strong ISRC or duration support")
 
-    if has_family_variant or has_radio_edit:
+    if has_recording_distinct_variant_mismatch:
         candidate_type: CandidateType = "track_family_candidate"
         safety_status: SafetyStatus = "needs_review"
         evidence_bucket: EvidenceBucket = "variant_flag_excluded"
-        if has_radio_edit:
+        if RADIO_EDIT_SEMANTIC_CATEGORIES & semantics:
             why_review.append("radio/edit variant should not silently collapse into recording_track")
         else:
-            why_review.append("meaningful variant belongs at Track Family layer")
+            why_review.append("recording-distinct variant labels belong at Track Family layer")
     else:
         candidate_type = "recording_track_candidate"
         if same_isrc:
@@ -376,6 +510,8 @@ def classify_recording_track_candidate_group(
 
     representative, representative_source_track_id, representative_reason = _representative_member(sorted_members)
     display_name = representative["title"] or sorted_members[0]["title"]
+    for member in sorted_members:
+        member["evidence"]["album_context"] = _member_album_context(member)
 
     return {
         "candidate_key": candidate_key or f"{next(iter(artists), 'unknown')}|{next(iter(normalized_titles), 'unknown')}",

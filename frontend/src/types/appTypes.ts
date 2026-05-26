@@ -520,6 +520,51 @@ export type RecordingTrackCandidatesResponse = {
   };
 };
 
+export type ReleaseTrackDurationConflictSourceTrack = {
+  source_track_db_id: number;
+  spotify_track_id: string;
+  spotify_uri: string;
+  spotify_url: string | null;
+  spotify_track_name: string;
+  duration_ms: number;
+  explicit: boolean | null;
+  spotify_album_id: string;
+  album_name: string;
+  album_release_date: string;
+  album_type: string;
+  isrc: string;
+  match_method: string;
+  confidence: number;
+  explanation: string;
+};
+
+export type ReleaseTrackDurationConflictItem = {
+  release_track_id: number;
+  release_track_name: string;
+  release_track_normalized_name: string;
+  min_duration_ms: number;
+  max_duration_ms: number;
+  duration_delta_ms: number;
+  distinct_duration_count: number;
+  source_track_count: number;
+  source_tracks: ReleaseTrackDurationConflictSourceTrack[];
+};
+
+export type ReleaseTrackDurationConflictsResponse = {
+  ok: boolean;
+  items: ReleaseTrackDurationConflictItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  min_duration_delta_ms: number;
+  source: {
+    kind: string;
+    uses_spotify_api: boolean;
+    mutates_identity: boolean;
+  };
+};
+
 export type RecordingTrackCandidatesSummary = {
   total_candidate_groups: number;
   source_tracks_with_isrc_available?: number;

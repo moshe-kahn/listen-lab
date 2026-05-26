@@ -24,8 +24,10 @@ def _member(
     *,
     artist: str = "Artist A",
     album: str = "Album A",
+    album_release_dates: list[str] | None = None,
     source_track_ids: list[str] | None = None,
     source_track_db_ids: list[int] | None = None,
+    source_track_uris: list[str] | None = None,
     isrc: str | None = None,
     duration_ms: int | None = 180_000,
 ) -> RecordingTrackCandidateMember:
@@ -36,11 +38,11 @@ def _member(
         "album": album,
         "release_album_ids": [release_track_id],
         "spotify_album_ids": [],
-        "album_release_dates": [],
+        "album_release_dates": album_release_dates or [],
         "album_types": [],
         "source_track_ids": source_track_ids or [f"spotify-{release_track_id}"],
         "source_track_db_ids": source_track_db_ids or [release_track_id],
-        "source_track_uris": [f"spotify:track:spotify-{release_track_id}"],
+        "source_track_uris": [f"spotify:track:spotify-{release_track_id}"] if source_track_uris is None else source_track_uris,
         "isrc": isrc,
         "isrc_values": [isrc] if isrc else [],
         "duration_ms": duration_ms,
@@ -134,6 +136,7 @@ class RecordingTrackClassifierTests(unittest.TestCase):
             ("Song E - Live", "live"),
             ("Song E - Demo", "demo"),
             ("Song E - Acoustic", "acoustic"),
+            ("Song E - Instrumental", "instrumental"),
             ("Song E - Remix", "remix"),
             ("Song E - Rerecorded 2014 Version", "rerecording"),
         ]
@@ -149,6 +152,174 @@ class RecordingTrackClassifierTests(unittest.TestCase):
                 self.assertEqual("track_family_candidate", item["candidate_type"])
                 self.assertNotEqual("safe_candidate", item["safety_status"])
                 self.assertEqual(relationship_kind, item["relationship_kind"])
+
+    def test_same_variant_label_with_same_isrc_stays_recording_candidate(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(
+                    1,
+                    "Deadcrush (feat. Danny Brown) - Alchemist x Trooko Version",
+                    album="Deadcrush (feat. Danny Brown)",
+                    isrc="GB5KW1801528",
+                    duration_ms=243_573,
+                ),
+                _member(
+                    2,
+                    "Deadcrush (feat. Danny Brown) - Alchemist x Trooko Version",
+                    album="Reduxer",
+                    isrc="GB5KW1801528",
+                    duration_ms=243_573,
+                ),
+            ]
+        )
+
+        self.assertEqual("recording_track_candidate", item["candidate_type"])
+        self.assertEqual("safe_candidate", item["safety_status"])
+        self.assertEqual("same_isrc", item["evidence_bucket"])
+
+    def test_same_instrumental_variant_with_same_isrc_can_form_recording_candidate(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Speak Publicly - Instrumental", album="Single", isrc="GBKPL2033436"),
+                _member(2, "Speak Publicly - Instrumental", album="Album", isrc="GBKPL2033436"),
+            ]
+        )
+
+        self.assertEqual("recording_track_candidate", item["candidate_type"])
+        self.assertEqual("same_isrc", item["evidence_bucket"])
+
+    def test_mixed_named_versions_are_track_family_not_recording_candidate(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Deadcrush - Spike Stent Mix", album="Deadcrush", duration_ms=None),
+                _member(
+                    2,
+                    "Deadcrush (feat. Danny Brown) - Alchemist x Trooko Version",
+                    album="Deadcrush (feat. Danny Brown)",
+                    isrc="GB5KW1801528",
+                    duration_ms=243_573,
+                ),
+                _member(
+                    3,
+                    "Deadcrush (feat. Danny Brown) - Alchemist x Trooko Version",
+                    album="Reduxer",
+                    isrc="GB5KW1801528",
+                    duration_ms=243_573,
+                ),
+            ]
+        )
+
+        self.assertEqual("track_family_candidate", item["candidate_type"])
+        self.assertEqual("variant_flag_excluded", item["evidence_bucket"])
+        self.assertIn("recording-distinct variant labels belong at Track Family layer", item["why_review"])
+
+    def test_structural_parts_are_track_family_segments_not_recording_candidate(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, '"Instrumentals" Volume 1 - Part 1', duration_ms=None),
+                _member(2, '"Instrumentals" Volume 1 - Part 2', duration_ms=None),
+                _member(3, '"Instrumentals" Volume 1 - Part 3', duration_ms=None),
+            ]
+        )
+
+        self.assertEqual("track_family_candidate", item["candidate_type"])
+        self.assertEqual("structural_segment", item["relationship_kind"])
+        self.assertEqual("variant_flag_excluded", item["evidence_bucket"])
+
+    def test_content_rating_and_format_variants_can_remain_recording_candidates(self) -> None:
+        explicit = classify_recording_track_candidate_group(
+            [
+                _member(1, "Changes - Explicit", duration_ms=268_960),
+                _member(2, "Changes - Clean", duration_ms=268_960),
+            ]
+        )
+        mono = classify_recording_track_candidate_group(
+            [
+                _member(3, "If You Could See Me Now", duration_ms=318_466),
+                _member(4, "If You Could See Me Now - Mono", duration_ms=319_092),
+            ]
+        )
+
+        self.assertEqual("recording_track_candidate", explicit["candidate_type"])
+        self.assertEqual("recording_track_candidate", mono["candidate_type"])
+        self.assertNotEqual("variant_flag_excluded", explicit["evidence_bucket"])
+        self.assertNotEqual("variant_flag_excluded", mono["evidence_bucket"])
+
+    def test_representative_prefers_original_album_over_compilation(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(
+                    1,
+                    "Lovely Day",
+                    album="The Essential Artist A",
+                    album_release_dates=["2013-01-01"],
+                    isrc="USAAA2",
+                ),
+                _member(
+                    2,
+                    "Lovely Day",
+                    album="Original Album",
+                    album_release_dates=["1977-01-01"],
+                    isrc="USAAA1",
+                ),
+                _member(
+                    3,
+                    "Lovely Day",
+                    album="Best Of Artist A",
+                    album_release_dates=["2004-01-01"],
+                    isrc="USAAA3",
+                ),
+            ]
+        )
+
+        self.assertEqual(2, item["representative"]["release_track_id"])
+        self.assertIn("preferred original album context", item["representative"]["reason"])
+        self.assertIn("earliest release year 1977", item["representative"]["reason"])
+
+    def test_representative_treats_title_album_as_single_context(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Hunter", album="Hunter", isrc=None, duration_ms=None),
+                _member(2, "Hunter", album="The Greatest Part", isrc=None, duration_ms=None),
+            ]
+        )
+
+        self.assertEqual(2, item["representative"]["release_track_id"])
+        self.assertIn("preferred original album context", item["representative"]["reason"])
+
+    def test_representative_prefers_clean_title_over_format_variant(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "If You Could See Me Now - Mono", album="Chet", album_release_dates=["1959"], duration_ms=319_092),
+                _member(2, "If You Could See Me Now", album="Chet", album_release_dates=["2007-01-01"], duration_ms=318_466),
+            ]
+        )
+
+        self.assertEqual(2, item["representative"]["release_track_id"])
+        self.assertIn("clean base title preferred for display", item["representative"]["reason"])
+
+    def test_representative_uses_source_backed_rerelease_before_compilation(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(
+                    1,
+                    "Song R - Remastered 2009",
+                    album="Song R 2009 Remaster",
+                    album_release_dates=["2009-01-01"],
+                    isrc="USRERELEASE1",
+                ),
+                _member(
+                    2,
+                    "Song R",
+                    album="Best Of Artist A",
+                    album_release_dates=["2019-01-01"],
+                    isrc="USRERELEASE2",
+                ),
+            ]
+        )
+
+        self.assertEqual(1, item["representative"]["release_track_id"])
+        self.assertIn("rerelease/remaster preferred over compilation fallback", item["representative"]["reason"])
 
     def test_radio_edit_is_review_required_not_recording_safe(self) -> None:
         item = classify_recording_track_candidate_group(

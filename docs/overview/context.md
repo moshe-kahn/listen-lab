@@ -70,6 +70,7 @@ Current note:
   - proposed `recording_track` layer for normal same-song identity across releases/remasters/compilations while preserving release provenance
   - `track_family` (implemented in schema/code as `analysis_track`)
 - the Recording Tracks Identity Audit tab is now a read-only/manual-review surface for proposed `recording_track` candidates; saved reviews preserve candidate snapshots and reviewer notes but do not apply identity changes
+- the Identity Audit track tabs now also include Duration Conflicts, a read-only review surface for release tracks whose accepted Spotify source durations differ by more than two seconds; source tracks link directly to Spotify for manual playback comparison
 - release-track identity is now exposed in track-like payloads and is the intended UI identity for same-song semantics; Spotify track IDs remain provider/playback identifiers
 - Activity/Listened grouping now prefers `release_track_id`, while keeping representative Spotify track IDs/URIs for playback
 - track overlays can show a read-only source-version note such as `Grouped with 4 source versions` when release-track siblings exist
@@ -80,6 +81,7 @@ Current note:
 - source Spotify catalog enrichment now exists as an evidence-gathering layer for identity review:
   - priority metadata runs fetch Spotify track and album metadata into source catalog tables
   - track metadata backfill prioritizes duplicate/split/suggested identity candidates before broad backlog
+  - Spotify track catalog writes now propagate missing `release_track.duration_ms` through accepted source mappings; a one-time repair filled conservative existing null durations while leaving conflicting rows for review
   - a local track metadata worker can run bounded one-shot or looped batches with cooldown, JSONL logging, and rolling request-budget protection
   - catalog enrichment remains evidence-only and must not create, merge, promote, or apply identity decisions
 - current implementation note:
@@ -117,6 +119,7 @@ Current rule:
 - UI liked state should prefer `release_track_id`.
 - Spotify track ID remains necessary for playback and source/version provenance.
 - Activity `Listened` grouping now prefers `release_track_id`.
+- `release_track.duration_ms` may be filled from accepted Spotify source catalog metadata when mapped durations agree closely; large duration conflicts stay unresolved for manual audit.
 
 ### Source catalog metadata
 Provider metadata fetched for known source identifiers, such as Spotify track duration, ISRC, album id, album release date, and external IDs. This metadata is evidence for review and diagnostics, not an identity decision by itself.

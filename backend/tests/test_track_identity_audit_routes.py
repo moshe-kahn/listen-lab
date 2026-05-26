@@ -56,6 +56,30 @@ class TrackIdentityAuditRouteTests(unittest.TestCase):
         self.assertEqual([], body["items"])
         self.assertEqual(0, body["summary"]["total_groups"])
 
+    def test_duration_conflicts_endpoint_empty_result_shape(self) -> None:
+        payload = {
+            "ok": True,
+            "items": [],
+            "total": 0,
+            "limit": 100,
+            "offset": 0,
+            "has_more": False,
+            "min_duration_delta_ms": 2000,
+            "source": {"kind": "sqlite", "uses_spotify_api": False, "mutates_identity": False},
+        }
+        with patch("backend.app.routes.audit_routes._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.routes.audit_routes.query_release_track_duration_conflicts",
+            return_value=payload,
+        ):
+            client = TestClient(app)
+            response = client.get("/debug/tracks/release-track-duration-conflicts?limit=100&offset=0")
+
+        self.assertEqual(200, response.status_code)
+        body = response.json()
+        self.assertEqual([], body["items"])
+        self.assertEqual(0, body["total"])
+        self.assertFalse(body["source"]["uses_spotify_api"])
+
     def test_readiness_endpoint_empty_result_shape_and_no_spotify_call(self) -> None:
         payload = {
             "ok": True,

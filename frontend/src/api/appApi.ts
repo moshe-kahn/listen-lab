@@ -31,6 +31,7 @@ import type {
   RecordingTrackCandidateReviewsResponse,
   RecordingTrackCandidateReviewSaveRequest,
   RecordingTrackCandidateReviewSaveResponse,
+  ReleaseTrackDurationConflictsResponse,
 } from "../types/appTypes";
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
@@ -726,6 +727,37 @@ export async function fetchRecordingTrackCandidatesSummary(): Promise<RecordingT
       throw new Error(`Recording Track Candidate Summary (${response.status}): ${detail}`);
     }
     return (await response.json()) as RecordingTrackCandidatesSummary;
+  }
+
+export async function fetchReleaseTrackDurationConflicts(
+    limit: number = 100,
+    offset: number = 0,
+    minDurationDeltaMs: number = 2000,
+  ): Promise<ReleaseTrackDurationConflictsResponse> {
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    params.set("min_duration_delta_ms", String(minDurationDeltaMs));
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/release-track-duration-conflicts?${params.toString()}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load release-track duration conflicts.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Release Track Duration Conflicts (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ReleaseTrackDurationConflictsResponse;
   }
 
 export async function fetchRecordingTrackCandidateReviews(limit: number = 2000, offset: number = 0): Promise<RecordingTrackCandidateReviewsResponse> {

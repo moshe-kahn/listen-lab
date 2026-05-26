@@ -4042,6 +4042,275 @@ def repair_spotify_album_basic_metadata_from_track_payloads(
     return result
 
 
+def repair_release_track_durations_from_spotify_catalog(
+    *,
+    apply: bool = False,
+    max_duration_delta_ms: int = 2_000,
+    sample_limit: int = 25,
+) -> dict[str, Any]:
+    bounded_delta = max(0, int(max_duration_delta_ms))
+    bounded_sample_limit = max(1, min(int(sample_limit), 100))
+
+    with sqlite_connection(write=apply, row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              rt.id AS release_track_id,
+              rt.primary_name AS release_track_name,
+              min(stc.duration_ms) AS repaired_duration_ms,
+              min(stc.duration_ms) AS min_duration_ms,
+              max(stc.duration_ms) AS max_duration_ms,
+              count(DISTINCT stc.duration_ms) AS distinct_duration_count,
+              count(DISTINCT st.external_id) AS source_track_count
+            FROM release_track rt
+            JOIN source_track_map stm
+              ON stm.release_track_id = rt.id
+             AND stm.status = 'accepted'
+            JOIN source_track st
+              ON st.id = stm.source_track_id
+             AND st.source_name IN ('spotify', 'spotify_uri')
+            JOIN spotify_track_catalog stc
+              ON stc.spotify_track_id = st.external_id
+            WHERE rt.duration_ms IS NULL
+              AND stc.duration_ms IS NOT NULL
+            GROUP BY rt.id
+            HAVING max(stc.duration_ms) - min(stc.duration_ms) <= ?
+            ORDER BY rt.id ASC
+            """,
+            (bounded_delta,),
+        ).fetchall()
+        conflict_count = int(
+            connection.execute(
+                """
+                SELECT count(*) AS conflict_count
+                FROM (
+                  SELECT rt.id
+                  FROM release_track rt
+                  JOIN source_track_map stm
+                    ON stm.release_track_id = rt.id
+                   AND stm.status = 'accepted'
+                  JOIN source_track st
+                    ON st.id = stm.source_track_id
+                   AND st.source_name IN ('spotify', 'spotify_uri')
+                  JOIN spotify_track_catalog stc
+                    ON stc.spotify_track_id = st.external_id
+                  WHERE rt.duration_ms IS NULL
+                    AND stc.duration_ms IS NOT NULL
+                  GROUP BY rt.id
+                  HAVING max(stc.duration_ms) - min(stc.duration_ms) > ?
+                ) conflicted
+                """,
+                (bounded_delta,),
+            ).fetchone()["conflict_count"]
+        )
+        updated_count = 0
+        if apply and rows:
+            updated_at = _utc_now()
+            for row in rows:
+                cursor = connection.execute(
+                    """
+                    UPDATE release_track
+                    SET
+                      duration_ms = ?,
+                      updated_at = ?
+                    WHERE id = ?
+                      AND duration_ms IS NULL
+                    """,
+                    (int(row["repaired_duration_ms"]), updated_at, int(row["release_track_id"])),
+                )
+                updated_count += int(cursor.rowcount or 0)
+
+    sample_items = [
+        {
+            "release_track_id": int(row["release_track_id"]),
+            "release_track_name": str(row["release_track_name"] or ""),
+            "repaired_duration_ms": int(row["repaired_duration_ms"]),
+            "min_duration_ms": int(row["min_duration_ms"]),
+            "max_duration_ms": int(row["max_duration_ms"]),
+            "distinct_duration_count": int(row["distinct_duration_count"]),
+            "source_track_count": int(row["source_track_count"]),
+        }
+        for row in rows[:bounded_sample_limit]
+    ]
+    return {
+        "ok": True,
+        "mode": "apply" if apply else "dry_run",
+        "performed_action": "updated_release_track_durations" if apply else "none",
+        "max_duration_delta_ms": bounded_delta,
+        "candidate_count": len(rows),
+        "would_update_count": len(rows),
+        "updated_count": updated_count,
+        "conflict_count": conflict_count,
+        "selected_items": sample_items,
+        "notes": [
+            "Only fills release_track.duration_ms when it is currently null.",
+            "Uses accepted Spotify source mappings with spotify_track_catalog.duration_ms.",
+            "Skips release tracks whose mapped catalog durations differ by more than max_duration_delta_ms.",
+        ],
+    }
+
+
+def query_release_track_duration_conflicts(
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    min_duration_delta_ms: int = 2_000,
+) -> dict[str, Any]:
+    bounded_limit = max(1, min(int(limit), 500))
+    bounded_offset = max(0, int(offset))
+    bounded_delta = max(0, int(min_duration_delta_ms))
+
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        total = int(
+            connection.execute(
+                """
+                SELECT count(*) AS conflict_count
+                FROM (
+                  SELECT rt.id
+                  FROM release_track rt
+                  JOIN source_track_map stm
+                    ON stm.release_track_id = rt.id
+                   AND stm.status = 'accepted'
+                  JOIN source_track st
+                    ON st.id = stm.source_track_id
+                   AND st.source_name IN ('spotify', 'spotify_uri')
+                  JOIN spotify_track_catalog stc
+                    ON stc.spotify_track_id = st.external_id
+                  WHERE rt.duration_ms IS NULL
+                    AND stc.duration_ms IS NOT NULL
+                  GROUP BY rt.id
+                  HAVING max(stc.duration_ms) - min(stc.duration_ms) > ?
+                ) conflicts
+                """,
+                (bounded_delta,),
+            ).fetchone()["conflict_count"]
+        )
+        rows = connection.execute(
+            """
+            SELECT
+              rt.id AS release_track_id,
+              rt.primary_name AS release_track_name,
+              rt.normalized_name AS release_track_normalized_name,
+              min(stc.duration_ms) AS min_duration_ms,
+              max(stc.duration_ms) AS max_duration_ms,
+              max(stc.duration_ms) - min(stc.duration_ms) AS duration_delta_ms,
+              count(DISTINCT stc.duration_ms) AS distinct_duration_count,
+              count(DISTINCT st.external_id) AS source_track_count
+            FROM release_track rt
+            JOIN source_track_map stm
+              ON stm.release_track_id = rt.id
+             AND stm.status = 'accepted'
+            JOIN source_track st
+              ON st.id = stm.source_track_id
+             AND st.source_name IN ('spotify', 'spotify_uri')
+            JOIN spotify_track_catalog stc
+              ON stc.spotify_track_id = st.external_id
+            WHERE rt.duration_ms IS NULL
+              AND stc.duration_ms IS NOT NULL
+            GROUP BY rt.id
+            HAVING max(stc.duration_ms) - min(stc.duration_ms) > ?
+            ORDER BY duration_delta_ms DESC, rt.id ASC
+            LIMIT ?
+            OFFSET ?
+            """,
+            (bounded_delta, bounded_limit, bounded_offset),
+        ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            release_track_id = int(row["release_track_id"])
+            source_rows = connection.execute(
+                """
+                SELECT
+                  st.id AS source_track_db_id,
+                  st.external_id AS spotify_track_id,
+                  COALESCE(st.external_uri, CASE WHEN st.source_name = 'spotify' THEN 'spotify:track:' || st.external_id ELSE NULL END)
+                    AS spotify_uri,
+                  stc.name AS spotify_track_name,
+                  stc.duration_ms AS duration_ms,
+                  stc.explicit AS explicit,
+                  stc.album_id AS spotify_album_id,
+                  COALESCE(
+                    NULLIF(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.name'), ''),
+                    sac.name
+                  ) AS album_name,
+                  COALESCE(
+                    NULLIF(json_extract(COALESCE(stc.raw_json, '{}'), '$.album.release_date'), ''),
+                    sac.release_date
+                  ) AS album_release_date,
+                  sac.album_type AS album_type,
+                  json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc') AS isrc,
+                  stm.match_method,
+                  stm.confidence,
+                  stm.explanation
+                FROM source_track_map stm
+                JOIN source_track st
+                  ON st.id = stm.source_track_id
+                JOIN spotify_track_catalog stc
+                  ON stc.spotify_track_id = st.external_id
+                LEFT JOIN spotify_album_catalog sac
+                  ON sac.spotify_album_id = stc.album_id
+                WHERE stm.release_track_id = ?
+                  AND stm.status = 'accepted'
+                  AND st.source_name IN ('spotify', 'spotify_uri')
+                  AND stc.duration_ms IS NOT NULL
+                ORDER BY stc.duration_ms ASC, st.id ASC
+                """,
+                (release_track_id,),
+            ).fetchall()
+            items.append(
+                {
+                    "release_track_id": release_track_id,
+                    "release_track_name": str(row["release_track_name"] or ""),
+                    "release_track_normalized_name": str(row["release_track_normalized_name"] or ""),
+                    "min_duration_ms": int(row["min_duration_ms"]),
+                    "max_duration_ms": int(row["max_duration_ms"]),
+                    "duration_delta_ms": int(row["duration_delta_ms"]),
+                    "distinct_duration_count": int(row["distinct_duration_count"]),
+                    "source_track_count": int(row["source_track_count"]),
+                    "source_tracks": [
+                        {
+                            "source_track_db_id": int(source["source_track_db_id"]),
+                            "spotify_track_id": str(source["spotify_track_id"] or ""),
+                            "spotify_uri": str(source["spotify_uri"] or ""),
+                            "spotify_url": (
+                                f"https://open.spotify.com/track/{source['spotify_track_id']}"
+                                if str(source["spotify_track_id"] or "").strip()
+                                else None
+                            ),
+                            "spotify_track_name": str(source["spotify_track_name"] or ""),
+                            "duration_ms": int(source["duration_ms"]),
+                            "explicit": None if source["explicit"] is None else bool(source["explicit"]),
+                            "spotify_album_id": str(source["spotify_album_id"] or ""),
+                            "album_name": str(source["album_name"] or ""),
+                            "album_release_date": str(source["album_release_date"] or ""),
+                            "album_type": str(source["album_type"] or ""),
+                            "isrc": str(source["isrc"] or ""),
+                            "match_method": str(source["match_method"] or ""),
+                            "confidence": float(source["confidence"] or 0.0),
+                            "explanation": str(source["explanation"] or ""),
+                        }
+                        for source in source_rows
+                    ],
+                }
+            )
+
+    return {
+        "ok": True,
+        "items": items,
+        "total": total,
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+        "has_more": bounded_offset + len(items) < total,
+        "min_duration_delta_ms": bounded_delta,
+        "source": {
+            "kind": "sqlite",
+            "uses_spotify_api": False,
+            "mutates_identity": False,
+        },
+    }
+
+
 def _artist_json_has_id_without_name(value: Any) -> bool:
     for item in _json_list(value):
         if not isinstance(item, dict):
@@ -7834,9 +8103,41 @@ def _upsert_simplified_album_catalog(
     )
 
 
+def _sync_release_track_duration_from_catalog_with_connection(
+    connection: sqlite3.Connection,
+    *,
+    spotify_track_id: str,
+    duration_ms: int | None,
+) -> int:
+    if duration_ms is None:
+        return 0
+    cursor = connection.execute(
+        """
+        UPDATE release_track
+        SET
+          duration_ms = ?,
+          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE duration_ms IS NULL
+          AND id IN (
+            SELECT stm.release_track_id
+            FROM source_track_map stm
+            JOIN source_track st
+              ON st.id = stm.source_track_id
+            WHERE stm.status = 'accepted'
+              AND st.source_name IN ('spotify', 'spotify_uri')
+              AND st.external_id = ?
+          )
+        """,
+        (duration_ms, spotify_track_id),
+    )
+    return int(cursor.rowcount or 0)
+
+
 def _upsert_track_catalog(*, track: dict[str, Any], market: str, fetched_at: str, last_status: str, last_error: str | None) -> None:
     artists = track.get("artists") if isinstance(track.get("artists"), list) else []
     album = track.get("album") if isinstance(track.get("album"), dict) else {}
+    spotify_track_id = str(track.get("id") or "")
+    duration_ms = int(track["duration_ms"]) if isinstance(track.get("duration_ms"), int) else None
     with sqlite_connection(write=True) as connection:
         connection.execute(
             """
@@ -7859,9 +8160,9 @@ def _upsert_track_catalog(*, track: dict[str, Any], market: str, fetched_at: str
               last_error = excluded.last_error
             """,
             (
-                str(track.get("id") or ""),
+                spotify_track_id,
                 str(track.get("name") or "") or None,
-                int(track["duration_ms"]) if isinstance(track.get("duration_ms"), int) else None,
+                duration_ms,
                 _to_int_bool(track.get("explicit")),
                 int(track["disc_number"]) if isinstance(track.get("disc_number"), int) else None,
                 int(track["track_number"]) if isinstance(track.get("track_number"), int) else None,
@@ -7873,6 +8174,11 @@ def _upsert_track_catalog(*, track: dict[str, Any], market: str, fetched_at: str
                 last_status,
                 last_error,
             ),
+        )
+        _sync_release_track_duration_from_catalog_with_connection(
+            connection,
+            spotify_track_id=spotify_track_id,
+            duration_ms=duration_ms,
         )
         _upsert_simplified_album_catalog(
             connection=connection,

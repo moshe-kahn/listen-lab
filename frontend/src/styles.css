@@ -1428,6 +1428,16 @@ h1 {
   grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
 }
 
+.duration-conflict-source a {
+  color: #123b78;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.duration-conflict-source a:hover {
+  text-decoration: underline;
+}
+
 .source-release-album-section,
 .source-release-track-group {
   display: grid;

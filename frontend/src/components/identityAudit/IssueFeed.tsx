@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type TrackIdentityAuditTab = "problems" | "mapping" | "review_queue" | "recording_tracks";
+export type TrackIdentityAuditTab = "problems" | "mapping" | "review_queue" | "recording_tracks" | "duration_conflicts";
 export type AlbumIdentityAuditTab = "problems" | "merge_review" | "catalog";
 export type IdentityAuditEntityTab = "tracks" | "albums" | "artists";
 export type IdentityAuditIssueSort = "severity" | "unresolved" | "confidence" | "affected" | "metadata";

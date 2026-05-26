@@ -13,6 +13,7 @@ from backend.app.recording_track_candidate_reviews import (
     list_recording_track_candidate_reviews,
     save_recording_track_candidate_review,
 )
+from backend.app.spotify_catalog_backfill import query_release_track_duration_conflicts
 from backend.app.track_identity_audit import (
     build_track_identity_audit,
     build_track_identity_readiness_report,
@@ -139,6 +140,21 @@ async def debug_tracks_recording_track_candidates_summary(
 ) -> dict[str, Any]:
     _require_local_data_session(request)
     return summarize_recording_track_candidates(sample_limit=sample_limit)
+
+
+@router.get("/debug/tracks/release-track-duration-conflicts")
+async def debug_tracks_release_track_duration_conflicts(
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    min_duration_delta_ms: int = 2_000,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return query_release_track_duration_conflicts(
+        limit=limit,
+        offset=offset,
+        min_duration_delta_ms=min_duration_delta_ms,
+    )
 
 
 @router.post("/debug/tracks/recording-track-candidate-reviews")

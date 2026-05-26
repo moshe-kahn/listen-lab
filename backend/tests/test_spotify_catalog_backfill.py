@@ -31,6 +31,8 @@ from backend.app.spotify_catalog_backfill import (
     list_spotify_catalog_backfill_queue,
     plan_source_release_album_display_enrichment,
     preview_release_album_merge,
+    query_release_track_duration_conflicts,
+    repair_release_track_durations_from_spotify_catalog,
     repair_incomplete_done_resolution_tracklist_queue_rows,
     repair_spotify_album_basic_metadata_from_track_payloads,
     repair_spotify_catalog_backfill_queue_statuses,
@@ -239,6 +241,180 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual((123000, "at1", "US", "ok", None), track_row)
         self.assertEqual(("Album at1", "album", "US", "ok"), album_row)
         self.assertEqual(4, album_track_count)
+
+    def test_upsert_track_catalog_populates_missing_release_track_duration(self) -> None:
+        release_track_id = self._seed_accepted_source_track("track-duration-sync", name="Duration Sync")
+
+        _upsert_track_catalog(
+            track=_track_payload("track-duration-sync", "album-duration-sync"),
+            market="US",
+            fetched_at="2026-05-26T12:00:00Z",
+            last_status="ok",
+            last_error=None,
+        )
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            duration_ms = connection.execute(
+                "SELECT duration_ms FROM release_track WHERE id = ?",
+                (release_track_id,),
+            ).fetchone()[0]
+
+        self.assertEqual(123000, duration_ms)
+
+    def test_upsert_track_catalog_preserves_existing_release_track_duration(self) -> None:
+        release_track_id = self._seed_accepted_source_track("track-duration-preserve", name="Duration Preserve")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE release_track SET duration_ms = ? WHERE id = ?",
+                (122000, release_track_id),
+            )
+            connection.commit()
+
+        _upsert_track_catalog(
+            track=_track_payload("track-duration-preserve", "album-duration-preserve"),
+            market="US",
+            fetched_at="2026-05-26T12:00:00Z",
+            last_status="ok",
+            last_error=None,
+        )
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            duration_ms = connection.execute(
+                "SELECT duration_ms FROM release_track WHERE id = ?",
+                (release_track_id,),
+            ).fetchone()[0]
+
+        self.assertEqual(122000, duration_ms)
+
+    def test_repair_release_track_durations_from_spotify_catalog_updates_close_matches(self) -> None:
+        first_release_track_id = self._seed_accepted_source_track("repair-duration-a", name="Repair Duration")
+        second_release_track_id = self._seed_accepted_source_track("repair-duration-b", name="Repair Duration B")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE source_track_map SET release_track_id = ? WHERE release_track_id = ?",
+                (first_release_track_id, second_release_track_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (spotify_track_id, name, duration_ms, fetched_at, last_status)
+                VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)
+                """,
+                (
+                    "repair-duration-a",
+                    "Repair Duration A",
+                    180000,
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                    "repair-duration-b",
+                    "Repair Duration B",
+                    181000,
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.commit()
+
+        dry_run = repair_release_track_durations_from_spotify_catalog(apply=False)
+        self.assertEqual(1, dry_run["candidate_count"])
+        self.assertEqual(0, dry_run["updated_count"])
+
+        result = repair_release_track_durations_from_spotify_catalog(apply=True)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            duration_ms = connection.execute(
+                "SELECT duration_ms FROM release_track WHERE id = ?",
+                (first_release_track_id,),
+            ).fetchone()[0]
+        self.assertEqual(1, result["updated_count"])
+        self.assertEqual(180000, duration_ms)
+
+    def test_repair_release_track_durations_from_spotify_catalog_skips_large_conflicts(self) -> None:
+        first_release_track_id = self._seed_accepted_source_track("repair-conflict-a", name="Repair Conflict")
+        second_release_track_id = self._seed_accepted_source_track("repair-conflict-b", name="Repair Conflict B")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE source_track_map SET release_track_id = ? WHERE release_track_id = ?",
+                (first_release_track_id, second_release_track_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (spotify_track_id, name, duration_ms, fetched_at, last_status)
+                VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)
+                """,
+                (
+                    "repair-conflict-a",
+                    "Repair Conflict A",
+                    180000,
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                    "repair-conflict-b",
+                    "Repair Conflict B",
+                    185000,
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.commit()
+
+        result = repair_release_track_durations_from_spotify_catalog(apply=True)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            duration_ms = connection.execute(
+                "SELECT duration_ms FROM release_track WHERE id = ?",
+                (first_release_track_id,),
+            ).fetchone()[0]
+        self.assertEqual(0, result["updated_count"])
+        self.assertEqual(1, result["conflict_count"])
+        self.assertIsNone(duration_ms)
+
+    def test_query_release_track_duration_conflicts_returns_spotify_links(self) -> None:
+        first_release_track_id = self._seed_accepted_source_track("duration-conflict-a", name="Duration Conflict")
+        second_release_track_id = self._seed_accepted_source_track("duration-conflict-b", name="Duration Conflict B")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE source_track_map SET release_track_id = ? WHERE release_track_id = ?",
+                (first_release_track_id, second_release_track_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, explicit, album_id, raw_json, fetched_at, last_status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "duration-conflict-a",
+                    "Duration Conflict A",
+                    180000,
+                    1,
+                    "album-conflict-a",
+                    json.dumps({"external_ids": {"isrc": "USCONFLICTA"}, "album": {"name": "Album A", "release_date": "2001"}}),
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                    "duration-conflict-b",
+                    "Duration Conflict B",
+                    185000,
+                    0,
+                    "album-conflict-b",
+                    json.dumps({"external_ids": {"isrc": "USCONFLICTB"}, "album": {"name": "Album B", "release_date": "2002"}}),
+                    "2026-05-26T12:00:00Z",
+                    "ok",
+                ),
+            )
+            connection.commit()
+
+        payload = query_release_track_duration_conflicts(limit=10, offset=0)
+
+        self.assertEqual(1, payload["total"])
+        item = payload["items"][0]
+        self.assertEqual(first_release_track_id, item["release_track_id"])
+        self.assertEqual(5000, item["duration_delta_ms"])
+        self.assertEqual(2, len(item["source_tracks"]))
+        self.assertEqual(
+            "https://open.spotify.com/track/duration-conflict-a",
+            item["source_tracks"][0]["spotify_url"],
+        )
+        self.assertFalse(payload["source"]["mutates_identity"])
 
     def test_omitted_request_delay_defaults_to_two_seconds(self) -> None:
         self._seed_source_tracks(["t1"])
