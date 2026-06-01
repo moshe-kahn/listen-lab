@@ -131,6 +131,43 @@ def _cached_album_track_rows(album_id: str) -> tuple[list[dict[str, Any]], bool]
     ], complete
 
 
+def _cached_album_track_rows_from_track_catalog(album_id: str) -> tuple[list[dict[str, Any]], bool]:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        album_row = connection.execute(
+            """
+            SELECT total_tracks
+            FROM spotify_album_catalog
+            WHERE spotify_album_id = ?
+              AND lower(COALESCE(last_status, '')) != 'error'
+            """,
+            (album_id,),
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT spotify_track_id, disc_number, track_number, name, duration_ms, artists_json
+            FROM spotify_track_catalog
+            WHERE album_id = ?
+              AND lower(COALESCE(last_status, '')) != 'error'
+            ORDER BY COALESCE(disc_number, 0), COALESCE(track_number, 0), name, spotify_track_id
+            """,
+            (album_id,),
+        ).fetchall()
+    total_tracks = int(album_row["total_tracks"] or 0) if album_row and album_row["total_tracks"] is not None else None
+    complete = bool(rows) and (total_tracks is None or len(rows) >= total_tracks)
+    return [
+        {
+            "id": str(row["spotify_track_id"] or "") or None,
+            "name": row["name"],
+            "uri": f"spotify:track:{row['spotify_track_id']}" if row["spotify_track_id"] else None,
+            "duration_ms": row["duration_ms"],
+            "artists": _json_list(row["artists_json"]),
+            "disc_number": row["disc_number"],
+            "track_number": row["track_number"],
+        }
+        for row in rows
+    ], complete
+
+
 async def _fetch_and_cache_album_tracks(access_token: str, album_id: str, market: str) -> list[dict[str, Any]]:
     fetched_at = _utc_now()
     items: list[dict[str, Any]] = []
@@ -206,7 +243,6 @@ async def auth_playback_album_tracks(
     album_id: str | None = None,
 ) -> dict[str, Any]:
     _require_user_id(request)
-    token = _require_token(request)
     track_id_candidate = track_id or _spotify_track_id_from_uri(track_uri)
     normalized_track_id = str(track_id_candidate or "").strip() or None
     normalized_album_id = str(album_id or "").strip() or None
@@ -215,6 +251,45 @@ async def auth_playback_album_tracks(
 
     market = "US"
     source = "cache"
+    local_fallback_items: list[dict[str, Any]] = []
+    if normalized_album_id:
+        cached_items, cached_complete = _cached_album_track_rows(normalized_album_id)
+        local_fallback_items = cached_items
+        if cached_complete:
+            return {
+                "album_id": normalized_album_id,
+                "track_id": normalized_track_id,
+                "items": enrich_album_track_rows_with_release_metadata(cached_items),
+                "source": source,
+                "cached": True,
+            }
+
+        catalog_items, catalog_complete = _cached_album_track_rows_from_track_catalog(normalized_album_id)
+        if len(catalog_items) > len(local_fallback_items):
+            local_fallback_items = catalog_items
+        if catalog_complete or (catalog_items and not cached_items):
+            return {
+                "album_id": normalized_album_id,
+                "track_id": normalized_track_id,
+                "items": enrich_album_track_rows_with_release_metadata(catalog_items),
+                "source": "track_catalog",
+                "cached": True,
+                "partial": not catalog_complete,
+            }
+
+    try:
+        token = _require_token(request)
+    except HTTPException:
+        if normalized_album_id and local_fallback_items:
+            return {
+                "album_id": normalized_album_id,
+                "track_id": normalized_track_id,
+                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "source": "local_partial",
+                "cached": True,
+                "partial": True,
+            }
+        raise
     if not normalized_album_id and normalized_track_id:
         track_payload = await _spotify_get(
             token,
@@ -246,7 +321,19 @@ async def auth_playback_album_tracks(
             "cached": True,
         }
 
-    items = await _fetch_and_cache_album_tracks(token, normalized_album_id, market)
+    try:
+        items = await _fetch_and_cache_album_tracks(token, normalized_album_id, market)
+    except HTTPException:
+        if local_fallback_items:
+            return {
+                "album_id": normalized_album_id,
+                "track_id": normalized_track_id,
+                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "source": "local_partial",
+                "cached": True,
+                "partial": True,
+            }
+        raise
     return {
         "album_id": normalized_album_id,
         "track_id": normalized_track_id,

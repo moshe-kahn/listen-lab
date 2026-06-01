@@ -1446,6 +1446,51 @@ ALTER TABLE release_track
 ALTER TABLE release_track
   ADD COLUMN duration_evidence_json TEXT;
 """,
+    32: """
+CREATE TABLE IF NOT EXISTS generated_recording_track_cluster (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_key TEXT NOT NULL UNIQUE,
+  candidate_type TEXT NOT NULL,
+  safety_status TEXT NOT NULL,
+  relationship_kind TEXT NOT NULL,
+  relationship_strength TEXT NOT NULL,
+  evidence_bucket TEXT,
+  confidence REAL NOT NULL,
+  representative_release_track_id INTEGER,
+  representative_reason TEXT,
+  member_count INTEGER NOT NULL,
+  candidate_snapshot_json TEXT NOT NULL,
+  generated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS generated_recording_track_cluster_member (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cluster_id INTEGER NOT NULL REFERENCES generated_recording_track_cluster(id) ON DELETE CASCADE,
+  release_track_id INTEGER NOT NULL,
+  member_index INTEGER NOT NULL,
+  is_representative INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_generated_recording_track_cluster_type
+  ON generated_recording_track_cluster(candidate_type, safety_status);
+
+CREATE INDEX IF NOT EXISTS idx_generated_recording_track_cluster_member_release
+  ON generated_recording_track_cluster_member(release_track_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_recording_track_cluster_member_unique
+  ON generated_recording_track_cluster_member(cluster_id, release_track_id);
+""",
+    33: """
+CREATE TABLE IF NOT EXISTS generated_recording_track_cluster_dirty (
+  release_track_id INTEGER PRIMARY KEY,
+  reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_generated_recording_track_cluster_dirty_updated
+  ON generated_recording_track_cluster_dirty(updated_at);
+""",
 }
 
 
@@ -1523,6 +1568,111 @@ def set_schema_version(version: int) -> None:
 def execute_sql(sql: str) -> None:
     with sqlite_connection(write=True) as connection:
         connection.executescript(sql)
+
+
+def _generated_recording_cluster_dirty_table_exists(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'generated_recording_track_cluster_dirty'
+        LIMIT 1
+        """
+    ).fetchone()
+    return row is not None
+
+
+def mark_generated_recording_track_clusters_dirty_with_connection(
+    connection: sqlite3.Connection,
+    release_track_ids: list[int] | set[int] | tuple[int, ...],
+    *,
+    reason: str,
+) -> int:
+    if not _generated_recording_cluster_dirty_table_exists(connection):
+        return 0
+    target_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+    if not target_ids:
+        return 0
+    for release_track_id in target_ids:
+        connection.execute(
+            """
+            INSERT INTO generated_recording_track_cluster_dirty (
+              release_track_id,
+              reason
+            )
+            VALUES (?, ?)
+            ON CONFLICT(release_track_id) DO UPDATE SET
+              reason = excluded.reason,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            """,
+            (release_track_id, reason),
+        )
+    return len(target_ids)
+
+
+def mark_generated_recording_track_clusters_dirty(
+    release_track_ids: list[int] | set[int] | tuple[int, ...],
+    *,
+    reason: str,
+) -> int:
+    with sqlite_connection(write=True) as connection:
+        return mark_generated_recording_track_clusters_dirty_with_connection(
+            connection,
+            release_track_ids,
+            reason=reason,
+        )
+
+
+def dirty_generated_recording_track_cluster_ids(
+    release_track_ids: list[int] | set[int] | tuple[int, ...] | None = None,
+    *,
+    limit: int = 100,
+) -> list[int]:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        if not _generated_recording_cluster_dirty_table_exists(connection):
+            return []
+        params: list[Any] = []
+        where_sql = ""
+        if release_track_ids is not None:
+            target_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+            if not target_ids:
+                return []
+            placeholders = ",".join("?" for _ in target_ids)
+            where_sql = f"WHERE release_track_id IN ({placeholders})"
+            params.extend(target_ids)
+        params.append(max(1, int(limit)))
+        rows = connection.execute(
+            f"""
+            SELECT release_track_id
+            FROM generated_recording_track_cluster_dirty
+            {where_sql}
+            ORDER BY updated_at ASC, release_track_id ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [int(row["release_track_id"]) for row in rows]
+
+
+def clear_generated_recording_track_cluster_dirty_with_connection(
+    connection: sqlite3.Connection,
+    release_track_ids: list[int] | set[int] | tuple[int, ...],
+) -> int:
+    if not _generated_recording_cluster_dirty_table_exists(connection):
+        return 0
+    target_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+    if not target_ids:
+        return 0
+    placeholders = ",".join("?" for _ in target_ids)
+    cursor = connection.execute(
+        f"""
+        DELETE FROM generated_recording_track_cluster_dirty
+        WHERE release_track_id IN ({placeholders})
+        """,
+        tuple(target_ids),
+    )
+    return int(cursor.rowcount or 0)
 
 
 def insert_raw_play_event(
@@ -4455,6 +4605,11 @@ def _upsert_source_track_map_with_connection(
         """,
         (source_track_id, release_track_id, match_method, confidence, status, explanation),
     )
+    mark_generated_recording_track_clusters_dirty_with_connection(
+        connection,
+        [release_track_id],
+        reason="source_track_map_upsert",
+    )
 
 
 def _find_analysis_track_id_by_grouping_note_with_connection(
@@ -4787,7 +4942,7 @@ def backfill_spotify_source_entities() -> dict[str, int]:
                     )
 
             if release_album_id is not None and release_track_id is not None:
-                connection.execute(
+                cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO album_track (
                       release_album_id,
@@ -4797,6 +4952,12 @@ def backfill_spotify_source_entities() -> dict[str, int]:
                     """,
                     (release_album_id, release_track_id),
                 )
+                if int(cursor.rowcount or 0) > 0:
+                    mark_generated_recording_track_clusters_dirty_with_connection(
+                        connection,
+                        [release_track_id],
+                        reason="album_track_insert",
+                    )
 
         after = {
             "artists": int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]),
@@ -5008,7 +5169,7 @@ def backfill_local_text_entities() -> dict[str, int]:
                         )
 
             if release_album_id is not None and release_track_id is not None:
-                connection.execute(
+                cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO album_track (
                       release_album_id,
@@ -5018,6 +5179,12 @@ def backfill_local_text_entities() -> dict[str, int]:
                     """,
                     (release_album_id, release_track_id),
                 )
+                if int(cursor.rowcount or 0) > 0:
+                    mark_generated_recording_track_clusters_dirty_with_connection(
+                        connection,
+                        [release_track_id],
+                        reason="album_track_insert",
+                    )
 
         after = {
             "artists": int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]),
@@ -5440,6 +5607,12 @@ def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
                     (winner_release_track_id, explanation, loser_release_track_id),
                 ).rowcount
                 counts["source_track_maps_repointed"] += int(repointed_source_rows)
+                if int(repointed_source_rows or 0) > 0:
+                    mark_generated_recording_track_clusters_dirty_with_connection(
+                        connection,
+                        [winner_release_track_id, loser_release_track_id],
+                        reason="release_track_merge_source_map_repoint",
+                    )
 
                 connection.execute(
                     """
@@ -5470,7 +5643,7 @@ def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
                     (winner_release_track_id, loser_release_track_id),
                 )
 
-                connection.execute(
+                cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO album_track (
                       release_album_id,
@@ -5486,6 +5659,12 @@ def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
                     """,
                     (winner_release_track_id, loser_release_track_id),
                 )
+                if int(cursor.rowcount or 0) > 0:
+                    mark_generated_recording_track_clusters_dirty_with_connection(
+                        connection,
+                        [winner_release_track_id, loser_release_track_id],
+                        reason="release_track_merge_album_track_repoint",
+                    )
 
                 analysis_track_rows = connection.execute(
                     """

@@ -28,7 +28,8 @@ This repository now includes:
 - FastAPI backend with Spotify OAuth, encrypted token persistence, and token-backed session restore
 - live profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums views
 - playback controls and session-aware player UI
-- a track-detail overlay with in-place same-album switching, clickable artist/album links, preview snippets, and richer top-player controls (pause/resume, progress, and seek)
+- recording-first track views with release-track escape hatches, release-source album cards, variation/family album cards, listen counts, and in-place album tracklists
+- a track-detail overlay with in-place same-album switching, clickable artist/album links, preview snippets, richer top-player controls (pause/resume, progress, and seek), and compact home-playback album tracklists
 - a recent debug page for sessionized recent-play inspection plus DB archive paging
 - restricted local mode, full mode, and a test path for probing Spotify availability
 - local history-based artist and album ranking calibration using exported Spotify extended streaming history
@@ -42,6 +43,7 @@ This repository now includes:
 - encrypted Spotify token persistence, token-backed session restore, and backend helpers for current-playback capture plus recent-play polling
 - backend validation, polling, and ingest-debug scripts for merge behavior, run cleanup, playback observation, and recent-play API probing
 - a post-login loading handoff plus sticky dashboard navigation, account/project popovers, a track-formula comparison page, and multiple dashboard UI polish passes
+- generated recording/track-family candidate clusters cached in SQLite for fast track-view lookup, with dirty-row refresh after new source/release mappings
 - Vite `/api` proxying so local frontend development can use relative API paths instead of hard-coded backend origins
 
 The core overlooked-artist analysis flow and playlist generation are still not implemented.

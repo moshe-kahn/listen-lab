@@ -7,7 +7,12 @@ from fastapi.responses import JSONResponse
 
 from backend.app.auth.session import _require_local_data_session
 from backend.app.merged_track_aggregate import _merged_track_aggregate_payload
-from backend.app.recording_track_candidates import query_recording_track_candidates, summarize_recording_track_candidates
+from backend.app.recording_track_candidates import (
+    get_recording_track_candidate_for_release_track,
+    get_recording_track_candidates_for_release_track,
+    query_recording_track_candidates,
+    summarize_recording_track_candidates,
+)
 from backend.app.recording_track_candidate_reviews import (
     get_recording_track_candidate_review,
     list_recording_track_candidate_reviews,
@@ -131,6 +136,25 @@ async def debug_tracks_recording_track_candidates(
         q=q,
         artist=artist,
     )
+
+
+@router.get("/debug/tracks/recording-track-candidates/by-release/{release_track_id}")
+async def debug_tracks_recording_track_candidate_by_release(
+    request: Request,
+    release_track_id: int,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    items = get_recording_track_candidates_for_release_track(release_track_id)
+    item = items[0] if items else None
+    return {
+        "item": item,
+        "items": items,
+        "source": {
+            "kind": "sqlite",
+            "uses_spotify_api": False,
+            "mutates_identity": False,
+        },
+    }
 
 
 @router.get("/debug/tracks/recording-track-candidates/summary")

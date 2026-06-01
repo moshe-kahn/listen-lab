@@ -57,13 +57,14 @@ class ReleaseTrackDetailTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO spotify_album_catalog (
-                  spotify_album_id, name, images_json, fetched_at, last_status
-                ) VALUES (?, ?, ?, ?, ?)
+                  spotify_album_id, name, images_json, release_date, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "album-a",
                     "Album A",
                     json.dumps([{"url": "https://images.example/album-a.jpg"}]),
+                    "2020-01-01",
                     "2026-05-24T12:00:00Z",
                     "ok",
                 ),
@@ -71,13 +72,14 @@ class ReleaseTrackDetailTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO spotify_album_catalog (
-                  spotify_album_id, name, images_json, fetched_at, last_status
-                ) VALUES (?, ?, ?, ?, ?)
+                  spotify_album_id, name, images_json, release_date, fetched_at, last_status
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "album-b",
                     "Album B",
                     json.dumps([{"url": "https://images.example/album-b.jpg"}]),
+                    "2021-01-01",
                     "2026-05-24T12:00:00Z",
                     "ok",
                 ),
@@ -171,6 +173,19 @@ class ReleaseTrackDetailTests(unittest.TestCase):
 
     def test_valid_release_track_route_returns_stable_shape(self) -> None:
         release_track_id = self._seed_release_track()
+        with sqlite_connection(write=True) as connection:
+            connection.executemany(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at, spotify_track_id, timing_source, matched_state
+                ) VALUES (?, ?, 'history_source', 'standalone')
+                """,
+                [
+                    ("2026-05-24T12:00:00Z", "track-a"),
+                    ("2026-05-24T12:05:00Z", "track-a"),
+                    ("2026-05-24T12:10:00Z", "track-b"),
+                ],
+            )
         with patch("backend.app.routes.playback_routes._require_local_data_session", return_value="user-1"):
             response = TestClient(app).get(f"/tracks/release-track/{release_track_id}")
 
@@ -183,6 +198,10 @@ class ReleaseTrackDetailTests(unittest.TestCase):
         self.assertEqual("Source Song A", body["display"]["title"])
         self.assertEqual("track-a", body["display"]["source_spotify_track_id"])
         self.assertEqual(2, len(body["source_versions"]))
+        play_counts = {version["spotify_track_id"]: version["play_count"] for version in body["source_versions"]}
+        self.assertEqual({"track-a": 2, "track-b": 1}, play_counts)
+        release_years = {version["spotify_track_id"]: version["album_release_year"] for version in body["source_versions"]}
+        self.assertEqual({"track-a": "2020", "track-b": "2021"}, release_years)
 
     def test_context_spotify_track_id_is_selected_when_it_belongs(self) -> None:
         release_track_id = self._seed_release_track()

@@ -476,9 +476,9 @@ class LikedTracksSyncTests(unittest.IsolatedAsyncioTestCase):
             blank_response = client.get("/me/liked-tracks/contains?spotify_track_id=%20%20")
 
         self.assertEqual(200, response.status_code)
-        self.assertEqual({"spotify_track_id": "track-a", "is_liked": True}, response.json())
+        self.assertEqual({"spotify_track_id": "track-a", "is_liked": True, "source": "cache"}, response.json())
         self.assertEqual(200, absent_response.status_code)
-        self.assertEqual({"spotify_track_id": "missing", "is_liked": False}, absent_response.json())
+        self.assertEqual({"spotify_track_id": "missing", "is_liked": False, "source": "cache"}, absent_response.json())
         self.assertEqual(400, blank_response.status_code)
 
     async def test_sync_failure_simulation_requires_env_gate_and_debug_header(self) -> None:

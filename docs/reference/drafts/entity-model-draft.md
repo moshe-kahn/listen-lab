@@ -186,6 +186,7 @@ Mapping direction:
 - many `release_track` -> one `recording_track` (proposed; not current schema)
 - many `recording_track` -> one `track_family` (proposed)
 - current schema maps many `release_track` -> one `analysis_track`
+- generated cache tables currently store read-only recording/track-family candidate clusters for lookup, but they are not canonical `recording_track` or `track_family` mappings
 
 Current implementation note:
 - `source_track -> release_track` dedupe is intentionally conservative and rerunnable
@@ -196,7 +197,7 @@ Current implementation note:
 - `release_track -> track_family` is now driven by a policy/config layer plus variant-title interpretation, not by one hardcoded title-heuristic block
 - future `recording_track` should split the current broad jump from release-level identity to family-level identity into a normal-listening same-recording layer and a broader related-version layer
 - `track_family` should still be treated as a conservative grouping layer, not as the final universal canonical track identity for every downstream analysis
-- current recording-track support is read-only/debug only: candidate endpoints, summary evidence buckets, CLI inspection, and saved review decisions exist, but no durable `recording_track` table or promotion/apply path exists
+- current recording-track support is read-only/debug only: candidate endpoints, generated candidate cache tables, summary evidence buckets, CLI inspection, and saved review decisions exist, but no canonical `recording_track` table or promotion/apply path exists
 - saved recording-track candidate reviews preserve the reviewed candidate snapshot and manual judgment metadata, but they are not active identity mappings
 
 UI identity direction:
@@ -204,7 +205,7 @@ UI identity direction:
 - Spotify track ID remains source/version/playback identity.
 - Current frontend liked stars are release-track-aware.
 - Activity `Listened` grouping now prefers `release_track_id`.
-- Track preview payloads expose release-track sibling metadata so overlays can show source-version transparency without changing playback identity.
+- Track preview payloads expose release-track, recording-candidate, and family-candidate metadata so overlays can show relation transparency without changing playback identity.
 - Activity `Liked` grouping should remain a separate phase because displayed internal liked-release-track count can differ from Spotify liked-track count.
 - Future `recording_track_id` can become the default normal-song aggregation identity after read-only evidence, review UI, and representative playback rules exist.
 - Current `recording_track` review decisions should be treated as evidence for future classifier tuning and schema design, not as product identity.

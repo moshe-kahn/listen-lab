@@ -63,17 +63,20 @@ Current note:
 - liked-track sync failure simulation exists only for local/dev QA and requires both `LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE=1` and `X-ListenLab-Debug-Sync-Failure: 1`
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
-- the dashboard now also includes a track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, and a merged-event `Listening Log` page for chronology/source inspection
+- the dashboard now also includes a recording-first track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, release/recording view switching, variation/family album cards, and a merged-event `Listening Log` page for chronology/source inspection
 - track identity work now includes a conservative identity model:
   - `source_track`
   - `release_track`
   - proposed `recording_track` layer for normal same-song identity across releases/remasters/compilations while preserving release provenance
   - `track_family` (implemented in schema/code as `analysis_track`)
 - the Recording Tracks Identity Audit tab is now a read-only/manual-review surface for proposed `recording_track` candidates; saved reviews preserve candidate snapshots and reviewer notes but do not apply identity changes
+- generated recording/track-family candidate clusters are cached in SQLite for fast lookup from track views; startup builds the cache if empty, and new/changed release-track mappings mark only affected rows dirty for later scoped refresh
 - the Identity Audit track tabs now also include Duration Conflicts, a read-only review surface for release tracks whose accepted Spotify source durations differ by more than two seconds; source tracks link directly to Spotify for manual playback comparison
 - release-track identity is now exposed in track-like payloads and is the intended UI identity for same-song semantics; Spotify track IDs remain provider/playback identifiers
 - Activity/Listened grouping now prefers `release_track_id`, while keeping representative Spotify track IDs/URIs for playback
-- track overlays can show a read-only source-version note such as `Grouped with 4 source versions` when release-track siblings exist
+- track overlays default to recording view on user-facing pages, separate same-recording appearances from broader `Variations`, and keep release-source versions available through the release view
+- release views show source-version albums and identify the representative source instead of listing raw source rows as primary UI
+- track overlays keep Spotify track ID/URI as the concrete playback target even when the display groups release, recording, or family evidence
 - liked stars are release-track-aware where release identity exists
 - raw Spotify history may include podcast episode rows; keep them in raw history, but exclude them from the current music fact layer unless building podcast features
 - track variant grouping is now policy-driven, with an explicit ambiguous-review queue generated after refresh passes so borderline title families can be inspected with artist context
@@ -120,6 +123,14 @@ Current rule:
 - Spotify track ID remains necessary for playback and source/version provenance.
 - Activity `Listened` grouping now prefers `release_track_id`.
 - `release_track.duration_ms` may be filled from accepted Spotify source catalog metadata. `duration_source`, `duration_confidence`, and `duration_evidence_json` indicate whether the value came from agreeing catalog evidence or an uncertain accepted-mapping conflict. When already-accepted same-release source mappings disagree on duration, manual review can keep the release join and use a representative duration because Spotify duration metadata can drift from playback reality; that representative value is not authoritative playback length.
+
+### Generated recording cluster
+A SQLite cache of read-only recording/track-family candidate groups derived from release-track evidence.
+
+Current rule:
+- `generated_recording_track_cluster` and `generated_recording_track_cluster_member` are generated evidence caches, not canonical identity tables.
+- `generated_recording_track_cluster_dirty` marks release tracks whose cluster evidence should be refreshed after new source-track mappings, album-track inserts, release-track merges, or recent-play ingest.
+- Track views may use this cache to display "also appears on" and "Variations" quickly, but this does not promote or apply identity.
 
 ### Source catalog metadata
 Provider metadata fetched for known source identifiers, such as Spotify track duration, ISRC, album id, album release date, and external IDs. This metadata is evidence for review and diagnostics, not an identity decision by itself.

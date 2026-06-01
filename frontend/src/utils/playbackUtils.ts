@@ -223,6 +223,31 @@ export function queueRepeatsTrack(queueTracks: PlayerQueueTrack[], trackUri: str
   });
 }
 
+function playerQueueTrackIdentity(track: PlayerQueueTrack | null | undefined) {
+  return track?.trackId ?? spotifyTrackIdFromUri(track?.uri ?? null) ?? track?.uri ?? null;
+}
+
+export function collapseRepeatedQueueCycle(queueTracks: PlayerQueueTrack[]) {
+  if (queueTracks.length < 4) {
+    return queueTracks;
+  }
+  const identities = queueTracks.map(playerQueueTrackIdentity);
+  if (identities.some((identity) => !identity)) {
+    return queueTracks;
+  }
+  const maxCycleLength = Math.floor(queueTracks.length / 2);
+  for (let cycleLength = 1; cycleLength <= maxCycleLength; cycleLength += 1) {
+    if (queueTracks.length < cycleLength * 2) {
+      continue;
+    }
+    const repeatsCycle = identities.every((identity, index) => identity === identities[index % cycleLength]);
+    if (repeatsCycle) {
+      return queueTracks.slice(0, cycleLength);
+    }
+  }
+  return queueTracks;
+}
+
 export function queuePlaylistTrackUris(currentTrackUri: string | null, queueTracks: PlayerQueueTrack[]) {
   const uris: string[] = [];
   for (const uri of [currentTrackUri, ...queueTracks.map((track) => track.uri)]) {

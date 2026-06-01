@@ -36,6 +36,9 @@ type ReviewDraft = {
   reviewer_note: string;
   preferred_representative_release_track_id: string;
 };
+type RecordingTrackCandidatesTabProps = {
+  onOpenReleaseTrack?: (member: RecordingTrackCandidateMember) => void;
+};
 
 const RELATIONSHIP_KIND_OPTIONS = [
   "same_isrc",
@@ -195,6 +198,11 @@ function memberDurationLabel(member: RecordingTrackCandidateMember) {
   return durations.map((duration) => formatDurationMs(duration)).join(", ");
 }
 
+function memberReleaseYear(member: RecordingTrackCandidateMember) {
+  const rawDate = member.album_release_dates?.find((value) => /^\d{4}/.test(String(value ?? "")));
+  return rawDate ? String(rawDate).slice(0, 4) : "Year unknown";
+}
+
 function renderEvidencePills(item: RecordingTrackCandidateItem) {
   const hasDurationDelta = item.members.some((member) => {
     const delta = member.evidence.duration_delta_ms;
@@ -214,36 +222,33 @@ function renderEvidencePills(item: RecordingTrackCandidateItem) {
   );
 }
 
-function renderMember(member: RecordingTrackCandidateMember) {
+function renderMember(member: RecordingTrackCandidateMember, onOpenReleaseTrack?: (member: RecordingTrackCandidateMember) => void) {
+  const buttonDisabled = !onOpenReleaseTrack;
   return (
-    <div className="identity-audit-variant recording-track-member recording-track-member-compact" key={`recording-member-${member.release_track_id}`}>
-      <div className="identity-audit-variant-main">
+    <button
+      className="identity-audit-variant recording-track-member recording-track-member-compact recording-track-variation-button"
+      disabled={buttonDisabled}
+      key={`recording-member-${member.release_track_id}`}
+      onClick={() => onOpenReleaseTrack?.(member)}
+      type="button"
+    >
+      <span className="identity-audit-variant-main">
         <strong>{member.title || `Release track ${member.release_track_id}`}</strong>
-        <span>{member.artist || "Unknown artist"} · {member.album || "Unknown album"}</span>
-        <span>
-          release {member.release_track_id}
-          {member.release_album_ids?.length ? ` · album ids ${member.release_album_ids.join(", ")}` : ""}
-          {member.spotify_album_ids?.length ? ` · Spotify albums ${member.spotify_album_ids.join(", ")}` : ""}
-        </span>
-        <span>
-          {member.album_types?.length ? `type ${member.album_types.join(", ")}` : "type unknown"}
-          {member.album_release_dates?.length ? ` · released ${member.album_release_dates.join(", ")}` : ""}
-        </span>
-        <code>{member.source_track_ids.length > 0 ? member.source_track_ids.join(", ") : "No source Spotify IDs"}</code>
-      </div>
-      <div className="identity-audit-variant-stats">
+        <span>{member.artist || "Unknown artist"}</span>
+        <span>{member.album || "Unknown album"} · {memberReleaseYear(member)}</span>
+      </span>
+      <span className="identity-audit-variant-stats">
         <span>release {member.release_track_id}</span>
-        <span>{memberIsrcLabel(member)}</span>
         <span>{memberDurationLabel(member)}</span>
         <span>{displayToken(member.evidence.album_context, "context unknown")}</span>
-        {member.evidence.duration_delta_ms ? <span>{member.evidence.duration_delta_ms}ms delta</span> : null}
         {member.evidence.version_tokens?.map((token) => <span key={`${member.release_track_id}-${token}`}>{token}</span>)}
-      </div>
-    </div>
+        <span>{memberIsrcLabel(member)}</span>
+      </span>
+    </button>
   );
 }
 
-export function RecordingTrackCandidatesTab() {
+export function RecordingTrackCandidatesTab({ onOpenReleaseTrack }: RecordingTrackCandidatesTabProps) {
   const [summary, setSummary] = useState<RecordingTrackCandidatesSummary | null>(null);
   const [items, setItems] = useState<RecordingTrackCandidatesResponse | null>(null);
   const [reviews, setReviews] = useState<Record<string, RecordingTrackCandidateReviewItem>>({});
@@ -790,12 +795,12 @@ export function RecordingTrackCandidatesTab() {
                     ) : <p>No review reasons supplied.</p>}
                   </div>
                 </div>
-                <details className="recording-track-member-details">
-                  <summary>Release appearances and source versions</summary>
+                <div className="recording-track-member-details">
+                  <span className="recording-track-variations-title">Variations</span>
                   <div className="identity-audit-variant-list">
-                    {item.members.map(renderMember)}
+                    {item.members.map((member) => renderMember(member, onOpenReleaseTrack))}
                   </div>
-                </details>
+                </div>
               </article>
             );
           })}

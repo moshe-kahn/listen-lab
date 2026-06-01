@@ -26,6 +26,7 @@ import type {
   TrackMappingLineageResponse,
   AmbiguousReviewResponse,
   RecordingTrackCandidateFilters,
+  RecordingTrackCandidateLookupResponse,
   RecordingTrackCandidatesResponse,
   RecordingTrackCandidatesSummary,
   RecordingTrackCandidateReviewsResponse,
@@ -87,6 +88,26 @@ export async function fetchAllLikedTracks(pageLimit: number = 200): Promise<Like
       offset: 0,
       metadata,
     };
+  }
+
+export async function fetchLikedTrackContains(spotifyTrackId: string): Promise<{ spotify_track_id: string; is_liked: boolean }> {
+    const response = await fetch(
+      `${apiBaseUrl}/me/liked-tracks/contains?spotify_track_id=${encodeURIComponent(spotifyTrackId)}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to check liked track.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      throw new Error(`Liked Track Contains (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as { spotify_track_id: string; is_liked: boolean };
   }
 
 export async function postLikedTracksSync(mode: "quick" | "full" = "quick"): Promise<LikedTracksSyncResponse> {
@@ -727,6 +748,29 @@ export async function fetchRecordingTrackCandidatesSummary(): Promise<RecordingT
       throw new Error(`Recording Track Candidate Summary (${response.status}): ${detail}`);
     }
     return (await response.json()) as RecordingTrackCandidatesSummary;
+  }
+
+export async function fetchRecordingTrackCandidateByReleaseTrack(releaseTrackId: number): Promise<RecordingTrackCandidateLookupResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/tracks/recording-track-candidates/by-release/${encodeURIComponent(String(releaseTrackId))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load recording track candidate.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Recording Track Candidate (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as RecordingTrackCandidateLookupResponse;
   }
 
 export async function fetchReleaseTrackDurationConflicts(

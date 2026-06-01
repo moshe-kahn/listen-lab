@@ -13,9 +13,11 @@ from backend.app.main import app
 from backend.app.recording_track_candidates import (
     RecordingTrackCandidateMember,
     classify_recording_track_candidate_group,
+    get_recording_track_candidate_for_release_track,
     query_recording_track_candidates,
     summarize_recording_track_candidates,
 )
+from backend.app.release_track_metadata import release_track_metadata_for_spotify_ids
 
 
 def _member(
@@ -38,6 +40,7 @@ def _member(
         "album": album,
         "release_album_ids": [release_track_id],
         "spotify_album_ids": [],
+        "album_image_urls": [],
         "album_release_dates": album_release_dates or [],
         "album_types": [],
         "source_track_ids": source_track_ids or [f"spotify-{release_track_id}"],
@@ -102,6 +105,34 @@ class RecordingTrackClassifierTests(unittest.TestCase):
         self.assertEqual("remaster", item["relationship_kind"])
         self.assertEqual("missing_isrc_but_compatible_metadata", item["evidence_bucket"])
 
+    def test_same_normalized_title_duration_mismatch_stays_reviewable_recording_candidate(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Song Drift", album="Song Drift", duration_ms=180_000),
+                _member(2, "Song Drift", album="Song Drift - Single", duration_ms=205_000),
+            ]
+        )
+
+        self.assertEqual("recording_track_candidate", item["candidate_type"])
+        self.assertEqual("needs_review", item["safety_status"])
+        self.assertEqual("single_release", item["relationship_kind"])
+        self.assertEqual("missing_isrc_but_compatible_metadata", item["evidence_bucket"])
+        self.assertIn("compatible title and artist metadata", item["why_grouped"])
+        self.assertIn("duration delta is 25000ms", item["why_review"])
+
+    def test_expanded_album_context_is_recording_level_rerelease_candidate(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Song Expanded", album="Original Album", duration_ms=180_000),
+                _member(2, "Song Expanded", album="Original Album (Expanded Edition)", duration_ms=182_500),
+            ]
+        )
+
+        self.assertEqual("recording_track_candidate", item["candidate_type"])
+        self.assertEqual("needs_review", item["safety_status"])
+        self.assertEqual("rerelease", item["relationship_kind"])
+        self.assertEqual("missing_isrc_but_compatible_metadata", item["evidence_bucket"])
+
     def test_conflicting_isrc_remaster_with_compatible_metadata_needs_review_not_weak(self) -> None:
         item = classify_recording_track_candidate_group(
             [
@@ -152,6 +183,29 @@ class RecordingTrackClassifierTests(unittest.TestCase):
                 self.assertEqual("track_family_candidate", item["candidate_type"])
                 self.assertNotEqual("safe_candidate", item["safety_status"])
                 self.assertEqual(relationship_kind, item["relationship_kind"])
+
+    def test_same_live_recording_across_live_releases_can_remain_recording_candidate(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Song E - Live in Oxford", album="Live Album", isrc="USLIVE1", duration_ms=254_000),
+                _member(2, "Song E - Live in Oxford", album="Live Album Deluxe", isrc="USLIVE1", duration_ms=254_000),
+            ]
+        )
+
+        self.assertEqual("recording_track_candidate", item["candidate_type"])
+        self.assertEqual("same_isrc", item["evidence_bucket"])
+
+    def test_mixed_live_and_studio_versions_are_family_even_with_rerelease_context(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Song E", album="Original Album", isrc="USMIXEDLIVE1", duration_ms=254_000),
+                _member(2, "Song E - Live in Oxford", album="Original Album Deluxe", isrc="USMIXEDLIVE1", duration_ms=254_000),
+            ]
+        )
+
+        self.assertEqual("track_family_candidate", item["candidate_type"])
+        self.assertEqual("live", item["relationship_kind"])
+        self.assertIn("live/studio variants belong at Track Family layer", item["why_review"])
 
     def test_same_variant_label_with_same_isrc_stays_recording_candidate(self) -> None:
         item = classify_recording_track_candidate_group(
@@ -477,7 +531,7 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
             return release_track_id
 
     def test_query_returns_evidence_and_representative_without_mutating_identity(self) -> None:
-        self._seed_release_track(
+        album_release_track_id = self._seed_release_track(
             title="Endpoint Song",
             artist="Endpoint Artist",
             album="Endpoint Album",
@@ -514,6 +568,33 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
             analysis_track_map_count = int(connection.execute("SELECT count(*) FROM analysis_track_map").fetchone()[0])
         self.assertEqual(0, analysis_track_count)
         self.assertEqual(0, analysis_track_map_count)
+
+        lookup_item = get_recording_track_candidate_for_release_track(album_release_track_id)
+        self.assertIsNotNone(lookup_item)
+        self.assertEqual(item["candidate_key"], lookup_item["candidate_key"])
+
+    def test_release_metadata_marks_recording_candidate_members_with_rt_badge_flag(self) -> None:
+        self._seed_release_track(
+            title="Metadata Cluster Song",
+            artist="Metadata Artist",
+            album="Metadata Album",
+            spotify_id="metadata-cluster-album",
+            isrc="USMETA1",
+            duration_ms=210_000,
+        )
+        self._seed_release_track(
+            title="Metadata Cluster Song",
+            artist="Metadata Artist",
+            album="Metadata Cluster Song - Single",
+            spotify_id="metadata-cluster-single",
+            isrc="USMETA1",
+            duration_ms=210_500,
+        )
+
+        metadata = release_track_metadata_for_spotify_ids(["metadata-cluster-album"])
+
+        self.assertTrue(metadata["metadata-cluster-album"]["has_release_track_siblings"])
+        self.assertEqual(2, metadata["metadata-cluster-album"]["release_track_source_count"])
 
     def test_catalog_isrc_and_duration_are_surfaced_when_source_track_isrc_is_missing(self) -> None:
         self._seed_release_track(

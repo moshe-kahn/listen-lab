@@ -158,9 +158,11 @@ export type ReleaseTrackDetailSourceVersion = {
   album_id: string | null;
   album_name: string | null;
   album_image_url: string | null;
+  album_release_year?: string | null;
   duration_ms: number | null;
   explicit: boolean | null;
   playable: boolean | null;
+  play_count?: number | null;
   spotify_url: string | null;
   is_context: boolean;
   is_playback_choice: boolean;
@@ -188,6 +190,16 @@ export type ReleaseTrackDetailResponse = {
     reason: "context_source" | "preferred_playable_source" | "unavailable";
   };
   source_versions: ReleaseTrackDetailSourceVersion[];
+};
+
+export type RecordingTrackCandidateLookupResponse = {
+  item: RecordingTrackCandidateItem | null;
+  items?: RecordingTrackCandidateItem[];
+  source: {
+    kind: string;
+    uses_spotify_api: boolean;
+    mutates_identity: boolean;
+  };
 };
 
 export type ArtistAlbumRelationship = "album" | "appears_on" | "unknown";
@@ -469,6 +481,7 @@ export type RecordingTrackCandidateMember = {
   album: string;
   release_album_ids?: number[];
   spotify_album_ids?: string[];
+  album_image_urls?: string[];
   album_release_dates?: string[];
   album_types?: string[];
   source_track_ids: string[];
@@ -1368,6 +1381,7 @@ export type PreviewItem = {
     image_url?: string | null;
   }> | null;
   sourceTrack?: RecentTrack | null;
+  preferredDetailView?: "recording" | "release" | null;
 };
 
 export type AuthTokenResponse = {

@@ -17,6 +17,7 @@ This document is the implementation-oriented technical source of truth for the L
 - Backend section-level caching is implemented for moderate-freshness live sections, long-lived history-derived favorites, shared static Spotify metadata, and saved user snapshot sections for local mode.
 - Backend helper code has been split out of `backend/app/main.py` into focused modules for auth/session/token, OAuth helpers, progress tracking, file/static metadata cache handling, Spotify HTTP/rate-limit helpers, Spotify normalization, lookup/merge helpers, and time formatting.
 - Frontend `App.tsx` is being reduced through focused extraction of API wrappers, shared types/constants, Identity Audit issue/diagnostic components, and Identity Audit preference helpers.
+- Track overlays now default to a recording-oriented user view outside backend/debug pages, with a separate release view for source-version detail and a gear menu for Spotify/release/recording actions.
 - A local SQLite database now stores raw play events, live playback observations, ingest runs, and Spotify recent-sync state.
 - Encrypted Spotify token persistence now supports token-backed session restore for returning users.
 - Spotify recent-play API ingest is implemented with replay overlap handling, conservative early-stop paging, and batch chronology-based `ms_played` upgrades.
@@ -36,6 +37,7 @@ This document is the implementation-oriented technical source of truth for the L
 - Spotify source catalog enrichment is implemented for known track and album IDs, including track metadata, album metadata, album tracklist expansion modes, queue-first processing, and run telemetry.
 - Catalog Backfill now separates identity-critical metadata from catalog-expansion work, with explicit target modes for tracks, albums, album tracklists, and all targets.
 - A local Spotify track metadata worker exists for bounded identity metadata enrichment. It supports one-shot CLI runs by default, optional loop mode, JSONL event logging, condensed terminal output, local cooldowns, and a rolling request-budget guard.
+- Generated recording/track-family candidate clusters are cached in SQLite for fast local lookup. Startup builds the generated cache if empty, and source/release mapping changes mark affected release tracks dirty so later refreshes can be scoped instead of rebuilding all candidates.
 - Read-only Identity Audit diagnostics and release-album merge preview/dry-run tooling exist, but no merge/apply endpoint exists.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
@@ -70,11 +72,13 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend persistent sticky navigation with project/account popovers
 - frontend playback controls and player state presentation
 - frontend queue organizer, preview-resume handling, album play-all controls, and Recent Likes cache/sync UI
+- frontend recording/release track views with same-recording album appearances, broader variation/family album cards, source-version album cards in release view, listen counts, liked-state fallback checks, and in-place album tracklist scrolling/highlighting
+- frontend homepage playback album expansion uses a compact tracklist while keeping the queue visible; repeated Spotify queue cycles are collapsed for display
 - frontend local/full/test mode controls with cached-state indicators
 - frontend tracks-only comparison page for current vs new all-time ranking formulas
 - frontend recent-ingest controls for connect+ingest, before-cursor probe, backfill probe, and post-track-end polling
 - frontend recent-debug page for grouped recent-play inspection plus DB-archive pagination
-- frontend track-detail overlay enhancements for album-song browsing, playback toggles, same-album track switching without full overlay reset, and release-track source-version notes
+- frontend track-detail overlay enhancements for album-song browsing, playback toggles, same-album track switching without full overlay reset, recording/release relation views, and source-version album cards
 - frontend liked-star state and Activity/Listened display grouping are release-track-aware where release identity is available, while playback still uses concrete Spotify track IDs/URIs
 - frontend helper extraction for API wrappers, shared constants/types, and Identity Audit support components is in progress; see `docs/reference/refactor-notes.md`
 - backend OAuth endpoints
@@ -111,6 +115,10 @@ This document is the implementation-oriented technical source of truth for the L
   - `POST /me/liked-tracks/sync`
   - `GET /me/liked-tracks/contains`
   - dev/test-only sync-failure simulation guarded by `LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE=1` plus `X-ListenLab-Debug-Sync-Failure: 1`
+- backend recording candidate APIs:
+  - `GET /debug/tracks/recording-track-candidates`
+  - `GET /debug/tracks/recording-track-candidates/by-release/{release_track_id}`
+  - `GET /debug/tracks/recording-track-candidates/summary`
 
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
@@ -175,6 +183,12 @@ Album-family candidate report review:
   - canonical-to-history provenance link table
 - `live_playback_event`
   - stores observational current-playback snapshots separately from durable canonical play history
+- `generated_recording_track_cluster`
+  - stores generated read-only recording/track-family candidate snapshots for fast UI and audit lookup
+- `generated_recording_track_cluster_member`
+  - maps generated candidate clusters to release tracks
+- `generated_recording_track_cluster_dirty`
+  - tracks release IDs whose generated cluster evidence should be refreshed after source/release mapping changes
 
 ### Source catalog enrichment tables
 - `spotify_track_catalog`

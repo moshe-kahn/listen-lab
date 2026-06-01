@@ -54,6 +54,7 @@ def configure_logging() -> Path:
         sync_file_logger.addHandler(root_file_handler)
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     _CONFIGURED = True

@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
+import time
+from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict
 
-from backend.app.db import sqlite_connection
+from backend.app.db import (
+    clear_generated_recording_track_cluster_dirty_with_connection,
+    dirty_generated_recording_track_cluster_ids,
+    get_sqlite_db_path,
+    sqlite_connection,
+)
 from backend.app.track_variant_policy import TrackVariantComponent, interpret_track_variant_title
 
 
@@ -37,6 +45,14 @@ FAMILY_VERSION_FAMILIES = {
     "structural",
     "commentary",
     "wellness_frequency",
+}
+
+_CANDIDATE_ITEMS_CACHE_TTL_SECONDS = 60.0
+_candidate_items_cache: dict[str, Any] = {
+    "db_path": None,
+    "db_inode": None,
+    "cached_at": 0.0,
+    "items": None,
 }
 RERECORDING_SEMANTIC_CATEGORIES = {"rerecorded_version", "recording_lineage_change"}
 RADIO_EDIT_SEMANTIC_CATEGORIES = {"broadcast_length_or_content_edit"}
@@ -78,6 +94,7 @@ class RecordingTrackCandidateMember(TypedDict):
     album: str
     release_album_ids: list[int]
     spotify_album_ids: list[str]
+    album_image_urls: list[str]
     album_release_dates: list[str]
     album_types: list[str]
     source_track_ids: list[str]
@@ -179,6 +196,15 @@ def _has_recording_distinct_variant_mismatch(members: list[RecordingTrackCandida
     return has_distinct_component and len(signatures) > 1
 
 
+def _member_has_family_component(member: RecordingTrackCandidateMember, family: str) -> bool:
+    return any(component.family == family for component in _variant_components(member["title"]))
+
+
+def _has_mixed_family_variant(members: list[RecordingTrackCandidateMember], family: str) -> bool:
+    states = {_member_has_family_component(member, family) for member in members}
+    return len(states) > 1
+
+
 def _album_context(album_names: list[str]) -> str:
     normalized = " | ".join(_normalize_text(album_name) for album_name in album_names)
     if "soundtrack" in normalized or "motion picture" in normalized or "original score" in normalized:
@@ -197,7 +223,14 @@ def _album_context(album_names: list[str]) -> str:
         return "compilation"
     if re.search(r"\bsingle\b", normalized):
         return "single"
-    if "remaster" in normalized or "remastered" in normalized or "reissue" in normalized:
+    if (
+        "remaster" in normalized
+        or "remastered" in normalized
+        or "reissue" in normalized
+        or "expanded" in normalized
+        or "deluxe" in normalized
+        or "anniversary" in normalized
+    ):
         return "rerelease"
     return "album"
 
@@ -407,11 +440,12 @@ def classify_recording_track_candidate_group(
     same_base_title = len(normalized_titles) == 1
     same_artist = len(artists) <= 1
     has_recording_distinct_variant_mismatch = _has_recording_distinct_variant_mismatch(sorted_members)
+    has_mixed_live_variant = _has_mixed_family_variant(sorted_members, "live")
     has_recording_variant = bool(RECORDING_VERSION_FAMILIES & families or album_contexts & {"single", "compilation", "soundtrack", "rerelease"})
     has_any_isrc = bool(isrcs)
     has_partial_isrc = has_any_isrc and not all_members_have_isrc
     has_conflicting_isrc = len(isrcs) > 1
-    compatible_metadata = same_base_title and same_artist and near_duration
+    compatible_metadata = same_base_title and same_artist
     strong_recording_metadata = compatible_metadata and has_recording_variant
 
     why_grouped: list[str] = []
@@ -427,7 +461,10 @@ def classify_recording_track_candidate_group(
     if has_recording_variant:
         why_grouped.append("release/remaster/appearance evidence is compatible with recording-track grouping")
     if compatible_metadata and not same_isrc:
-        why_grouped.append("compatible title, artist, and duration metadata")
+        if near_duration:
+            why_grouped.append("compatible title, artist, and duration metadata")
+        else:
+            why_grouped.append("compatible title and artist metadata")
 
     if not same_base_title:
         why_review.append("normalized base titles differ")
@@ -446,7 +483,12 @@ def classify_recording_track_candidate_group(
     if album_count > 2 and not (same_isrc or near_duration):
         why_review.append("same title appears across many albums without strong ISRC or duration support")
 
-    if has_recording_distinct_variant_mismatch:
+    if has_mixed_live_variant:
+        candidate_type = "track_family_candidate"
+        safety_status = "needs_review"
+        evidence_bucket = "variant_flag_excluded"
+        why_review.append("live/studio variants belong at Track Family layer")
+    elif has_recording_distinct_variant_mismatch:
         candidate_type: CandidateType = "track_family_candidate"
         safety_status: SafetyStatus = "needs_review"
         evidence_bucket: EvidenceBucket = "variant_flag_excluded"
@@ -538,6 +580,7 @@ def _candidate_member_from_row(row: sqlite3.Row) -> RecordingTrackCandidateMembe
     album_names = _split_aggregate(row["album_names"])
     release_album_ids = _split_int_aggregate(row["release_album_ids"])
     spotify_album_ids = _unique_values(_split_aggregate(row["spotify_album_ids"]))
+    album_image_urls = _unique_values(_split_aggregate(row["album_image_urls"]))
     album_release_dates = _unique_values(_split_aggregate(row["album_release_dates"]))
     album_types = _unique_values(_split_aggregate(row["album_types"]))
     source_track_ids = _split_aggregate(row["source_track_ids"])
@@ -553,6 +596,7 @@ def _candidate_member_from_row(row: sqlite3.Row) -> RecordingTrackCandidateMembe
         "album": ", ".join(album_names),
         "release_album_ids": release_album_ids,
         "spotify_album_ids": spotify_album_ids,
+        "album_image_urls": album_image_urls,
         "album_release_dates": album_release_dates,
         "album_types": album_types,
         "source_track_ids": source_track_ids,
@@ -571,9 +615,29 @@ def _candidate_member_from_row(row: sqlite3.Row) -> RecordingTrackCandidateMembe
     }
 
 
-def _candidate_source_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+def _candidate_source_rows(
+    connection: sqlite3.Connection,
+    *,
+    release_track_ids: set[int] | None = None,
+    artist_signatures: set[str] | None = None,
+) -> list[sqlite3.Row]:
+    params: list[Any] = []
+    where_parts: list[str] = []
+    if release_track_ids is not None:
+        target_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+        if not target_ids:
+            return []
+        where_parts.append(f"rt.id IN ({','.join('?' for _ in target_ids)})")
+        params.extend(target_ids)
+    if artist_signatures is not None:
+        target_signatures = sorted({signature for signature in artist_signatures if signature})
+        if not target_signatures:
+            return []
+        where_parts.append(f"COALESCE(pa.artist_signature, '') IN ({','.join('?' for _ in target_signatures)})")
+        params.extend(target_signatures)
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
     return connection.execute(
-        """
+        f"""
         WITH primary_artists AS (
           SELECT
             ordered.release_track_id,
@@ -594,6 +658,7 @@ def _candidate_source_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
             ordered.release_track_id,
             group_concat(ordered.release_album_id, '|') AS release_album_ids,
             group_concat(ordered.spotify_album_id, '|') AS spotify_album_ids,
+            group_concat(ordered.album_image_url, '|') AS album_image_urls,
             group_concat(ordered.album_release_date, '|') AS album_release_dates,
             group_concat(ordered.album_type, '|') AS album_types,
             group_concat(ordered.album_name, '|') AS album_names
@@ -603,6 +668,7 @@ def _candidate_source_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
               at.release_album_id,
               ra.primary_name AS album_name,
               sam_source.external_id AS spotify_album_id,
+              json_extract(sac.images_json, '$[0].url') AS album_image_url,
               sac.release_date AS album_release_date,
               sac.album_type AS album_type
             FROM album_track at
@@ -623,6 +689,7 @@ def _candidate_source_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
             group_concat(ordered.isrc, '|') AS isrcs,
             group_concat(ordered.duration_ms, '|') AS duration_values_ms,
             group_concat(ordered.catalog_album_id, '|') AS catalog_album_ids,
+            group_concat(ordered.catalog_album_image_url, '|') AS catalog_album_image_urls,
             group_concat(ordered.catalog_release_date, '|') AS catalog_release_dates,
             group_concat(ordered.catalog_album_type, '|') AS catalog_album_types
           FROM (
@@ -631,9 +698,10 @@ def _candidate_source_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
               st.id AS source_track_db_id,
               st.external_id AS spotify_track_id,
               COALESCE(st.external_uri, CASE WHEN st.source_name = 'spotify' THEN 'spotify:track:' || st.external_id ELSE NULL END) AS external_uri,
-              NULLIF(TRIM(COALESCE(st.isrc, json_extract(COALESCE(stc.raw_json, '{}'), '$.external_ids.isrc'))), '') AS isrc,
+              NULLIF(TRIM(COALESCE(st.isrc, json_extract(COALESCE(stc.raw_json, '{{}}'), '$.external_ids.isrc'))), '') AS isrc,
               stc.duration_ms AS duration_ms,
               stc.album_id AS catalog_album_id,
+              json_extract(stc_album.images_json, '$[0].url') AS catalog_album_image_url,
               stc_album.release_date AS catalog_release_date,
               stc_album.album_type AS catalog_album_type
             FROM source_track_map stm
@@ -654,6 +722,7 @@ def _candidate_source_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
           COALESCE(pa.artist_signature, '') AS artist,
           COALESCE(ral.release_album_ids, '') AS release_album_ids,
           COALESCE(ral.spotify_album_ids, sr.catalog_album_ids, '') AS spotify_album_ids,
+          COALESCE(ral.album_image_urls, sr.catalog_album_image_urls, '') AS album_image_urls,
           COALESCE(ral.album_release_dates, sr.catalog_release_dates, '') AS album_release_dates,
           COALESCE(ral.album_types, sr.catalog_album_types, '') AS album_types,
           COALESCE(ral.album_names, '') AS album_names,
@@ -666,8 +735,10 @@ def _candidate_source_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
         LEFT JOIN primary_artists pa ON pa.release_track_id = rt.id
         LEFT JOIN release_albums ral ON ral.release_track_id = rt.id
         LEFT JOIN source_refs sr ON sr.release_track_id = rt.id
+        {where_sql}
         ORDER BY rt.id ASC
-        """
+        """,
+        tuple(params),
     ).fetchall()
 
 
@@ -700,10 +771,7 @@ def _item_duration_delta_ms(item: dict[str, Any]) -> int | None:
     return max(durations) - min(durations) if len(durations) > 1 else None
 
 
-def _candidate_items() -> list[dict[str, Any]]:
-    with sqlite_connection(row_factory=sqlite3.Row) as connection:
-        rows = _candidate_source_rows(connection)
-
+def _build_candidate_items_from_rows(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     grouped: dict[str, list[RecordingTrackCandidateMember]] = {}
     isrc_grouped: dict[str, list[RecordingTrackCandidateMember]] = {}
     for row in rows:
@@ -739,6 +807,40 @@ def _candidate_items() -> list[dict[str, Any]]:
         add_candidate(key, members)
 
     items.sort(key=lambda item: (item["candidate_type"], item["safety_status"], item["candidate_key"]))
+    return items
+
+
+def _build_candidate_items() -> list[dict[str, Any]]:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = _candidate_source_rows(connection)
+    return _build_candidate_items_from_rows(rows)
+
+
+def _candidate_items() -> list[dict[str, Any]]:
+    db_path = get_sqlite_db_path()
+    try:
+        db_inode = db_path.stat().st_ino
+    except OSError:
+        db_inode = None
+    now = time.monotonic()
+    cached_items = _candidate_items_cache.get("items")
+    if (
+        cached_items is not None
+        and _candidate_items_cache.get("db_path") == str(db_path)
+        and _candidate_items_cache.get("db_inode") == db_inode
+        and now - float(_candidate_items_cache.get("cached_at") or 0.0) < _CANDIDATE_ITEMS_CACHE_TTL_SECONDS
+    ):
+        return cached_items
+
+    items = _build_candidate_items()
+    _candidate_items_cache.update(
+        {
+            "db_path": str(db_path),
+            "db_inode": db_inode,
+            "cached_at": now,
+            "items": items,
+        }
+    )
     return items
 
 
@@ -831,6 +933,350 @@ def query_recording_track_candidates(
             "artist": artist,
         },
     }
+
+
+def _generated_cluster_tables_available(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'generated_recording_track_cluster'
+        LIMIT 1
+        """
+    ).fetchone()
+    return row is not None
+
+
+def _generated_cluster_count(connection: sqlite3.Connection) -> int:
+    if not _generated_cluster_tables_available(connection):
+        return 0
+    return int(connection.execute("SELECT count(*) FROM generated_recording_track_cluster").fetchone()[0])
+
+
+def _invalidate_candidate_items_cache() -> None:
+    _candidate_items_cache.update(
+        {
+            "db_path": None,
+            "db_inode": None,
+            "cached_at": 0.0,
+            "items": None,
+        }
+    )
+
+
+def _insert_generated_candidate_item(
+    connection: sqlite3.Connection,
+    *,
+    item: dict[str, Any],
+    generated_at: str,
+) -> int:
+    members = item.get("members") or []
+    representative = item.get("representative") or {}
+    cluster_id = int(
+        connection.execute(
+            """
+            INSERT INTO generated_recording_track_cluster (
+              candidate_key,
+              candidate_type,
+              safety_status,
+              relationship_kind,
+              relationship_strength,
+              evidence_bucket,
+              confidence,
+              representative_release_track_id,
+              representative_reason,
+              member_count,
+              candidate_snapshot_json,
+              generated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(item.get("candidate_key") or ""),
+                str(item.get("candidate_type") or ""),
+                str(item.get("safety_status") or ""),
+                str(item.get("relationship_kind") or ""),
+                str(item.get("relationship_strength") or ""),
+                item.get("evidence_bucket"),
+                float(item.get("confidence") or 0.0),
+                int(representative["release_track_id"]) if representative.get("release_track_id") is not None else None,
+                representative.get("reason"),
+                len(members),
+                json.dumps(item, sort_keys=True),
+                generated_at,
+            ),
+        ).lastrowid
+    )
+    for index, member in enumerate(members):
+        release_track_id = int(member["release_track_id"])
+        connection.execute(
+            """
+            INSERT INTO generated_recording_track_cluster_member (
+              cluster_id,
+              release_track_id,
+              member_index,
+              is_representative
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                cluster_id,
+                release_track_id,
+                index,
+                1 if representative.get("release_track_id") == release_track_id else 0,
+            ),
+        )
+    return len(members)
+
+
+def rebuild_generated_recording_track_clusters() -> dict[str, Any]:
+    items = _candidate_items()
+    generated_at = datetime.now(UTC).isoformat()
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        if not _generated_cluster_tables_available(connection):
+            return {"rebuilt": False, "cluster_count": 0, "member_count": 0, "reason": "missing_tables"}
+        connection.execute("DELETE FROM generated_recording_track_cluster_member")
+        connection.execute("DELETE FROM generated_recording_track_cluster")
+        member_count = 0
+        for item in items:
+            member_count += _insert_generated_candidate_item(connection, item=item, generated_at=generated_at)
+        clear_generated_recording_track_cluster_dirty_with_connection(
+            connection,
+            [
+                int(member["release_track_id"])
+                for item in items
+                for member in (item.get("members") or [])
+                if int(member.get("release_track_id") or 0) > 0
+            ],
+        )
+    _invalidate_candidate_items_cache()
+    return {"rebuilt": True, "cluster_count": len(items), "member_count": member_count, "generated_at": generated_at}
+
+
+def refresh_generated_recording_track_clusters_for_release_tracks(
+    release_track_ids: list[int] | set[int] | tuple[int, ...],
+) -> dict[str, Any]:
+    target_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+    if not target_ids:
+        return {"refreshed": False, "cluster_count": 0, "member_count": 0, "reason": "no_release_track_ids"}
+
+    generated_at = datetime.now(UTC).isoformat()
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        if not _generated_cluster_tables_available(connection):
+            return {"refreshed": False, "cluster_count": 0, "member_count": 0, "reason": "missing_tables"}
+
+        target_rows = _candidate_source_rows(connection, release_track_ids=set(target_ids))
+        artist_signatures = {str(row["artist"] or "") for row in target_rows if str(row["artist"] or "")}
+        if not artist_signatures:
+            clear_generated_recording_track_cluster_dirty_with_connection(connection, target_ids)
+            return {"refreshed": True, "cluster_count": 0, "member_count": 0, "generated_at": generated_at}
+
+        rows = _candidate_source_rows(connection, artist_signatures=artist_signatures)
+        scoped_release_track_ids = {
+            int(row["release_track_id"])
+            for row in rows
+            if int(row["release_track_id"] or 0) > 0
+        }
+        items = _build_candidate_items_from_rows(rows)
+        candidate_keys = [str(item.get("candidate_key") or "") for item in items if str(item.get("candidate_key") or "")]
+
+        delete_cluster_ids: set[int] = set()
+        if scoped_release_track_ids:
+            placeholders = ",".join("?" for _ in scoped_release_track_ids)
+            delete_cluster_ids.update(
+                int(row["cluster_id"])
+                for row in connection.execute(
+                    f"""
+                    SELECT DISTINCT cluster_id
+                    FROM generated_recording_track_cluster_member
+                    WHERE release_track_id IN ({placeholders})
+                    """,
+                    tuple(sorted(scoped_release_track_ids)),
+                ).fetchall()
+            )
+        if candidate_keys:
+            placeholders = ",".join("?" for _ in candidate_keys)
+            delete_cluster_ids.update(
+                int(row["id"])
+                for row in connection.execute(
+                    f"""
+                    SELECT id
+                    FROM generated_recording_track_cluster
+                    WHERE candidate_key IN ({placeholders})
+                    """,
+                    tuple(candidate_keys),
+                ).fetchall()
+            )
+
+        if delete_cluster_ids:
+            placeholders = ",".join("?" for _ in delete_cluster_ids)
+            params = tuple(sorted(delete_cluster_ids))
+            connection.execute(
+                f"DELETE FROM generated_recording_track_cluster_member WHERE cluster_id IN ({placeholders})",
+                params,
+            )
+            connection.execute(
+                f"DELETE FROM generated_recording_track_cluster WHERE id IN ({placeholders})",
+                params,
+            )
+
+        member_count = 0
+        for item in items:
+            member_count += _insert_generated_candidate_item(connection, item=item, generated_at=generated_at)
+        clear_generated_recording_track_cluster_dirty_with_connection(connection, scoped_release_track_ids | set(target_ids))
+
+    _invalidate_candidate_items_cache()
+    return {
+        "refreshed": True,
+        "cluster_count": len(items),
+        "member_count": member_count,
+        "release_track_count": len(scoped_release_track_ids),
+        "generated_at": generated_at,
+    }
+
+
+def drain_generated_recording_track_cluster_dirty(*, limit: int = 50) -> dict[str, Any]:
+    dirty_ids = dirty_generated_recording_track_cluster_ids(limit=max(1, int(limit)))
+    if not dirty_ids:
+        return {"refreshed": False, "dirty_count": 0}
+    result = refresh_generated_recording_track_clusters_for_release_tracks(dirty_ids)
+    result["dirty_count"] = len(dirty_ids)
+    return result
+
+
+def _ensure_generated_recording_track_clusters() -> None:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        if _generated_cluster_count(connection) > 0:
+            return
+    rebuild_generated_recording_track_clusters()
+
+
+def _generated_candidate_items_for_release_track(release_track_id: int) -> list[dict[str, Any]]:
+    _ensure_generated_recording_track_clusters()
+    dirty_ids = dirty_generated_recording_track_cluster_ids([release_track_id], limit=1)
+    if dirty_ids:
+        refresh_generated_recording_track_clusters_for_release_tracks(dirty_ids)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        if not _generated_cluster_tables_available(connection):
+            return []
+        rows = connection.execute(
+            """
+            SELECT c.candidate_snapshot_json
+            FROM generated_recording_track_cluster_member m
+            JOIN generated_recording_track_cluster c
+              ON c.id = m.cluster_id
+            WHERE m.release_track_id = ?
+            """,
+            (release_track_id,),
+        ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            value = json.loads(str(row["candidate_snapshot_json"] or "{}"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            items.append(value)
+    return items
+
+
+def get_recording_track_candidate_for_release_track(release_track_id: int) -> dict[str, Any] | None:
+    target_id = int(release_track_id)
+    if target_id <= 0:
+        return None
+    matches = get_recording_track_candidates_for_release_track(target_id)
+    if not matches:
+        return None
+    return matches[0]
+
+
+def get_recording_track_candidates_for_release_track(release_track_id: int) -> list[dict[str, Any]]:
+    target_id = int(release_track_id)
+    if target_id <= 0:
+        return []
+    matches = _generated_candidate_items_for_release_track(target_id)
+    if not matches:
+        matches = [
+            item
+            for item in _candidate_items()
+            if any(int(member["release_track_id"]) == target_id for member in item["members"])
+        ]
+    if not matches:
+        return []
+    return sorted(
+        matches,
+        key=lambda item: (
+            0 if item["candidate_type"] == "recording_track_candidate" else 1,
+            0 if int(item["representative"]["release_track_id"] or 0) == target_id else 1,
+            -float(item["confidence"]),
+            item["candidate_key"],
+        ),
+    )
+
+
+def candidate_cluster_metadata_for_release_track_ids(release_track_ids: list[int]) -> dict[int, dict[str, Any]]:
+    target_ids = {int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0}
+    if not target_ids:
+        return {}
+    _ensure_generated_recording_track_clusters()
+    dirty_ids = dirty_generated_recording_track_cluster_ids(target_ids, limit=len(target_ids))
+    if dirty_ids:
+        refresh_generated_recording_track_clusters_for_release_tracks(dirty_ids)
+    placeholders = ",".join("?" for _ in target_ids)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        if _generated_cluster_tables_available(connection):
+            rows = connection.execute(
+                f"""
+                SELECT
+                  m.release_track_id,
+                  c.candidate_type,
+                  max(c.member_count) AS cluster_member_count
+                FROM generated_recording_track_cluster_member m
+                JOIN generated_recording_track_cluster c
+                  ON c.id = m.cluster_id
+                WHERE m.release_track_id IN ({placeholders})
+                  AND c.candidate_type IN ('recording_track_candidate', 'track_family_candidate')
+                GROUP BY m.release_track_id, c.candidate_type
+                """,
+                tuple(sorted(target_ids)),
+            ).fetchall()
+            metadata: dict[int, dict[str, Any]] = {}
+            for row in rows:
+                release_track_id = int(row["release_track_id"])
+                cluster_member_count = int(row["cluster_member_count"] or 0)
+                current = metadata.get(release_track_id)
+                if current and int(current["cluster_member_count"]) >= cluster_member_count:
+                    continue
+                metadata[release_track_id] = {
+                    "cluster_member_count": cluster_member_count,
+                    "cluster_candidate_type": str(row["candidate_type"] or ""),
+                }
+            return metadata
+
+    metadata: dict[int, dict[str, Any]] = {}
+    for item in _candidate_items():
+        members = item.get("members") or []
+        member_ids = {
+            int(member["release_track_id"])
+            for member in members
+            if int(member.get("release_track_id") or 0) > 0
+        }
+        matched_ids = member_ids & target_ids
+        if not matched_ids or len(member_ids) < 2:
+            continue
+        candidate_type = str(item.get("candidate_type") or "")
+        if candidate_type not in {"recording_track_candidate", "track_family_candidate"}:
+            continue
+        for release_track_id in matched_ids:
+            current = metadata.get(release_track_id)
+            if current and int(current["cluster_member_count"]) >= len(member_ids):
+                continue
+            metadata[release_track_id] = {
+                "cluster_member_count": len(member_ids),
+                "cluster_candidate_type": candidate_type,
+            }
+    return metadata
 
 
 def _count_by(items: list[dict[str, Any]], key: str) -> dict[str, int]:

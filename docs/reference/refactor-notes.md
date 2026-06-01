@@ -229,12 +229,14 @@ Recommended next frontend step:
 Current uncommitted playback UI behavior:
 - Homepage playback is the full-control surface above Activity.
 - The compact popup remains intentionally smaller and omits queue loop/settings.
-- Homepage song title opens the song popup.
+- Homepage song title opens the track popup in recording view.
 - Homepage no longer shows an `Up next` text line under the album area.
 - Homepage album art lives below play controls, with album name below the art.
-- Clicking homepage album art/name expands only the left player column and renders album tracks using the same row actions as the song overlay.
-- Album expansion must not stretch the queue column.
+- Clicking homepage album art expands only the left player column and renders a compact album tracklist while keeping the queue visible; clicking album name opens the full album overlay.
+- Homepage compact album tracklists use play/title/played columns only, hide preview/tags, stretch across the left column, and only show the scrollbar marker when the list can scroll.
+- Album expansion must not stretch or hide the queue column.
 - Queue item text opens the track overlay; queue item art starts playback at that queue item.
+- Repeated Spotify queue cycles such as `A, B, A, B` are collapsed for display.
 - Back/Forward and track-end auto-advance use the ListenLab queue cursor and explicitly start the target track.
 - Delay menu behavior:
   - `After this song` advances to the next queued song at 0:00 and pauses it.
@@ -248,14 +250,31 @@ Current uncommitted playback UI behavior:
   - album title shows year inline and album summary shows loaded track count/runtime
   - album main artists are derived from majority-of-loaded-track evidence, falling back to album metadata artists before tracklist evidence is available
   - album and track overlays split artists into main artist(s) plus `with ...` guests
-  - album tracklist has `Title`, `With`, `Liked`, `Preview`, and `Played` columns
+  - album tracklist header shows track count/runtime instead of `Title`
+  - album tracklist has optional `With`, `Tags`, `Preview`, and `Played` columns; the `With` column is removed for albums with no guest artists
+  - liked badges render next to track names, while release/recording tags render in `Tags`
+  - tracklist can stay mounted while the selected album changes, so rows update instead of disappearing into a loading-only state
+  - tracklist opens centered on the highlighted/current track when possible and renders a small scrollbar-position marker only when the list can scroll
   - top `with ...` list controls delayed row highlighting and scrolls the first matching row into view
   - row-level `With` artists are clickable but do not trigger hover highlighting
   - row-level `With` clicks open a shared artist page for derived album main artist(s) plus the clicked guest
   - track preview payloads expose top-level release-track metadata copied from the representative `RecentTrack`
-  - track overlays show a small `Grouped with N source versions` note when release-track siblings exist, while title/artist/album/image and playback remain representative Spotify-source based
+  - track overlays default to recording view on user-facing pages, while Identity Audit/Search/Listen Log backend pages may request release view
+  - recording view shows same-recording album appearances separately from broader `Variations`; clicking variation/family cards switches the selected album and representative release track
+  - release view shows source-version albums and marks the representative source instead of listing raw source rows as the main UI
+  - the top-right gear menu exposes Spotify and View Release/Recording Track actions; the old bottom switch button is removed
+  - track overlays keep Spotify source track id/URI as playback identity even when release/recording/family evidence is shown
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.
+
+## Recording Candidate Cache State
+Current uncommitted backend behavior:
+- SQLite schema versions `32` and `33` add generated recording/track-family cluster tables plus a dirty release-track table.
+- Startup creates the generated candidate cache if it is empty.
+- Source-track map upserts, album-track inserts, and release-track merge repoints mark affected release tracks dirty.
+- Recent-play sync drains a small dirty batch after inserted rows so newly added tracks can join existing generated clusters without a full rebuild.
+- `GET /debug/tracks/recording-track-candidates/by-release/{release_track_id}` returns cached generated candidate items for track overlays and falls back to live candidate generation when needed.
+- The generated tables remain evidence caches only; they do not promote, apply, or mutate canonical identity.
 
 ## Activity and Listen Log UI State
 Current uncommitted recent-listening behavior:

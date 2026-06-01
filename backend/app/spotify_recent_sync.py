@@ -104,12 +104,18 @@ async def maybe_sync_spotify_recent(
             source_ref=source_ref,
             limit=limit,
         )
+        recording_cluster_refresh: dict[str, Any] | None = None
+        if int(summary.get("inserted_count") or 0) > 0:
+            from backend.app.recording_track_candidates import drain_generated_recording_track_cluster_dirty
+
+            recording_cluster_refresh = drain_generated_recording_track_cluster_dirty(limit=50)
         return {
             **summary,
             "status": "synced",
             "skipped": False,
             "force": force,
             "min_interval_seconds": bounded_min_interval,
+            "recording_cluster_refresh": recording_cluster_refresh,
         }
 
 

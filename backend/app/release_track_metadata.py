@@ -56,17 +56,25 @@ def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict
             (*normalized_ids, *uri_ids),
         ).fetchall()
 
+    release_track_ids = sorted({int(row["release_track_id"]) for row in rows if row["release_track_id"] is not None})
+    from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
+
+    cluster_metadata_by_release_track_id = candidate_cluster_metadata_for_release_track_ids(release_track_ids)
+
     metadata: dict[str, dict[str, Any]] = {}
     for row in rows:
         spotify_track_id = str(row["spotify_track_id"] or "").strip()
         if not spotify_track_id or spotify_track_id in metadata:
             continue
+        release_track_id = int(row["release_track_id"])
         source_track_count = int(row["source_track_count"] or 0)
+        cluster_metadata = cluster_metadata_by_release_track_id.get(release_track_id)
+        cluster_member_count = int(cluster_metadata["cluster_member_count"]) if cluster_metadata else 0
         metadata[spotify_track_id] = {
-            "release_track_id": int(row["release_track_id"]),
+            "release_track_id": release_track_id,
             "release_track_name": str(row["release_track_name"] or ""),
-            "release_track_source_count": source_track_count,
-            "has_release_track_siblings": source_track_count > 1,
+            "release_track_source_count": max(source_track_count, cluster_member_count),
+            "has_release_track_siblings": source_track_count > 1 or cluster_member_count > 1,
         }
     return metadata
 
@@ -114,17 +122,25 @@ def release_track_metadata_for_history_raw_keys(text_keys: list[str]) -> dict[st
             normalized_keys,
         ).fetchall()
 
+    release_track_ids = sorted({int(row["release_track_id"]) for row in rows if row["release_track_id"] is not None})
+    from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
+
+    cluster_metadata_by_release_track_id = candidate_cluster_metadata_for_release_track_ids(release_track_ids)
+
     metadata: dict[str, dict[str, Any]] = {}
     for row in rows:
         history_raw_key = str(row["history_raw_key"] or "").strip()
         if not history_raw_key or history_raw_key in metadata:
             continue
+        release_track_id = int(row["release_track_id"])
         source_track_count = int(row["source_track_count"] or 0)
+        cluster_metadata = cluster_metadata_by_release_track_id.get(release_track_id)
+        cluster_member_count = int(cluster_metadata["cluster_member_count"]) if cluster_metadata else 0
         metadata[history_raw_key] = {
-            "release_track_id": int(row["release_track_id"]),
+            "release_track_id": release_track_id,
             "release_track_name": str(row["release_track_name"] or ""),
-            "release_track_source_count": source_track_count,
-            "has_release_track_siblings": source_track_count > 1,
+            "release_track_source_count": max(source_track_count, cluster_member_count),
+            "has_release_track_siblings": source_track_count > 1 or cluster_member_count > 1,
         }
     return metadata
 

@@ -167,6 +167,9 @@ async def _ensure_sqlite_db_on_startup() -> None:
     try:
         ensure_sqlite_db()
         apply_pending_migrations()
+        from backend.app.recording_track_candidates import _ensure_generated_recording_track_clusters
+
+        _ensure_generated_recording_track_clusters()
     except sqlite3.OperationalError as exc:
         if "database is locked" in str(exc).lower():
             db_path = get_settings().sqlite_db_path
@@ -394,9 +397,9 @@ async def _sync_recent_to_db_best_effort(
     *,
     force: bool = False,
     min_interval_seconds: int = 10 * 60,
-) -> None:
+) -> dict[str, Any] | None:
     try:
-        await maybe_sync_spotify_recent(
+        return await maybe_sync_spotify_recent(
             access_token,
             source_ref=source_ref,
             force=force,
@@ -409,6 +412,7 @@ async def _sync_recent_to_db_best_effort(
             source_ref,
             exc,
         )
+    return None
 
 
 async def _fetch_owned_playlists(
@@ -2370,9 +2374,32 @@ async def me_liked_tracks_contains(
     if not normalized_track_id:
         raise HTTPException(status_code=400, detail="spotify_track_id is required.")
     user_id = _require_local_data_session(request)
+    cached_liked = is_liked_track_cached(str(user_id), normalized_track_id)
+    if cached_liked:
+        return {
+            "spotify_track_id": normalized_track_id,
+            "is_liked": True,
+            "source": "cache",
+        }
+    try:
+        token = _require_token(request)
+        spotify_result = await _spotify_get(
+            token,
+            "https://api.spotify.com/v1/me/tracks/contains",
+            {"ids": normalized_track_id},
+        )
+        if isinstance(spotify_result, list) and spotify_result:
+            return {
+                "spotify_track_id": normalized_track_id,
+                "is_liked": bool(spotify_result[0]),
+                "source": "spotify",
+            }
+    except HTTPException:
+        pass
     return {
         "spotify_track_id": normalized_track_id,
-        "is_liked": is_liked_track_cached(str(user_id), normalized_track_id),
+        "is_liked": False,
+        "source": "cache",
     }
 
 
@@ -2450,7 +2477,18 @@ async def me_recent(
 
         try:
             _set_load_progress(request, "recent listening")
-            await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh", force=force_recent_sync)
+            recent_sync_summary = await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh", force=force_recent_sync)
+            inserted_recent_count = int((recent_sync_summary or {}).get("inserted_count") or 0)
+            skipped_recent_sync = bool((recent_sync_summary or {}).get("skipped"))
+            if inserted_recent_count == 0:
+                cached_snapshot = _load_user_recent_snapshot(user_id, recent_range)
+                if cached_snapshot:
+                    _set_load_progress(
+                        request,
+                        "recent sections cache hit (no new plays)" if not skipped_recent_sync else "recent sections cache hit",
+                    )
+                    _set_load_progress(request, "finishing")
+                    return cached_snapshot
             db_recent_tracks_payload = build_recent_tracks_section_from_db(
                 limit=SPOTIFY_RECENT_MAX_ITEMS,
                 recent_range=recent_range,

@@ -29,9 +29,11 @@ class ReleaseTrackDetailSourceVersion(TypedDict):
     album_id: str | None
     album_name: str | None
     album_image_url: str | None
+    album_release_year: str | None
     duration_ms: int | None
     explicit: bool | None
     playable: bool | None
+    play_count: int
     spotify_url: str | None
     is_context: bool
     is_playback_choice: bool
@@ -154,6 +156,15 @@ def get_release_track_detail(
 
         source_rows = connection.execute(
             """
+            WITH source_play_counts AS (
+              SELECT
+                spotify_track_id,
+                count(*) AS play_count
+              FROM fact_play_event
+              WHERE spotify_track_id IS NOT NULL
+                AND trim(spotify_track_id) != ''
+              GROUP BY spotify_track_id
+            )
             SELECT
               st.id AS source_track_id,
               st.source_name,
@@ -167,7 +178,9 @@ def get_release_track_detail(
               stc.artists_json AS catalog_artists_json,
               stc.last_status AS catalog_last_status,
               sac.name AS catalog_album_name,
-              sac.images_json AS catalog_album_images_json
+              sac.images_json AS catalog_album_images_json,
+              sac.release_date AS catalog_album_release_date,
+              COALESCE(spc.play_count, 0) AS play_count
             FROM source_track_map stm
             JOIN source_track st
               ON st.id = stm.source_track_id
@@ -180,6 +193,13 @@ def get_release_track_detail(
               END
             LEFT JOIN spotify_album_catalog sac
               ON sac.spotify_album_id = stc.album_id
+            LEFT JOIN source_play_counts spc
+              ON spc.spotify_track_id = CASE
+                WHEN st.source_name = 'spotify' THEN st.external_id
+                WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+                WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+                ELSE NULL
+              END
             WHERE stm.release_track_id = ?
               AND stm.status = 'accepted'
               AND st.source_name IN ('spotify', 'spotify_uri')
@@ -220,9 +240,15 @@ def get_release_track_detail(
                 "album_id": str(row["catalog_album_id"]) if row["catalog_album_id"] else None,
                 "album_name": str(row["catalog_album_name"]) if row["catalog_album_name"] else None,
                 "album_image_url": _first_album_image_url(row["catalog_album_images_json"]),
+                "album_release_year": (
+                    str(row["catalog_album_release_date"])[:4]
+                    if row["catalog_album_release_date"] and str(row["catalog_album_release_date"])[:4].isdigit()
+                    else None
+                ),
                 "duration_ms": _optional_int(row["catalog_duration_ms"]),
                 "explicit": _optional_bool(row["catalog_explicit"]),
                 "playable": None,
+                "play_count": int(row["play_count"] or 0),
                 "spotify_url": _spotify_track_url(spotify_track_id),
                 "is_context": bool(normalized_context_id and spotify_track_id == normalized_context_id),
                 "is_playback_choice": False,

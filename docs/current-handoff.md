@@ -16,7 +16,7 @@ Avoid reading every doc by default.
 ## Current State
 Active branch: `frontend-app-refactor`.
 
-This handoff covers committed identity-audit work after manual review of 15 recording-track candidates, release-track duration repair/provenance, priority catalog backfill queueing for identity candidates, and duration-conflict review.
+This handoff covers the pending frontend/backend recording-view integration work: generated recording/track-family candidate caches, recording-first track views with release-view escape hatches, homepage playback album-list fixes, and related docs/tests.
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`; keep `App.tsx` for routing/layout/wiring, feature UI under `frontend/src/components/...`, API calls in `frontend/src/api/appApi.ts`, and shared types in `frontend/src/types/appTypes.ts`.
@@ -26,7 +26,7 @@ Hierarchy direction remains:
 
 `source_track -> release_track -> recording_track -> track_family`
 
-No durable `recording_track` table, promotion/apply endpoint, overlay integration, playback change, or default aggregation change exists yet. Candidate and review behavior is still read-only/debug-only.
+No durable canonical `recording_track` table, promotion/apply endpoint, or default aggregation change exists yet. Generated recording/track-family cluster tables now exist as SQLite evidence caches for fast lookup, but they are not identity promotion tables and do not apply saved review decisions.
 
 Manual review outcomes encoded into classifier policy:
 - Same full variant label plus strong evidence can form a recording-track subgroup.
@@ -36,6 +36,9 @@ Manual review outcomes encoded into classifier policy:
 - Instrumental variants are separate recording/listening objects by default, usually same Track Family.
 - Explicit/clean variants can still be same `recording_track`; preserve content-rating metadata for frontend filtering/playback preference.
 - Mono/stereo or format variants can remain same `recording_track` when evidence agrees; prefer clean/base title for display.
+- Duration is supporting evidence only: matching durations are a good sign, but mismatched Spotify catalog durations cannot rule out the same release/recording because catalog metadata can differ from playback reality.
+- Same normalized title plus compatible primary artist is the main recording-candidate gate; duration mismatches should push review, not automatic exclusion.
+- Expanded, deluxe, and anniversary edition appearances belong at the recording/rerelease candidate layer rather than being merged into the same release track.
 - Rerelease/remaster belongs before single in representative fallback order.
 
 Representative selection now prefers:
@@ -47,23 +50,34 @@ Representative selection now prefers:
 
 It also prefers clean/base titles over format/remaster suffixes when otherwise compatible.
 
-Current real candidate counts after duration repair/rule changes:
-- total candidate groups: `1240`
-- recording-track candidates: `862`
-- track-family candidates: `378`
-- safe recording candidates: `302`
-- needs-review recording candidates: `560`
-- needs-review family candidates: `378`
-- safe candidates represent `626` unique release tracks and `709` unique source tracks
-- needs-review recording candidates represent `1050` unique release tracks and `1095` unique source tracks
+Current real candidate counts after duration/supporting-evidence rule changes:
+- total candidate groups: `1258`
+- recording-track candidates: `879`
+- track-family candidates: `379`
+- safe recording candidates: `665`
+- needs-review recording candidates: `214`
+- needs-review family candidates: `379`
+- safe candidates represent `1362` unique release tracks and `1474` unique source tracks
+- needs-review recording candidates represent `471` unique release tracks and `492` unique source tracks
 - family candidates represent `881` unique release tracks and `964` unique source tracks
 
 Backend endpoints:
 - `GET /debug/tracks/recording-track-candidates`
+- `GET /debug/tracks/recording-track-candidates/by-release/{release_track_id}`
 - `GET /debug/tracks/recording-track-candidates/summary`
 - `POST /debug/tracks/recording-track-candidate-reviews`
 - `GET /debug/tracks/recording-track-candidate-reviews`
 - `GET /debug/tracks/recording-track-candidate-reviews/{id}`
+
+Generated candidate cache:
+- local DB is now schema version `33`.
+- `generated_recording_track_cluster` stores generated candidate snapshots.
+- `generated_recording_track_cluster_member` maps generated clusters to release tracks.
+- `generated_recording_track_cluster_dirty` tracks release IDs needing scoped refresh.
+- Startup builds the generated cluster cache only if it is empty.
+- Source-track map upserts, album-track inserts, and release-track merge repoints mark affected release tracks dirty.
+- Recent-play sync drains a small dirty batch after inserted rows, so newly added tracks can join generated clusters without rebuilding the whole database.
+- Track views use `by-release` lookup for fast "also appears on" / variation evidence and fall back to live candidate generation if no generated rows are present.
 
 ## Duration Repair, Provenance, And Conflicts
 Found a propagation gap:
@@ -72,7 +86,7 @@ Found a propagation gap:
 - Existing non-null release durations are preserved.
 
 Schema/version note:
-- local DB is now schema version `31`.
+- duration provenance was introduced in schema version `31`; generated candidate caches were added in versions `32` and `33`.
 - `release_track` now has `duration_source`, `duration_confidence`, and `duration_evidence_json`.
 - close/agreed catalog durations are marked `catalog_agrees`.
 - accepted mappings with conflicting catalog durations are marked `uncertain_catalog_conflict`.
@@ -106,11 +120,37 @@ Catalog queue note:
 - It inserted/upgraded `695` pending `identity_metadata` queue rows at priority `95` for missing source catalog metadata used by recording/family candidate review.
 - Candidate-layer missing metadata was concentrated in missing Spotify track catalog rows, not incomplete existing catalog rows.
 
+## Frontend Track And Playback UI
+Track views:
+- User-facing track opens default to recording view; backend/debug surfaces can still open release view.
+- Recording view shows the representative release track, same-recording album appearances under "Also appears on", and broader Track Family items under "Variations".
+- Release view shows source-version albums instead of a raw source-version list, and the representative source has a visible badge.
+- Gear menu actions replace the old bottom switch button: open in Spotify and switch between release/recording view.
+- Top track header emphasizes artist and title, removes the top RT tag, and shows listen count when available.
+- Variation cards show album art plus subtitle/version text where available, such as live-location suffixes.
+- Clicking variation/family/release-source album cards switches the selected album and keeps the album tracklist open when it was already open.
+- Album tracklists default closed in recording view and open by clicking album art.
+- Open album tracklists scroll the highlighted/current track into view and show a small scrollbar marker only when the list can actually scroll.
+- Album tracklist headers show track count/runtime, move liked badges beside the track name, and use a `Tags` column for release/recording tags.
+- The `With` column is hidden for albums without guest artists.
+- Tracklist loading keeps existing rows visible during same-view album switches.
+
+Homepage playback:
+- Homepage album art expands a compact album tracklist in the left player column; album title opens the full album overlay.
+- The queue remains visible while the homepage album tracklist is open.
+- The compact homepage list only shows play/title/played columns and no preview/tags columns.
+- Repeated Spotify queue cycles are collapsed for display.
+- The compact list no longer shows the scrollbar-position marker for short non-scrollable lists.
+
+Liked state:
+- Targeted `GET /me/liked-tracks/contains` checks fill liked-star gaps for selected tracks and visible album-track rows without forcing a full liked-track cache load.
+
 ## Frontend Identity Audit
 Existing tab:
 - Tracks -> `Recording Tracks`
 - Component: `frontend/src/components/identityAudit/RecordingTrackCandidatesTab.tsx`
 - Saves review decisions only; does not apply identity changes.
+- Candidate rows now expose generated cluster member counts and show RT for all tracks that are part of a generated recording or family cluster, not only release-candidate rows.
 
 Duration tab:
 - Tracks -> `Duration Conflicts`
@@ -122,40 +162,45 @@ Duration tab:
 Frontend deliberately still does not include:
 - accept/reject/apply identity mutation
 - schema promotion
-- overlay integration
-- playback changes
 - default aggregation changes
 
 ## Files Changed In Latest Commit
 Backend:
 - `backend/app/db.py`
-- `backend/app/spotify_catalog_backfill.py`
-- `backend/app/spotify_catalog_worker.py`
-- `backend/tests/test_entity_backfill.py`
-- `backend/tests/test_spotify_catalog_backfill.py`
-- `backend/tests/test_spotify_catalog_worker.py`
+- `backend/app/logging_config.py`
+- `backend/app/main.py`
+- `backend/app/recording_track_candidates.py`
+- `backend/app/release_track_detail.py`
+- `backend/app/release_track_metadata.py`
+- `backend/app/routes/audit_routes.py`
+- `backend/app/routes/playback_routes.py`
+- `backend/app/spotify_recent_sync.py`
+- `backend/tests/test_liked_tracks.py`
+- `backend/tests/test_recording_track_candidates.py`
+- `backend/tests/test_release_track_detail.py`
 
 Frontend:
-- `frontend/src/components/identityAudit/ReleaseTrackDurationConflictsTab.tsx`
+- `frontend/src/App.tsx`
+- `frontend/src/api/appApi.ts`
+- `frontend/src/components/common/ReleaseSiblingBadge.tsx`
+- `frontend/src/components/identityAudit/RecordingTrackCandidatesTab.tsx`
+- `frontend/src/styles.css`
 - `frontend/src/types/appTypes.ts`
+- `frontend/src/utils/playbackUtils.ts`
 
 Docs:
+- `README.md`
 - `docs/current-handoff.md`
+- `docs/overview/architecture.md`
 - `docs/overview/context.md`
+- `docs/reference/drafts/entity-model-draft.md`
+- `docs/reference/refactor-notes.md`
 - `docs/reference/source-track-resolution-policy.md`
 
 ## Verification
-Backend tests/checks run and passed:
-- focused duration/catalog/worker tests, including:
-  - `test_upsert_track_catalog_populates_missing_release_track_duration`
-  - `test_upsert_track_catalog_preserves_existing_release_track_duration`
-  - `test_repair_release_track_durations_from_spotify_catalog_updates_close_matches`
-  - `test_repair_release_track_durations_from_spotify_catalog_uses_longest_accepted_conflict`
-  - `test_repair_release_track_durations_from_spotify_catalog_marks_existing_conflict_uncertain`
-  - `test_query_release_track_duration_conflicts_returns_spotify_links`
-  - `test_successful_backfill_runs_release_duration_repair`
-- `./.venv/bin/python -m unittest backend.tests.test_spotify_catalog_backfill backend.tests.test_spotify_catalog_worker backend.tests.test_entity_backfill`
-- `./.venv/bin/python -m py_compile backend/app/db.py backend/app/spotify_catalog_backfill.py backend/app/spotify_catalog_worker.py`
+Backend tests/checks run and passed before this commit:
+- `./.venv/bin/python -m unittest backend.tests.test_recording_track_candidates backend.tests.test_release_track_detail backend.tests.test_liked_tracks`
+- `./.venv/bin/python -m py_compile backend/app/db.py backend/app/recording_track_candidates.py backend/app/release_track_detail.py backend/app/release_track_metadata.py backend/app/routes/audit_routes.py backend/app/routes/playback_routes.py backend/app/spotify_recent_sync.py backend/app/main.py`
 
 Frontend/checks run and passed:
 - `npm run build` from `frontend/`
@@ -165,22 +210,25 @@ Vite still reports the existing large chunk warning after frontend builds.
 
 ## Known Limitations
 - Candidate discovery remains debug/read-only and intentionally conservative.
+- Generated recording/track-family cluster tables are caches only; they are not durable identity or promotion state.
 - Saved recording-track reviews are audit metadata only; they do not drive classifier tuning, identity promotion, or aggregation yet.
 - Different-ISRC compatible remasters/reissues stay review-required.
 - Frontend review filters for evidence bucket, ISRC state, and sorting apply to the currently loaded candidate page.
 - Becca Mancari-style album/single representative choice can still be weak when album metadata lacks album type/release dates.
 - The 49 duration conflicts have representative durations for display but remain uncertain; do not use those values as verified playback lengths.
 - Frontend still lacks a dedicated test harness for Identity Audit components; verification is build/type based plus backend tests.
+- Recording/release/variation UI still needs manual QA against an active Spotify session and real catalog examples.
 
 ## Recommended Next Task
-Use Identity Audit -> Tracks -> Duration Conflicts to continue review of the 49 duration conflicts and decide whether each is:
-- same release track with metadata drift
-- wrong release-track merge
-- alternate recording/version that should split
-- needs more Spotify/album evidence
+Manual QA the track view flow with known cases:
+- same recording across albums, such as original album vs deluxe/expanded edition
+- broader live/demo/remix family variations
+- release view source-version album cards
+- homepage playback album expansion with the queue visible
 
 Other possible follow-ups:
-- Add focused frontend tests for `ReleaseTrackDurationConflictsTab` and `RecordingTrackCandidatesTab`.
+- Continue reviewing the 49 duration conflicts in Identity Audit -> Tracks -> Duration Conflicts.
+- Add focused frontend tests for track overlays, homepage playback album expansion, `ReleaseTrackDurationConflictsTab`, and `RecordingTrackCandidatesTab`.
 - Add a backend export/report endpoint for duration conflicts and reviewed recording-track candidates if manual review volume grows.
 - Add an observed-playback duration source only if Spotify/player behavior can be measured reliably without unwanted playback.
 - Add durable `recording_track` schema only after review findings justify promotion semantics.
@@ -196,4 +244,4 @@ Other possible follow-ups:
 - Do not add apply, promotion, overlay, playback, or aggregation behavior based only on saved reviews.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Recording-track candidate rules were tuned from 15 manual reviews: mixed recording-distinct variant labels now become Track Family candidates, structural parts are family/segment relations, explicit/clean can remain same recording with metadata preserved, mono/stereo can remain same recording, and representative selection prefers album -> rerelease/remaster -> single -> soundtrack -> compilation. A catalog propagation gap was fixed: future Spotify track catalog writes fill missing `release_track.duration_ms` with duration provenance, and local repair filled 3833 existing durations. The 49 accepted-mapping duration disagreements remain visible in `GET /debug/tracks/release-track-duration-conflicts` and Identity Audit -> Tracks -> Duration Conflicts; they now have representative durations marked `uncertain_catalog_conflict`. Identity candidate metadata backfill was prioritized with 695 pending `identity_metadata` queue rows at priority 95. Verification passed with affected backend catalog/worker/entity tests, py_compile, frontend build, and `git diff --check`. Next task: continue reviewing duration conflicts or decide whether/how to add a trustworthy observed-playback duration source.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. The latest work added generated recording/track-family cluster cache tables, dirty scoped refresh, `/debug/tracks/recording-track-candidates/by-release/{release_track_id}`, recording-first track views with release-view switching, same-recording "Also appears on" cards, broader "Variations" cards, release-source album cards, listen counts, targeted liked checks, compact homepage album tracklists that keep the queue visible, and repeated Spotify queue-cycle collapse. Generated cluster tables are evidence caches only, not canonical identity. Verification passed with `backend.tests.test_recording_track_candidates`, `backend.tests.test_release_track_detail`, `backend.tests.test_liked_tracks`, py_compile, frontend build, and `git diff --check`. Next task: manual QA the recording/release/variation flows against known catalog examples and active Spotify playback.

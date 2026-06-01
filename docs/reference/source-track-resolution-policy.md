@@ -28,13 +28,14 @@ This policy is evidence and review guidance only. It does not authorize schema c
 Current UI direction:
 - release-track identity is the preferred same-song identity for liked/display state.
 - Activity/Listened display grouping prefers `release_track_id`, then falls back to Spotify track id, then normalized text identity.
-- Track preview payloads expose release-track metadata separately from Spotify track id/URI, and track overlays may show release-track sibling/source-version notes without changing playback identity.
+- Track preview payloads expose release-track metadata separately from Spotify track id/URI, and track overlays may show release, recording, and family relation evidence without changing playback identity.
 - Spotify track IDs remain concrete playback and provider-version identifiers.
 - Future `recording_track` identity should become the default normal-song aggregation layer only after read-only evidence, review policy, and representative playback selection are defined.
 - Current Recording Tracks Identity Audit support is read-only/manual-review only: candidate evidence and saved decisions help inspect quality, but saved reviews do not create or apply `recording_track` identity.
 - `recording_track` should expose release appearances and selectable playback source versions without hiding the underlying `release_track` provenance.
 - Track Family should not be used for playback substitution without returning a playable representative Spotify URI.
-- Future related-album UI should first expose read-only related album appearances from the backend, with exact release-track siblings, then `recording_track` release appearances, then broader Track Family matches.
+- Related-album UI should keep exact release-track source versions, same-recording appearances, and broader Track Family variations visibly distinct. Recording view may default to the representative release appearance; release view should expose same-release source versions.
+- Generated recording/track-family candidate tables are evidence caches only. They are allowed to speed up view lookup, but they are not durable identity promotion tables.
 
 ## Classification Checklist
 
@@ -154,8 +155,8 @@ Classify separate release tracks as the same future `recording_track` when evide
 Strong candidate signals:
 
 - same ISRC
-- compatible title, artist, duration, and release context even when ISRC differs or is missing, especially for remaster, reissue, single, compilation, or soundtrack appearances
-- same or near-identical duration
+- compatible normalized title, primary artist, and release context even when ISRC differs or is missing, especially for remaster, reissue, expanded/deluxe edition, single, compilation, or soundtrack appearances
+- same or near-identical duration as a positive corroborating signal
 - same primary artist
 - compatible title after removing non-identity release/version annotations
 - album relationship is original/single/compilation/soundtrack/rerelease/remaster, not a clearly different performance context
@@ -166,7 +167,7 @@ Potential same-`recording_track` relationships include:
 - album release and single release of the same track
 - compilation or soundtrack appearance of the same track
 - regional rerelease with the same core track
-- remaster or reissue where the song structure and performance are the same
+- remaster, reissue, expanded edition, deluxe edition, or anniversary edition where the song structure and performance are the same
 - mono/stereo variants when evidence supports the same session or master lineage
 - clean/explicit variants when evidence supports the same recording lineage; preserve content-rating metadata for filtering and playback preference
 
@@ -196,6 +197,7 @@ Escalate to Track Family, not same `recording_track`, when the candidate appears
 - an instrumental version
 - a remix or rework
 - a rerecording
+- a live/studio mismatch
 - a radio/edit version with meaningful structural or duration changes
 - a structural segment such as `part 1`, `part 2`, `pt. 1`, intro, interlude, skit, or reprise
 - different named/attributed mix or version labels, unless the exact variant label repeats and strong recording evidence such as same ISRC supports grouping that subgroup
@@ -221,13 +223,13 @@ Classify as same release track only when evidence shows the flag is a metadata a
 
 ### Duration Mismatch
 
-Small `duration_ms` differences can be metadata noise. Larger Spotify catalog duration differences are review signals, not automatic split proof, because unavailable tracks, edition drift, and Spotify display/playback disagreement can make stored duration unreliable.
+Small `duration_ms` differences can be metadata noise. Larger Spotify catalog duration differences are review signals, not automatic split proof, because unavailable tracks, edition drift, and Spotify display/playback disagreement can make stored duration unreliable. Matching durations are useful corroboration, but differing durations do not rule out the same recording or release when normalized title, artist, and release context agree.
 
 Review rules:
 
 - same playback length despite Spotify metadata drift can still be same release track
-- one-to-two second differences require stronger corroborating evidence
-- larger differences require playback evidence, ISRC match, or other strong evidence
+- one-to-two second differences are weak evidence and should not dominate title/artist/release-context agreement
+- larger differences require review, but should not automatically split candidates that share normalized title and compatible artist/release evidence
 - if source mappings are already accepted into the same release track and manual review explains the drift, keep the release join and use a representative duration instead of reopening identity
 - representative durations chosen from conflicting catalog values must be marked uncertain; do not treat the longest or shortest source duration as authoritative without stronger playback evidence
 - consistent duration differences across many sibling tracks may indicate systematic provider metadata drift
