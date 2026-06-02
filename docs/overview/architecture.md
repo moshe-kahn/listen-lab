@@ -72,6 +72,7 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend persistent sticky navigation with project/account popovers
 - frontend playback controls and player state presentation
 - frontend queue organizer, preview-resume handling, album play-all controls, and Recent Likes cache/sync UI
+- frontend playback-action menu for overlay and album play controls, with `Play now`, `Play next`, and `Add to queue` actions backed by the ListenLab queue
 - frontend recording/release track views with same-recording album appearances, broader variation/family album cards, source-version album cards in release view, listen counts, liked-state fallback checks, and in-place album tracklist scrolling/highlighting
 - frontend homepage playback album expansion uses a compact tracklist while keeping the queue visible; repeated Spotify queue cycles are collapsed for display
 - frontend local/full/test mode controls with cached-state indicators

@@ -77,6 +77,7 @@ Current note:
 - track overlays default to recording view on user-facing pages, separate same-recording appearances from broader `Variations`, and keep release-source versions available through the release view
 - release views show source-version albums and identify the representative source instead of listing raw source rows as primary UI
 - track overlays keep Spotify track ID/URI as the concrete playback target even when the display groups release, recording, or family evidence
+- overlay and album play controls ask for `Play now`, `Play next`, or `Add to queue` before mutating playback/queue state; queue-only actions update the frontend ListenLab queue while Spotify track IDs/URIs remain the concrete playback target
 - liked stars are release-track-aware where release identity exists
 - raw Spotify history may include podcast episode rows; keep them in raw history, but exclude them from the current music fact layer unless building podcast features
 - track variant grouping is now policy-driven, with an explicit ambiguous-review queue generated after refresh passes so borderline title families can be inspected with artist context

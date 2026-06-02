@@ -91,7 +91,7 @@ Current `backend/app/main.py` role:
 
 Frontend `App.tsx` current uncommitted scope:
 - Recent Likes cache integration prefers `GET /me/liked-tracks`, keeps direct Spotify latest-likes rows as a labeled fallback, and exposes `Sync Likes` quick sync.
-- Playback/queue work includes queue organizer controls, queue played-state markers, preview playback resume, album play-all, and dropdown outside-click handling.
+- Playback/queue work includes queue organizer controls, queue played-state markers, preview playback resume, album play-all, playback-action choice menus, and dropdown outside-click handling.
 - Further frontend extraction should preserve these behaviors and avoid mixing feature work with component moves.
 
 Backend verification pattern:
@@ -258,6 +258,11 @@ Current uncommitted playback UI behavior:
   - top `with ...` list controls delayed row highlighting and scrolls the first matching row into view
   - row-level `With` artists are clickable but do not trigger hover highlighting
   - row-level `With` clicks open a shared artist page for derived album main artist(s) plus the clicked guest
+  - overlay track play, album row play, homepage album row play, and album `Play all` use `PlaybackActionMenu` before taking action
+  - playback action choices are `Play now`, `Play next`, and `Add to queue`
+  - `Play now` keeps existing playback behavior and album queue seeding
+  - `Play next` and `Add to queue` mutate the frontend ListenLab queue, preserving the active cursor when possible
+  - the menu is portal-rendered so it anchors to the pressed button instead of being clipped or displaced by overlay scroll containers
   - track preview payloads expose top-level release-track metadata copied from the representative `RecentTrack`
   - track overlays default to recording view on user-facing pages, while Identity Audit/Search/Listen Log backend pages may request release view
   - recording view shows same-recording album appearances separately from broader `Variations`; clicking variation/family cards switches the selected album and representative release track

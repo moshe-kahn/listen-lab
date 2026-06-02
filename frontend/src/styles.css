@@ -4488,6 +4488,67 @@ h1 {
   font-weight: 700;
 }
 
+.playback-action-menu {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.playback-action-menu-popover {
+  position: fixed;
+  z-index: 90;
+  width: 166px;
+  padding: 5px;
+  border: 1px solid rgba(125, 255, 172, 0.24);
+  border-radius: 8px;
+  background: rgba(9, 20, 13, 0.96);
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.38);
+  display: grid;
+  gap: 3px;
+}
+
+.playback-action-menu-popover button {
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #dff8e8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+  font-weight: 800;
+  padding: 8px 9px;
+  text-align: left;
+}
+
+.playback-action-menu-popover button:hover,
+.playback-action-menu-popover button:focus-visible {
+  background: rgba(125, 255, 172, 0.14);
+  color: #7dffac;
+  outline: none;
+}
+
+.playback-action-menu-icon {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+}
+
+.playback-action-menu-icon path {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.playback-action-menu-icon-filled path:first-child {
+  fill: currentColor;
+  stroke: none;
+}
+
 .detail-album-track-play-time {
   line-height: 1;
 }

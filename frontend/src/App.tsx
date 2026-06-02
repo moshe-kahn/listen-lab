@@ -171,6 +171,7 @@ import {
   type NormalizedAuditIssue,
 } from "./components/identityAudit/IssueFeed";
 import { FullAnalysisOverlay, LoadingScreen } from "./components/loading/LoadingScreens";
+import { PlaybackActionMenu, type PlaybackAction } from "./components/playback/PlaybackActionMenu";
 import { RecentDebugPage } from "./components/recentDebug/RecentDebugPage";
 import { SearchLookupPage } from "./components/searchLookup/SearchLookupPage";
 import {
@@ -298,6 +299,11 @@ function collaboratorLabel(artistNames: string | null | undefined, selectedArtis
     .filter((name) => name && name.toLocaleLowerCase() !== selectedKey);
   return collaborators.length > 0 ? `with ${collaborators.join(", ")}` : null;
 }
+
+type PlaybackActionRequest = PopupTrackPlaybackOptions & {
+  insertTracks?: PlayerQueueTrack[] | null;
+  trackUri: string | null;
+};
 
 declare global {
   interface Window {
@@ -3648,18 +3654,103 @@ export function App() {
     }
   }
 
-  function handleSelectedPreviewTrackPlay(trackUri: string | null) {
+  function playerQueueTrackFromPlaybackRequest(request: PlaybackActionRequest): PlayerQueueTrack | null {
+    const trackUri = request.trackUri;
+    if (!trackUri) {
+      return null;
+    }
+    const optimisticTrack = request.optimisticTrack;
+    const sourceTrack = request.sourceTrack;
+    return {
+      name: optimisticTrack?.name ?? sourceTrack?.track_name ?? "Spotify Playback",
+      artists: optimisticTrack?.artists ?? sourceTrack?.artist_name ?? "Unknown artist",
+      album: optimisticTrack?.album ?? sourceTrack?.album_name ?? "Unknown album",
+      image: optimisticTrack?.image ?? sourceTrack?.image_url ?? null,
+      uri: trackUri,
+      durationMs: Math.max(0, optimisticTrack?.durationMs ?? sourceTrack?.duration_ms ?? 0),
+      trackId: spotifyTrackIdFromUri(trackUri) ?? sourceTrack?.track_id ?? null,
+      albumId: sourceTrack?.album_id ?? null,
+      artistItems: sourceTrack?.artists ?? artistEntriesFromText(optimisticTrack?.artists ?? sourceTrack?.artist_name),
+      hasReleaseTrackSiblings: sourceTrack ? hasReleaseSiblingForTrackId(sourceTrack.track_id) : null,
+      isLiked: sourceTrack ? recentTrackIsKnownLiked(sourceTrack, spotifyTrackIdFromUri(trackUri)) : null,
+      likedAt: sourceTrack?.liked_at ?? null,
+      releaseTrackId: sourceTrack?.release_track_id ?? null,
+      releaseTrackName: sourceTrack?.release_track_name ?? null,
+      releaseTrackSourceCount: sourceTrack?.release_track_source_count ?? null,
+    };
+  }
+
+  function currentPlayerQueueTrack(): PlayerQueueTrack | null {
+    const displayTrack = currentTrack ?? playerDisplayTrack;
+    if (!displayTrack?.uri) {
+      return null;
+    }
+    const knownTrack = playerDisplayKnownTrack;
+    return {
+      ...displayTrack,
+      trackId: spotifyTrackIdFromUri(displayTrack.uri) ?? knownTrack?.track_id ?? null,
+      albumId: knownTrack?.album_id ?? playerDisplayAlbumId ?? null,
+      artistItems: knownTrack?.artists ?? artistEntriesFromText(displayTrack.artists),
+      hasReleaseTrackSiblings: knownTrack ? hasReleaseSiblingForTrackId(knownTrack.track_id) : null,
+      isLiked: knownTrack ? recentTrackIsKnownLiked(knownTrack, spotifyTrackIdFromUri(displayTrack.uri)) : null,
+      likedAt: knownTrack?.liked_at ?? null,
+      releaseTrackId: knownTrack?.release_track_id ?? null,
+      releaseTrackName: knownTrack?.release_track_name ?? null,
+      releaseTrackSourceCount: knownTrack?.release_track_source_count ?? null,
+    };
+  }
+
+  function insertPlaybackActionTracks(request: PlaybackActionRequest, placement: "next" | "end") {
+    const requestedTracks = request.insertTracks?.length
+      ? request.insertTracks
+      : [playerQueueTrackFromPlaybackRequest(request)].filter((track): track is PlayerQueueTrack => Boolean(track));
+    if (requestedTracks.length === 0) {
+      setPlayerError("This item does not have a playable Spotify track.");
+      return;
+    }
+    const baseTracks = playerQueueTracks.length > 0
+      ? playerQueueTracks
+      : [currentPlayerQueueTrack()].filter((track): track is PlayerQueueTrack => Boolean(track));
+    const currentIdentity = queueTrackIdentity(currentTrack);
+    const fallbackCursor = currentIdentity
+      ? baseTracks.findIndex((track) => queueTrackIdentity(track) === currentIdentity)
+      : -1;
+    const baseCursor = playerQueueSource === "listenlab" && playerQueueCursor != null
+      ? playerQueueCursor
+      : hasActiveQueueCursor
+        ? activeQueueCursor
+      : (fallbackCursor >= 0 ? fallbackCursor : null);
+    const insertAt = placement === "next" && baseCursor != null && baseCursor >= 0
+      ? baseCursor + 1
+      : baseTracks.length;
+    const nextTracks = [
+      ...baseTracks.slice(0, insertAt),
+      ...requestedTracks,
+      ...baseTracks.slice(insertAt),
+    ];
+    setPlayerQueueTracks(nextTracks);
+    setPlayerQueueCursor(baseCursor);
+    setPlayerQueueSource("listenlab");
+    setPlayerQueueCleared(false);
+    setPlayerQueueError(null);
+    setPlayerQueueSortMode("custom");
+    setPlayerQueueGroupMode("custom");
+    setPlayerQueueShuffleEnabled(false);
+    setPlayerQueueShuffleBaseTracks(null);
+    if (!playerQueueContext && request.queueContext) {
+      setPlayerQueueContext(request.queueContext);
+    }
+  }
+
+  async function handlePlaybackAction(action: PlaybackAction, request: PlaybackActionRequest) {
     clearPreviewPlaybackState();
-    setOverlayTrackPlaybackExpanded(true);
-    const albumQueue = buildAlbumPlaybackQueue(trackUri);
-    void handlePopupTrackPlayback(trackUri, {
-      optimisticTrack: selectedPreviewTrackOptimisticSummary,
-      queueCursor: albumQueue?.queueCursor,
-      queueContext: albumQueue?.queueContext,
-      queuePlaylistUris: albumQueue?.playlistUris,
-      queueTracks: albumQueue?.queueTracks,
-      sourceTrack: selectedPreview?.sourceTrack ?? null,
-    });
+    if (action === "play_now") {
+      setOverlayTrackPlaybackExpanded(true);
+      await handlePopupTrackPlayback(request.trackUri, request);
+      return;
+    }
+    await prepareQueueControlAction();
+    insertPlaybackActionTracks(request, action === "play_next" ? "next" : "end");
   }
 
   function buildAlbumPlaybackQueue(
@@ -4656,26 +4747,6 @@ export function App() {
     }, 20_000);
   }
 
-  async function handleAlbumTrackPlay(track: AlbumTrackEntry, trackUri: string | null) {
-    if (!trackUri) {
-      return;
-    }
-    clearPreviewPlaybackState();
-    setOverlayTrackPlaybackExpanded(true);
-    const albumQueue = buildAlbumPlaybackQueue(trackUri);
-    const playbackStarted = await handlePopupTrackPlayback(trackUri, {
-      optimisticTrack: playerSummaryFromAlbumTrack(track),
-      queueCursor: albumQueue?.queueCursor,
-      queueContext: albumQueue?.queueContext,
-      queuePlaylistUris: albumQueue?.playlistUris,
-      queueTracks: albumQueue?.queueTracks,
-      sourceTrack: track.sourceTrack,
-    });
-    if (playbackStarted) {
-      openAlbumTrackPreview(track);
-    }
-  }
-
   async function handleHomeAlbumTrackPlay(track: AlbumTrackEntry, trackUri: string | null) {
     if (!trackUri) {
       return;
@@ -4696,7 +4767,8 @@ export function App() {
     }
   }
 
-  async function handleHomeAlbumPlayAll() {
+  async function handleHomeAlbumPlayAll(action: PlaybackAction = "play_now") {
+    const contextPreview = playerAlbumPreviewContext();
     const firstPlayableTrack = homeAlbumTrackEntries
       .map((track) => ({ track, uri: trackUriWithFallback(track.uri, track.id) }))
       .find((item) => Boolean(item.uri));
@@ -4704,10 +4776,23 @@ export function App() {
       setPlayerError("This album does not have a playable first song.");
       return;
     }
-    await handleHomeAlbumTrackPlay(firstPlayableTrack.track, firstPlayableTrack.uri);
+    const albumQueue = buildAlbumPlaybackQueue(firstPlayableTrack.uri, homeAlbumTrackEntries, contextPreview);
+    await handlePlaybackAction(action, {
+      trackUri: firstPlayableTrack.uri,
+      optimisticTrack: playerSummaryFromAlbumTrack(firstPlayableTrack.track, contextPreview),
+      insertTracks: albumQueue?.queueTracks,
+      queueCursor: albumQueue?.queueCursor,
+      queueContext: albumQueue?.queueContext,
+      queuePlaylistUris: albumQueue?.playlistUris,
+      queueTracks: albumQueue?.queueTracks,
+      sourceTrack: firstPlayableTrack.track.sourceTrack,
+    });
+    if (action === "play_now") {
+      setHomeAlbumExpanded(true);
+    }
   }
 
-  async function handleAlbumPlayAll() {
+  async function handleAlbumPlayAll(action: PlaybackAction = "play_now") {
     const firstPlayableTrack = albumTrackEntries
       .map((track) => ({ track, uri: trackUriWithFallback(track.uri, track.id) }))
       .find((item) => Boolean(item.uri));
@@ -4715,7 +4800,20 @@ export function App() {
       setPlayerError("This album does not have a playable first song.");
       return;
     }
-    await handleAlbumTrackPlay(firstPlayableTrack.track, firstPlayableTrack.uri);
+    const albumQueue = buildAlbumPlaybackQueue(firstPlayableTrack.uri);
+    await handlePlaybackAction(action, {
+      trackUri: firstPlayableTrack.uri,
+      optimisticTrack: playerSummaryFromAlbumTrack(firstPlayableTrack.track),
+      insertTracks: albumQueue?.queueTracks,
+      queueCursor: albumQueue?.queueCursor,
+      queueContext: albumQueue?.queueContext,
+      queuePlaylistUris: albumQueue?.playlistUris,
+      queueTracks: albumQueue?.queueTracks,
+      sourceTrack: firstPlayableTrack.track.sourceTrack,
+    });
+    if (action === "play_now") {
+      openAlbumTrackPreview(firstPlayableTrack.track);
+    }
   }
 
   function handleExperienceModeChange(nextMode: ExperienceMode) {
@@ -9891,9 +9989,13 @@ export function App() {
                 <div className="player-home-album-tracks detail-modal-album-tracks detail-modal-album-tracks-full">
                   <div className="detail-modal-album-header">
                     {hasPremiumPlayback ? (
-                      <button className="detail-album-play-all-button" onClick={() => void handleHomeAlbumPlayAll()} type="button">
+                      <PlaybackActionMenu
+                        ariaLabel="Album playback options"
+                        buttonClassName="detail-album-play-all-button"
+                        onAction={(action) => handleHomeAlbumPlayAll(action)}
+                      >
                         Play all
-                      </button>
+                      </PlaybackActionMenu>
                     ) : (
                       <span aria-hidden="true" />
                     )}
@@ -9950,14 +10052,28 @@ export function App() {
                         return (
                           <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}`} key={track.id ?? track.name}>
                             {hasPremiumPlayback ? (
-                              <button
-                                aria-label={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
-                                className={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
+                              <PlaybackActionMenu
+                                ariaLabel={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
+                                buttonClassName={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
                                 disabled={!rowTrackUri}
-                                onClick={() => {
-                                  void handleHomeAlbumTrackPlay(track, rowTrackUri);
+                                isPlaying={rowPlaying}
+                                onAction={(action) => {
+                                  const contextPreview = playerAlbumPreviewContext();
+                                  const albumQueue = buildAlbumPlaybackQueue(rowTrackUri, homeAlbumTrackEntries, contextPreview);
+                                  return handlePlaybackAction(action, {
+                                    trackUri: rowTrackUri,
+                                    optimisticTrack: playerSummaryFromAlbumTrack(track, contextPreview),
+                                    queueCursor: albumQueue?.queueCursor,
+                                    queueContext: albumQueue?.queueContext,
+                                    queuePlaylistUris: albumQueue?.playlistUris,
+                                    queueTracks: albumQueue?.queueTracks,
+                                    sourceTrack: track.sourceTrack,
+                                  }).then(() => {
+                                    if (action === "play_now") {
+                                      setHomeAlbumExpanded(true);
+                                    }
+                                  });
                                 }}
-                                type="button"
                               >
                                 {rowPlaying ? (
                                   <span className="detail-wave-icon" aria-hidden="true">
@@ -9971,7 +10087,7 @@ export function App() {
                                 <span className={`detail-album-track-play-time${rowPausedCurrent ? " detail-album-track-play-time-flash" : ""}`}>
                                   {rowButtonTimeMs != null ? formatPlaybackClock(rowButtonTimeMs) : "?:??"}
                                 </span>
-                              </button>
+                              </PlaybackActionMenu>
                             ) : null}
                             <button
                               className="detail-album-track-name-button single-line-ellipsis"
@@ -12295,11 +12411,22 @@ export function App() {
               <div className="actions actions-in-card detail-modal-actions">
                 {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewPlaybackTrackUri ? (
                   <div className={`detail-top-play-control${overlayTrackPlaybackExpanded ? " detail-top-play-control-expanded" : ""}`}>
-                    <button
-                      aria-label={isTrackPlaying(selectedPreviewPlaybackTrackUri) ? "Pause in ListenLab" : "Play in ListenLab"}
-                      className={`secondary-button detail-icon-button detail-top-play-toggle${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-icon-button-playing" : ""}`}
-                      onClick={() => handleSelectedPreviewTrackPlay(selectedPreviewPlaybackTrackUri)}
-                      type="button"
+                    <PlaybackActionMenu
+                      ariaLabel={isTrackPlaying(selectedPreviewPlaybackTrackUri) ? "Playback options for selected track" : "Play selected track"}
+                      buttonClassName={`secondary-button detail-icon-button detail-top-play-toggle${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-icon-button-playing" : ""}`}
+                      isPlaying={isTrackPlaying(selectedPreviewPlaybackTrackUri)}
+                      onAction={(action) => {
+                        const albumQueue = buildAlbumPlaybackQueue(selectedPreviewPlaybackTrackUri);
+                        return handlePlaybackAction(action, {
+                          trackUri: selectedPreviewPlaybackTrackUri,
+                          optimisticTrack: selectedPreviewTrackOptimisticSummary,
+                          queueCursor: albumQueue?.queueCursor,
+                          queueContext: albumQueue?.queueContext,
+                          queuePlaylistUris: albumQueue?.playlistUris,
+                          queueTracks: albumQueue?.queueTracks,
+                          sourceTrack: selectedPreview?.sourceTrack ?? null,
+                        });
+                      }}
                     >
                       <span className={`detail-top-play-glyph${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-top-play-glyph-active" : ""}`} aria-hidden="true">
                         {isTrackPlaying(selectedPreviewPlaybackTrackUri) ? (
@@ -12308,7 +12435,7 @@ export function App() {
                           <span className="detail-play-icon">{"\u25B6"}</span>
                         )}
                       </span>
-                    </button>
+                    </PlaybackActionMenu>
                     {overlayTrackPlaybackExpanded ? (
                       <>
                         <span className="detail-top-play-time detail-top-play-time-elapsed">
@@ -12442,9 +12569,13 @@ export function App() {
               <div className={`detail-modal-album-tracks detail-modal-album-tracks-full${selectedPreviewAlbumHasGuestArtists ? "" : " detail-modal-album-tracks-no-with"}`}>
                 <div className="detail-modal-album-header">
                   {hasPremiumPlayback ? (
-                    <button className="detail-album-play-all-button" onClick={() => void handleAlbumPlayAll()} type="button">
+                    <PlaybackActionMenu
+                      ariaLabel="Album playback options"
+                      buttonClassName="detail-album-play-all-button"
+                      onAction={(action) => handleAlbumPlayAll(action)}
+                    >
                       Play all
-                    </button>
+                    </PlaybackActionMenu>
                   ) : (
                     <span aria-hidden="true" />
                   )}
@@ -12522,14 +12653,27 @@ export function App() {
                       return (
 	                        <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}${rowMatchesHighlightedArtist || rowMatchesHoveredWithArtist ? " detail-album-track-row-artist-highlighted" : ""}`} key={track.id ?? track.name}>
 	                          {hasPremiumPlayback ? (
-	                            <button
-                              aria-label={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
-                              className={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
+	                            <PlaybackActionMenu
+                              ariaLabel={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
+                              buttonClassName={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
                               disabled={!rowTrackUri}
-                              onClick={() => {
-                                void handleAlbumTrackPlay(track, rowTrackUri);
+                              isPlaying={rowPlaying}
+                              onAction={(action) => {
+                                const albumQueue = buildAlbumPlaybackQueue(rowTrackUri);
+                                return handlePlaybackAction(action, {
+                                  trackUri: rowTrackUri,
+                                  optimisticTrack: playerSummaryFromAlbumTrack(track),
+                                  queueCursor: albumQueue?.queueCursor,
+                                  queueContext: albumQueue?.queueContext,
+                                  queuePlaylistUris: albumQueue?.playlistUris,
+                                  queueTracks: albumQueue?.queueTracks,
+                                  sourceTrack: track.sourceTrack,
+                                }).then(() => {
+                                  if (action === "play_now") {
+                                    openAlbumTrackPreview(track);
+                                  }
+                                });
                               }}
-                              type="button"
                             >
                               {rowPlaying ? (
                                 <span className="detail-wave-icon" aria-hidden="true">
@@ -12543,7 +12687,7 @@ export function App() {
                               <span className={`detail-album-track-play-time${rowPausedCurrent ? " detail-album-track-play-time-flash" : ""}`}>
                                 {rowButtonTimeMs != null ? formatPlaybackClock(rowButtonTimeMs) : "?:??"}
 	                              </span>
-	                            </button>
+	                            </PlaybackActionMenu>
 	                          ) : <span aria-hidden="true" />}
                           <button
                             className="detail-album-track-name-button single-line-ellipsis"
