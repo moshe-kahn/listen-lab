@@ -4,12 +4,23 @@ import type { ReactNode } from "react";
 
 export type PlaybackAction = "play_now" | "play_next" | "add_to_queue";
 
+export type PlaybackMenuExtraAction = {
+  label: string;
+  ariaLabel?: string;
+  disabled?: boolean;
+  title?: string;
+  icon: "bookmark";
+  onSelect?: () => void | Promise<void>;
+};
+
 type PlaybackActionMenuProps = {
   ariaLabel: string;
   buttonClassName: string;
   disabled?: boolean;
+  extraActions?: PlaybackMenuExtraAction[];
   isPlaying?: boolean;
   menuAlign?: "left" | "right";
+  placement?: "adjacent" | "overlay-trigger";
   onAction: (action: PlaybackAction) => void | Promise<void>;
   children: ReactNode;
 };
@@ -18,8 +29,10 @@ export function PlaybackActionMenu({
   ariaLabel,
   buttonClassName,
   disabled = false,
+  extraActions = [],
   isPlaying = false,
   menuAlign = "left",
+  placement = "adjacent",
   onAction,
   children,
 }: PlaybackActionMenuProps) {
@@ -36,17 +49,26 @@ export function PlaybackActionMenu({
     }
     const width = 166;
     const height = popoverRef.current?.offsetHeight ?? 122;
-    const centeredLeft = rect.left + (rect.width / 2) - (width / 2);
+    const centeredLeft = placement === "overlay-trigger"
+      ? rect.left
+      : rect.left + (rect.width / 2) - (width / 2);
     const left = menuAlign === "right"
       ? Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width))
       : Math.max(8, Math.min(window.innerWidth - width - 8, centeredLeft));
+    if (placement === "overlay-trigger") {
+      setPosition({
+        left,
+        top: Math.max(8, Math.min(window.innerHeight - height - 8, rect.top)),
+      });
+      return;
+    }
     const aboveTop = rect.top - height - 8;
     const belowTop = rect.bottom + 8;
     setPosition({
       left,
       top: aboveTop >= 8 ? aboveTop : Math.min(window.innerHeight - height - 8, belowTop),
     });
-  }, [menuAlign]);
+  }, [menuAlign, placement]);
 
   useLayoutEffect(() => {
     if (open) {
@@ -80,6 +102,14 @@ export function PlaybackActionMenu({
     await onAction(action);
   }
 
+  async function selectExtraAction(action: PlaybackMenuExtraAction) {
+    if (action.disabled || !action.onSelect) {
+      return;
+    }
+    setOpen(false);
+    await action.onSelect();
+  }
+
   return (
     <span className={`playback-action-menu playback-action-menu-${menuAlign}`} ref={rootRef}>
       <button
@@ -96,7 +126,7 @@ export function PlaybackActionMenu({
       </button>
       {open ? createPortal(
         <span
-          className="playback-action-menu-popover"
+          className={`playback-action-menu-popover playback-action-menu-popover-${placement}`}
           ref={popoverRef}
           role="menu"
           style={position ? { left: position.left, top: position.top } : undefined}
@@ -113,6 +143,20 @@ export function PlaybackActionMenu({
             <PlaybackActionIcon kind="queue" />
             <span>Add to queue</span>
           </button>
+          {extraActions.map((action) => (
+            <button
+              aria-label={action.ariaLabel ?? action.label}
+              disabled={action.disabled}
+              key={`${action.icon}-${action.label}`}
+              onClick={() => void selectExtraAction(action)}
+              role="menuitem"
+              title={action.title}
+              type="button"
+            >
+              <PlaybackActionIcon kind={action.icon} />
+              <span>{action.label}</span>
+            </button>
+          ))}
         </span>,
         document.body,
       ) : null}
@@ -120,7 +164,14 @@ export function PlaybackActionMenu({
   );
 }
 
-function PlaybackActionIcon({ kind }: { kind: "play" | "next" | "queue" }) {
+function PlaybackActionIcon({ kind }: { kind: "play" | "next" | "queue" | "bookmark" }) {
+  if (kind === "bookmark") {
+    return (
+      <svg aria-hidden="true" className="playback-action-menu-icon playback-action-menu-icon-filled" viewBox="0 0 20 20">
+        <path d="M5 3.5h10v13l-5-3.2-5 3.2v-13Z" />
+      </svg>
+    );
+  }
   if (kind === "queue") {
     return (
       <svg aria-hidden="true" className="playback-action-menu-icon playback-action-menu-icon-filled" viewBox="0 0 20 20">

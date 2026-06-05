@@ -23,7 +23,10 @@ export type RecentTrack = {
   release_track_id?: number | null;
   release_track_name?: string | null;
   release_track_source_count?: number | null;
+  release_track_duplicate_source_count?: number | null;
   has_release_track_siblings?: boolean | null;
+  release_track_cluster_candidate_type?: string | null;
+  release_track_cluster_relationship_kind?: string | null;
   track_name: string | null;
   artist_name: string | null;
   album_name: string | null;
@@ -136,7 +139,10 @@ export type ReleaseTrackMetadataItem = {
   release_track_id: number;
   release_track_name: string;
   release_track_source_count: number;
+  release_track_duplicate_source_count?: number | null;
   has_release_track_siblings: boolean;
+  release_track_cluster_candidate_type?: string | null;
+  release_track_cluster_relationship_kind?: string | null;
 };
 
 export type ReleaseTrackMetadataResponse = {
@@ -163,6 +169,7 @@ export type ReleaseTrackDetailSourceVersion = {
   explicit: boolean | null;
   playable: boolean | null;
   play_count?: number | null;
+  last_played_at?: string | null;
   spotify_url: string | null;
   is_context: boolean;
   is_playback_choice: boolean;
@@ -1439,7 +1446,10 @@ export type CurrentPlaybackSnapshot = {
   release_track_id?: number | null;
   release_track_name?: string | null;
   release_track_source_count?: number | null;
+  release_track_duplicate_source_count?: number | null;
   has_release_track_siblings?: boolean | null;
+  release_track_cluster_candidate_type?: string | null;
+  release_track_cluster_relationship_kind?: string | null;
   name: string | null;
   uri: string | null;
   image_url: string | null;
@@ -1504,12 +1514,16 @@ export type AlbumTrackEntry = {
   artistName: string | null;
   sourceTrack: RecentTrack | null;
   lastPlayedAt: string | null;
+  playCount: number;
   isSelected: boolean;
   isTopTrack: boolean;
   releaseTrackId: number | null;
   releaseTrackName: string | null;
   releaseTrackSourceCount: number;
+  releaseTrackDuplicateSourceCount: number;
   hasReleaseTrackSiblings: boolean;
+  releaseTrackClusterCandidateType: string | null;
+  releaseTrackClusterRelationshipKind: string | null;
 };
 
 export type SpotifyPlayerInstance = {

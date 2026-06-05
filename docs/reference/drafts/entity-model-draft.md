@@ -64,7 +64,18 @@ Current artist representation is mixed:
 - normalized artist rows exist in `artist`
 - album and track artists connect through `album_artist` and `track_artist`
 
-Fallback/history text paths previously used raw artist strings in stable keys. This could split identities such as:
+Fallback/history text paths can split identities from later provider-backed paths. History import may only know artist text, album text, and track text; Spotify API/catalog paths later provide stable Spotify IDs. If the later provider-backed source is inserted as a new canonical row instead of being reconciled to the text-backed row, the product can show duplicate artists or miss album/track metadata attached to the other row.
+
+Confirmed local example:
+- `Radiohead` exists once as Spotify-backed artist `4Z8W4fKeB5YxbusRsdQVPb`
+- `Radiohead` also exists as a `history_raw` text-backed artist
+- this is not two conflicting Spotify artist IDs; it is a text-only/provider-backed split
+
+The same class applies to albums and tracks:
+- text-only `release_album` rows such as `Kid A` or `Amnesiac` can exist without Spotify album IDs, while Spotify catalog metadata is only attached to source/catalog rows
+- `release_track` has Spotify ID vs Spotify URI reconciliation, but not general safe history-text track to Spotify track reconciliation by title/artist/album/duration/ISRC
+
+Fallback/history text paths previously used raw artist strings in stable keys. This could also split identities such as:
 - `Telekinesis`
 - `Telekinesis, Telekinesis`
 
@@ -76,6 +87,13 @@ That normalization:
 - preserves original raw artist text for display/raw fields
 - does not affect Spotify-ID provider identity paths
 - does not repair existing rows
+
+Required future reconciliation work:
+- audit duplicate `artist` rows by normalized name and source mapping shape
+- prefer provider-backed `artist` rows, then repoint `source_artist_map`, `album_artist`, and `track_artist` from safe text-only duplicates
+- audit duplicate `release_album` candidates by normalized album name + primary artist + year/catalog evidence; names alone are not enough
+- audit duplicate `release_track` candidates by title + artist + album + duration/ISRC/context; names alone are not enough
+- keep catalog backfill enrichment-only; identity mutation should live in explicit dry-run/apply repair or promotion flows
 
 ## Release Duplicate Diagnostics
 

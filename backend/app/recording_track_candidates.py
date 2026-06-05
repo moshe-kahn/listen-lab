@@ -1231,13 +1231,14 @@ def candidate_cluster_metadata_for_release_track_ids(release_track_ids: list[int
                 SELECT
                   m.release_track_id,
                   c.candidate_type,
+                  c.relationship_kind,
                   max(c.member_count) AS cluster_member_count
                 FROM generated_recording_track_cluster_member m
                 JOIN generated_recording_track_cluster c
                   ON c.id = m.cluster_id
                 WHERE m.release_track_id IN ({placeholders})
                   AND c.candidate_type IN ('recording_track_candidate', 'track_family_candidate')
-                GROUP BY m.release_track_id, c.candidate_type
+                GROUP BY m.release_track_id, c.candidate_type, c.relationship_kind
                 """,
                 tuple(sorted(target_ids)),
             ).fetchall()
@@ -1245,12 +1246,18 @@ def candidate_cluster_metadata_for_release_track_ids(release_track_ids: list[int
             for row in rows:
                 release_track_id = int(row["release_track_id"])
                 cluster_member_count = int(row["cluster_member_count"] or 0)
+                candidate_type = str(row["candidate_type"] or "")
                 current = metadata.get(release_track_id)
-                if current and int(current["cluster_member_count"]) >= cluster_member_count:
+                current_is_recording = current and current.get("cluster_candidate_type") == "recording_track_candidate"
+                next_is_recording = candidate_type == "recording_track_candidate"
+                if current_is_recording and not next_is_recording:
+                    continue
+                if current and current_is_recording == next_is_recording and int(current["cluster_member_count"]) >= cluster_member_count:
                     continue
                 metadata[release_track_id] = {
                     "cluster_member_count": cluster_member_count,
-                    "cluster_candidate_type": str(row["candidate_type"] or ""),
+                    "cluster_candidate_type": candidate_type,
+                    "cluster_relationship_kind": str(row["relationship_kind"] or ""),
                 }
             return metadata
 
@@ -1270,11 +1277,16 @@ def candidate_cluster_metadata_for_release_track_ids(release_track_ids: list[int
             continue
         for release_track_id in matched_ids:
             current = metadata.get(release_track_id)
-            if current and int(current["cluster_member_count"]) >= len(member_ids):
+            current_is_recording = current and current.get("cluster_candidate_type") == "recording_track_candidate"
+            next_is_recording = candidate_type == "recording_track_candidate"
+            if current_is_recording and not next_is_recording:
+                continue
+            if current and current_is_recording == next_is_recording and int(current["cluster_member_count"]) >= len(member_ids):
                 continue
             metadata[release_track_id] = {
                 "cluster_member_count": len(member_ids),
                 "cluster_candidate_type": candidate_type,
+                "cluster_relationship_kind": str(item.get("relationship_kind") or ""),
             }
     return metadata
 

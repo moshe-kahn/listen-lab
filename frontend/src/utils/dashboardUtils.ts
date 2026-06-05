@@ -51,13 +51,41 @@ export function parseTimestampMs(value: string | null | undefined): number | nul
   return parsed.getTime();
 }
 
-export function formatMonthDay(value: string | null | undefined): string | null {
+export function formatMonthDay(value: string | null | undefined, includeYearWhenPrevious = false): string | null {
   const parsedMs = parseTimestampMs(value);
   if (parsedMs == null) {
     return null;
   }
   const parsed = new Date(parsedMs);
-  return `${parsed.getMonth() + 1}/${parsed.getDate()}`;
+  const monthDay = `${parsed.getMonth() + 1}/${parsed.getDate()}`;
+  if (!includeYearWhenPrevious || parsed.getFullYear() === new Date().getFullYear()) {
+    return monthDay;
+  }
+  return `${monthDay}/${String(parsed.getFullYear()).slice(-2)}`;
+}
+
+export function formatCompactRelativeAge(value: string | null | undefined): string | null {
+  const parsedMs = parseTimestampMs(value);
+  if (parsedMs == null) {
+    return null;
+  }
+  const deltaMs = Math.max(0, Date.now() - parsedMs);
+  const hours = deltaMs / 3_600_000;
+  const clamp = (value: number) => Math.max(1, Math.min(99, Math.round(value)));
+  if (hours < 24) {
+    return `${clamp(hours)}h`;
+  }
+  const days = hours / 24;
+  if (days < 7) {
+    return `${clamp(days)}d`;
+  }
+  if (days < 60) {
+    return `${clamp(days / 7)}w`;
+  }
+  if (days < 365) {
+    return `${clamp(days / 30.4375)}m`;
+  }
+  return `${clamp(days / 365.25)}y`;
 }
 
 export function primaryArtistName(value: string | null | undefined): string | null {

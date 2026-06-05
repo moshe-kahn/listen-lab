@@ -34,6 +34,7 @@ class ReleaseTrackDetailSourceVersion(TypedDict):
     explicit: bool | None
     playable: bool | None
     play_count: int
+    last_played_at: str | None
     spotify_url: str | None
     is_context: bool
     is_playback_choice: bool
@@ -159,7 +160,8 @@ def get_release_track_detail(
             WITH source_play_counts AS (
               SELECT
                 spotify_track_id,
-                count(*) AS play_count
+                count(*) AS play_count,
+                max(canonical_ended_at) AS last_played_at
               FROM fact_play_event
               WHERE spotify_track_id IS NOT NULL
                 AND trim(spotify_track_id) != ''
@@ -180,7 +182,8 @@ def get_release_track_detail(
               sac.name AS catalog_album_name,
               sac.images_json AS catalog_album_images_json,
               sac.release_date AS catalog_album_release_date,
-              COALESCE(spc.play_count, 0) AS play_count
+              COALESCE(spc.play_count, 0) AS play_count,
+              spc.last_played_at AS last_played_at
             FROM source_track_map stm
             JOIN source_track st
               ON st.id = stm.source_track_id
@@ -249,6 +252,7 @@ def get_release_track_detail(
                 "explicit": _optional_bool(row["catalog_explicit"]),
                 "playable": None,
                 "play_count": int(row["play_count"] or 0),
+                "last_played_at": str(row["last_played_at"]) if row["last_played_at"] else None,
                 "spotify_url": _spotify_track_url(spotify_track_id),
                 "is_context": bool(normalized_context_id and spotify_track_id == normalized_context_id),
                 "is_playback_choice": False,

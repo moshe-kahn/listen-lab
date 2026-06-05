@@ -70,13 +70,98 @@ def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict
         source_track_count = int(row["source_track_count"] or 0)
         cluster_metadata = cluster_metadata_by_release_track_id.get(release_track_id)
         cluster_member_count = int(cluster_metadata["cluster_member_count"]) if cluster_metadata else 0
+        cluster_candidate_type = str(cluster_metadata["cluster_candidate_type"] or "") if cluster_metadata else None
+        cluster_relationship_kind = str(cluster_metadata["cluster_relationship_kind"] or "") if cluster_metadata else None
         metadata[spotify_track_id] = {
             "release_track_id": release_track_id,
             "release_track_name": str(row["release_track_name"] or ""),
             "release_track_source_count": max(source_track_count, cluster_member_count),
+            "release_track_duplicate_source_count": source_track_count,
             "has_release_track_siblings": source_track_count > 1 or cluster_member_count > 1,
+            "release_track_cluster_candidate_type": cluster_candidate_type,
+            "release_track_cluster_relationship_kind": cluster_relationship_kind,
         }
     return metadata
+
+
+def release_track_play_history_for_release_track_ids(release_track_ids: list[int]) -> dict[int, dict[str, Any]]:
+    normalized_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+    if not normalized_ids:
+        return {}
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            f"""
+            WITH release_sources AS (
+              SELECT DISTINCT
+                stm.release_track_id,
+                CASE
+                  WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+                  ELSE st.external_id
+                END AS spotify_track_id,
+                CASE
+                  WHEN st.source_name = 'spotify_uri' THEN st.external_id
+                  ELSE 'spotify:track:' || st.external_id
+                END AS spotify_track_uri
+              FROM source_track_map stm
+              JOIN source_track st
+                ON st.id = stm.source_track_id
+              WHERE stm.status = 'accepted'
+                AND stm.release_track_id IN ({placeholders})
+                AND st.source_name IN ('spotify', 'spotify_uri')
+            )
+            SELECT
+              release_sources.release_track_id,
+              count(DISTINCT plays.id) AS play_count,
+              max(plays.canonical_ended_at) AS last_played_at
+            FROM release_sources
+            JOIN v_fact_play_event_with_sources plays
+              ON (
+                plays.spotify_track_id = release_sources.spotify_track_id
+                OR plays.spotify_track_uri = release_sources.spotify_track_uri
+              )
+            GROUP BY release_sources.release_track_id
+            """,
+            normalized_ids,
+        ).fetchall()
+    return {
+        int(row["release_track_id"]): {
+            "play_count": int(row["play_count"] or 0),
+            "last_played_at": row["last_played_at"],
+        }
+        for row in rows
+    }
+
+
+def play_history_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict[str, Any]]:
+    normalized_ids = sorted({str(track_id or "").strip() for track_id in spotify_track_ids if str(track_id or "").strip()})
+    if not normalized_ids:
+        return {}
+    placeholders = ",".join("?" for _ in normalized_ids)
+    uri_ids = [f"spotify:track:{track_id}" for track_id in normalized_ids]
+    uri_placeholders = ",".join("?" for _ in uri_ids)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+              COALESCE(NULLIF(spotify_track_id, ''), replace(spotify_track_uri, 'spotify:track:', '')) AS spotify_track_id,
+              count(DISTINCT id) AS play_count,
+              max(canonical_ended_at) AS last_played_at
+            FROM v_fact_play_event_with_sources
+            WHERE spotify_track_id IN ({placeholders})
+               OR spotify_track_uri IN ({uri_placeholders})
+            GROUP BY COALESCE(NULLIF(spotify_track_id, ''), replace(spotify_track_uri, 'spotify:track:', ''))
+            """,
+            (*normalized_ids, *uri_ids),
+        ).fetchall()
+    return {
+        str(row["spotify_track_id"] or ""): {
+            "play_count": int(row["play_count"] or 0),
+            "last_played_at": row["last_played_at"],
+        }
+        for row in rows
+        if str(row["spotify_track_id"] or "")
+    }
 
 
 def release_track_metadata_for_history_raw_keys(text_keys: list[str]) -> dict[str, dict[str, Any]]:
@@ -136,11 +221,16 @@ def release_track_metadata_for_history_raw_keys(text_keys: list[str]) -> dict[st
         source_track_count = int(row["source_track_count"] or 0)
         cluster_metadata = cluster_metadata_by_release_track_id.get(release_track_id)
         cluster_member_count = int(cluster_metadata["cluster_member_count"]) if cluster_metadata else 0
+        cluster_candidate_type = str(cluster_metadata["cluster_candidate_type"] or "") if cluster_metadata else None
+        cluster_relationship_kind = str(cluster_metadata["cluster_relationship_kind"] or "") if cluster_metadata else None
         metadata[history_raw_key] = {
             "release_track_id": release_track_id,
             "release_track_name": str(row["release_track_name"] or ""),
             "release_track_source_count": max(source_track_count, cluster_member_count),
+            "release_track_duplicate_source_count": source_track_count,
             "has_release_track_siblings": source_track_count > 1 or cluster_member_count > 1,
+            "release_track_cluster_candidate_type": cluster_candidate_type,
+            "release_track_cluster_relationship_kind": cluster_relationship_kind,
         }
     return metadata
 
@@ -188,8 +278,35 @@ def enrich_track_rows_with_release_metadata(
             row.setdefault("release_track_id", None)
             row.setdefault("release_track_name", None)
             row.setdefault("release_track_source_count", 0)
+            row.setdefault("release_track_duplicate_source_count", 0)
             row.setdefault("has_release_track_siblings", False)
+            row.setdefault("release_track_cluster_candidate_type", None)
+            row.setdefault("release_track_cluster_relationship_kind", None)
         enriched.append(row)
+    play_history_by_release_track_id = release_track_play_history_for_release_track_ids([
+        int(row["release_track_id"])
+        for row in enriched
+        if isinstance(row.get("release_track_id"), int)
+    ])
+    play_history_by_track_id = play_history_for_spotify_ids([
+        str(row.get(track_id_key) or "").strip()
+        for row in enriched
+        if isinstance(row, dict)
+    ])
+    for row in enriched:
+        release_track_id = row.get("release_track_id")
+        track_id = str(row.get(track_id_key) or "").strip()
+        play_history = (
+            play_history_by_release_track_id.get(release_track_id)
+            if isinstance(release_track_id, int)
+            else None
+        ) or play_history_by_track_id.get(track_id)
+        if play_history:
+            row["play_count"] = play_history["play_count"]
+            row["last_played_at"] = play_history["last_played_at"]
+        else:
+            row.setdefault("play_count", 0)
+            row.setdefault("last_played_at", None)
     return enriched
 
 
