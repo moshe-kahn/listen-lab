@@ -163,6 +163,7 @@ import {
   renderIdentityAuditGroup,
   type TrackIdentityAuditExample,
 } from "./components/identityAudit/IdentityAuditDiagnostics";
+import { ArtistDuplicateAuditTab } from "./components/identityAudit/ArtistDuplicateAuditTab";
 import { RecordingTrackCandidatesTab } from "./components/identityAudit/RecordingTrackCandidatesTab";
 import { ReleaseTrackDurationConflictsTab } from "./components/identityAudit/ReleaseTrackDurationConflictsTab";
 import { FormulaLabPage } from "./components/formulaLab/FormulaLabPage";
@@ -7531,23 +7532,6 @@ export function App() {
     );
   }
 
-  function renderArtistIdentityAuditPlaceholder() {
-    return (
-      <div className="identity-audit-grid">
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Artists</h3>
-            <span>Placeholder</span>
-          </div>
-          <p className="identity-audit-tab-copy">
-            Artist audit review is not wired yet. This space is reserved so artist joins can land without mixing them into track or album review.
-          </p>
-          <p className="empty-copy">No artist-specific audit diagnostics are available in this build.</p>
-        </div>
-      </div>
-    );
-  }
-
   function renderTrackIdentityAuditCompositionTab() {
     if (identityAuditError) {
       return <p className="empty-copy">{identityAuditError}</p>;
@@ -8960,7 +8944,7 @@ export function App() {
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "problems" ? renderAlbumIdentityAuditProblemsTab() : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "merge_review" ? renderAlbumIdentityAuditMergeReviewTab() : null}
         {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "catalog" ? renderAlbumIdentityAuditCatalogTab() : null}
-        {identityAuditEntityTab === "artists" ? renderArtistIdentityAuditPlaceholder() : null}
+        {identityAuditEntityTab === "artists" ? <ArtistDuplicateAuditTab /> : null}
       </section>
     );
   }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,8 @@ from typing import Any, Iterator
 
 from backend.app.config import get_settings
 from backend.app.track_variant_policy import classify_label_families
+
+logger = logging.getLogger("listenlabs.db")
 
 SCHEMA_VERSION_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -4023,6 +4026,64 @@ def _create_artist_with_connection(
     return int(cursor.lastrowid)
 
 
+def _find_safe_text_only_artist_for_spotify_promotion(
+    connection: sqlite3.Connection,
+    *,
+    artist_name: str | None,
+) -> int | None:
+    canonical_name = artist_name.strip() if artist_name and artist_name.strip() else None
+    if canonical_name is None:
+        return None
+    normalized_name = _normalize_name(canonical_name)
+    if not normalized_name:
+        return None
+
+    rows = connection.execute(
+        """
+        SELECT
+          a.id AS artist_id,
+          count(sam.id) AS source_map_count,
+          sum(CASE WHEN sa.source_name != 'history_raw' THEN 1 ELSE 0 END) AS provider_map_count
+        FROM artist a
+        LEFT JOIN source_artist_map sam
+          ON sam.artist_id = a.id
+        LEFT JOIN source_artist sa
+          ON sa.id = sam.source_artist_id
+        WHERE COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
+        GROUP BY a.id
+        ORDER BY a.id ASC
+        """,
+        (normalized_name,),
+    ).fetchall()
+    text_only_artist_ids = [
+        int(row["artist_id"])
+        for row in rows
+        if int(row["source_map_count"] or 0) > 0 and int(row["provider_map_count"] or 0) == 0
+    ]
+    provider_artist_ids = [
+        int(row["artist_id"])
+        for row in rows
+        if int(row["provider_map_count"] or 0) > 0
+    ]
+    if provider_artist_ids:
+        logger.warning(
+            "event=spotify_artist_text_promotion_skipped reason=provider_backed_name_collision normalized_name=%s provider_artist_ids=%s text_only_artist_ids=%s",
+            normalized_name,
+            provider_artist_ids,
+            text_only_artist_ids,
+        )
+        return None
+    if len(text_only_artist_ids) == 1:
+        return text_only_artist_ids[0]
+    if len(text_only_artist_ids) > 1:
+        logger.warning(
+            "event=spotify_artist_text_promotion_skipped reason=ambiguous_text_only_artist normalized_name=%s artist_ids=%s",
+            normalized_name,
+            text_only_artist_ids,
+        )
+    return None
+
+
 def _ensure_source_artist_mapping_with_connection(
     connection: sqlite3.Connection,
     *,
@@ -4080,7 +4141,29 @@ def _ensure_source_artist_mapping_with_connection(
             (external_uri, artist_name, raw_payload_json, source_artist_id),
         )
 
-    artist_id = _create_artist_with_connection(connection, artist_name=artist_name)
+    promoted_artist_id = _find_safe_text_only_artist_for_spotify_promotion(
+        connection,
+        artist_name=artist_name,
+    )
+    if promoted_artist_id is not None:
+        artist_id = promoted_artist_id
+        connection.execute(
+            """
+            UPDATE artist
+            SET
+              canonical_name = COALESCE(NULLIF(?, ''), canonical_name),
+              sort_name = COALESCE(NULLIF(?, ''), sort_name),
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE id = ?
+            """,
+            (
+                artist_name.strip() if artist_name and artist_name.strip() else None,
+                _normalize_name(artist_name) if artist_name else None,
+                artist_id,
+            ),
+        )
+    else:
+        artist_id = _create_artist_with_connection(connection, artist_name=artist_name)
     connection.execute(
         """
         INSERT OR IGNORE INTO source_artist_map (

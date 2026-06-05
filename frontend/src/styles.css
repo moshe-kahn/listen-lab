@@ -1196,6 +1196,33 @@ h1 {
   font-weight: 700;
 }
 
+.identity-audit-card-title-button {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: inline-flex;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.identity-audit-card-title-button strong {
+  color: #f7f8f2;
+  display: block;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.identity-audit-card-title-button small {
+  color: #9bc5a6;
+  display: block;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
 .identity-audit-example-header p,
 .identity-audit-note {
   color: #9bc5a6;
@@ -1254,22 +1281,77 @@ h1 {
 
 .identity-audit-variant-main {
   display: grid;
-  gap: 2px;
+  gap: 5px;
   min-width: 0;
 }
 
-.identity-audit-variant-main strong,
-.identity-audit-variant-main span,
-.identity-audit-variant-main code {
+.artist-audit-name-row {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.artist-audit-name-row strong,
+.artist-audit-name-row a,
+.identity-audit-variant-main > code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.identity-audit-variant-main span,
-.identity-audit-variant-main code {
+.artist-audit-name-row span,
+.identity-audit-variant-main > code {
   color: #9bc5a6;
   font-size: 0.76rem;
+}
+
+.artist-audit-inline-inventory {
+  display: grid;
+  gap: 4px;
+}
+
+.artist-audit-inline-inventory-row {
+  align-items: center;
+  color: #9bc5a6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.artist-audit-inventory-label,
+.artist-audit-inventory-empty,
+.artist-audit-inventory-chip {
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.artist-audit-inventory-label {
+  color: #dff8e8;
+  font-weight: 700;
+}
+
+.artist-audit-inventory-empty {
+  color: #7da48a;
+}
+
+.artist-audit-inventory-chip {
+  border-radius: 999px;
+  border: 1px solid rgba(155, 197, 166, 0.18);
+  color: #a9cdb3;
+  max-width: min(100%, 260px);
+  overflow: hidden;
+  padding: 2px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-audit-inventory-chip.artist-audit-common-link {
+  border-color: rgba(248, 232, 161, 0.36);
+  color: #f8e8a1;
+  font-weight: 700;
 }
 
 .identity-audit-variant-stats {

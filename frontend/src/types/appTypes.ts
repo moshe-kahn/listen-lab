@@ -588,6 +588,184 @@ export type ReleaseTrackDurationConflictsResponse = {
   };
 };
 
+export type ArtistSourceMap = {
+  id: number;
+  artist_id: number;
+  source_artist_id: number;
+  source_name: string;
+  external_id: string;
+  external_uri: string | null;
+  source_name_raw: string | null;
+  match_method: string;
+  confidence: number;
+  status: string;
+  is_user_confirmed: number;
+  explanation: string | null;
+};
+
+export type ArtistDuplicateAuditArtist = {
+  artist_id: number;
+  display_name: string;
+  sort_name: string | null;
+  normalized_name?: string | null;
+  provider_backed: boolean;
+  provider_source_ids: Array<{ source_name: string; external_id: string }>;
+  text_only: boolean;
+  source_artist_maps: ArtistSourceMap[];
+  album_artist_link_count: number;
+  track_artist_link_count: number;
+  albums: Array<{
+    release_album_id: number;
+    album_name: string;
+    normalized_name: string | null;
+    release_year: number | null;
+    role: string;
+    billing_index: number | null;
+    credited_as: string | null;
+    match_method: string;
+    confidence: number;
+    source_basis: string | null;
+  }>;
+  tracks: Array<{
+    release_track_id: number;
+    track_name: string;
+    normalized_name: string | null;
+    duration_ms: number | null;
+    role: string;
+    billing_index: number | null;
+    credited_as: string | null;
+    match_method: string;
+    confidence: number;
+    source_basis: string | null;
+    album_names: string[];
+  }>;
+};
+
+export type ArtistExactDuplicateGroup = {
+  normalized_name: string;
+  canonical_name: string;
+  artists: ArtistDuplicateAuditArtist[];
+  recommended_canonical_artist_id: number | null;
+  duplicate_candidate_artist_ids: number[];
+  recommendation_reason: string;
+  category?: string;
+  repairable?: boolean;
+  evidence_by_duplicate_artist_id?: Record<string, Array<Record<string, unknown>>>;
+  evidence_types?: string[];
+  review_reason?: string;
+};
+
+export type ArtistStylizationDuplicateGroup = {
+  category: "stylization";
+  stylization_key: string;
+  normalized_names: string[];
+  repairable: false;
+  reason: string;
+  artists: ArtistDuplicateAuditArtist[];
+};
+
+export type ArtistSimilarSameAlbumGroup = {
+  category: "similar_same_album" | "composite_credit";
+  repairable: false;
+  reason: string;
+  name_similarity?: number;
+  shared_album_count: number;
+  shared_albums: Array<{ release_album_id: number; album_name: string; role: string }>;
+  artists: ArtistDuplicateAuditArtist[];
+};
+
+export type ArtistDuplicateAuditResponse = {
+  groups_found: number;
+  groups: ArtistExactDuplicateGroup[];
+  candidate_categories: {
+    exact_name: {
+      label: string;
+      repairable: true;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    exact_name_identity_evidence_safe_repair: {
+      label: string;
+      repairable: true;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    exact_name_album_title_provider_context_safe_repair: {
+      label: string;
+      repairable: true;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    exact_name_album_title_evidence_safe_repair: {
+      label: string;
+      repairable: true;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    exact_name_only_review: {
+      label: string;
+      repairable: false;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    exact_name_orphan_placeholder_review: {
+      label: string;
+      repairable: false;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    ambiguous_provider_review_only: {
+      label: string;
+      repairable: false;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    exact_name_no_provider_review_only: {
+      label: string;
+      repairable: false;
+      groups: ArtistExactDuplicateGroup[];
+    };
+    stylization: {
+      label: string;
+      repairable: false;
+      groups: ArtistStylizationDuplicateGroup[];
+    };
+    similar_same_album: {
+      label: string;
+      repairable: false;
+      groups: ArtistSimilarSameAlbumGroup[];
+    };
+    composite_credit: {
+      label: string;
+      repairable: false;
+      groups: ArtistSimilarSameAlbumGroup[];
+    };
+  };
+  summary: {
+    exact_name_groups: number;
+    exact_name_identity_evidence_safe_repair_groups?: number;
+    exact_name_album_title_provider_context_safe_repair_groups?: number;
+    exact_name_album_title_evidence_safe_repair_groups?: number;
+    exact_name_only_review_groups?: number;
+    exact_name_orphan_placeholder_review_groups?: number;
+    ambiguous_provider_review_only_groups?: number;
+    exact_name_no_provider_review_only_groups?: number;
+    stylization_groups: number;
+    similar_same_album_groups: number;
+    composite_credit_groups?: number;
+  };
+};
+
+export type ArtistDuplicateRepairResponse = {
+  dry_run: boolean;
+  groups_found: number;
+  safe_groups: Array<{ normalized_name: string; canonical_artist_id: number; duplicate_artist_ids: number[] }>;
+  skipped_groups: Array<{ normalized_name: string; reason: string; artist_ids: number[]; unsafe_artist_ids?: number[] }>;
+  source_mappings_to_move: Array<Record<string, unknown>>;
+  source_mappings_to_delete: Array<Record<string, unknown>>;
+  album_links_to_move: Array<Record<string, unknown>>;
+  album_links_to_delete: Array<Record<string, unknown>>;
+  track_links_to_move: Array<Record<string, unknown>>;
+  track_links_to_delete: Array<Record<string, unknown>>;
+  artist_rows_to_delete: number[];
+  evidence_type_counts: Record<string, number>;
+  artist_rows_deleted?: number[];
+  artist_row_deletes_skipped?: Array<Record<string, unknown>>;
+};
+
 export type RecordingTrackCandidatesSummary = {
   total_candidate_groups: number;
   source_tracks_with_isrc_available?: number;

@@ -3,6 +3,8 @@ import type {
   AlbumDuplicateLookupResponse,
   AlbumNameDuplicateLookupResponse,
   ArtistAlbumEvidenceResponse,
+  ArtistDuplicateAuditResponse,
+  ArtistDuplicateRepairResponse,
   CatalogBackfillCoverageResponse,
   CatalogBackfillEnqueueResponse,
   CatalogBackfillQueueReasonFilter,
@@ -630,6 +632,55 @@ export async function fetchIdentityAudit(): Promise<TrackIdentityAuditResponse> 
       throw new Error(`Identity Audit (${response.status}): ${detail}`);
     }
     return (await response.json()) as TrackIdentityAuditResponse;
+  }
+
+export async function fetchArtistDuplicateAudit(): Promise<ArtistDuplicateAuditResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/artists/duplicate-audit`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load artist duplicate audit.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Artist Duplicate Audit (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ArtistDuplicateAuditResponse;
+  }
+
+export async function repairArtistDuplicates(dryRun: boolean = true): Promise<ArtistDuplicateRepairResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/artists/duplicate-repair?dry_run=${encodeURIComponent(String(dryRun))}`,
+      {
+        method: "POST",
+        credentials: "include",
+      },
+    );
+    if (!response.ok) {
+      let detail = "Failed to repair artist duplicates.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Artist Duplicate Repair (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ArtistDuplicateRepairResponse;
   }
 
 export async function fetchIdentityAuditSuggestedGroups(): Promise<SuggestedGroupsResponse> {
