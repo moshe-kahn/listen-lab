@@ -57,6 +57,13 @@ def _spotify_album_url(album_id: str | None) -> str | None:
     return f"https://open.spotify.com/album/{album_id}" if album_id else None
 
 
+def _dedupe_key(item: dict[str, Any]) -> str:
+    album_id = str(item.get("album_id") or "").strip()
+    if album_id:
+        return f"id:{album_id}"
+    return f"name:{_normalize_name(item.get('album_name'))}"
+
+
 def _relationship_for_single(
     target_name: str,
     album_artist_names: list[str],
@@ -96,6 +103,101 @@ def _relationship_for_shared(
     return "unknown", "All selected artists present in album/track evidence"
 
 
+def _entity_album_evidence(
+    connection: sqlite3.Connection,
+    targets: list[str],
+) -> list[dict[str, Any]]:
+    target_keys = {_normalize_name(name) for name in targets}
+    if not target_keys:
+        return []
+
+    album_rows = connection.execute(
+        """
+        SELECT
+          ra.id AS release_album_id,
+          ra.primary_name AS album_name,
+          ra.release_year AS release_year,
+          a.canonical_name AS artist_name,
+          aa.billing_index AS billing_index,
+          sa.source_name AS source_name,
+          sa.external_id AS source_album_external_id,
+          COUNT(DISTINCT at.release_track_id) AS track_count
+        FROM album_artist aa
+        JOIN artist a
+          ON a.id = aa.artist_id
+        JOIN release_album ra
+          ON ra.id = aa.release_album_id
+        LEFT JOIN album_track at
+          ON at.release_album_id = ra.id
+        LEFT JOIN source_album_map sam
+          ON sam.release_album_id = ra.id
+         AND sam.status = 'accepted'
+        LEFT JOIN source_album sa
+          ON sa.id = sam.source_album_id
+         AND sa.source_name = 'spotify'
+        WHERE aa.role = 'primary'
+        GROUP BY ra.id, a.id, sa.id
+        ORDER BY ra.primary_name, aa.billing_index, a.canonical_name
+        """
+    ).fetchall()
+
+    albums: dict[int, dict[str, Any]] = {}
+    for row in album_rows:
+        release_album_id = int(row["release_album_id"])
+        entry = albums.setdefault(
+            release_album_id,
+            {
+                "album_name": str(row["album_name"] or "").strip(),
+                "release_year": str(row["release_year"]) if row["release_year"] is not None else None,
+                "spotify_album_id": None,
+                "track_count": 0,
+                "album_artist_names": [],
+                "album_artist_keys": set(),
+            },
+        )
+        artist_name = str(row["artist_name"] or "").strip()
+        artist_key = _normalize_name(artist_name)
+        if artist_name and artist_key and artist_key not in entry["album_artist_keys"]:
+            entry["album_artist_keys"].add(artist_key)
+            entry["album_artist_names"].append(artist_name)
+        source_album_id = str(row["source_album_external_id"] or "").strip()
+        if source_album_id and not entry["spotify_album_id"]:
+            entry["spotify_album_id"] = source_album_id
+        entry["track_count"] = max(int(entry["track_count"] or 0), int(row["track_count"] or 0))
+
+    items_by_name: dict[str, dict[str, Any]] = {}
+    for entry in albums.values():
+        album_name = str(entry["album_name"] or "").strip()
+        if not album_name:
+            continue
+        album_artist_keys = set(entry["album_artist_keys"])
+        if not target_keys.issubset(album_artist_keys):
+            continue
+        album_id = str(entry["spotify_album_id"] or "").strip() or None
+        track_count = int(entry["track_count"] or 0)
+        item = {
+            "album_id": album_id,
+            "album_name": album_name,
+            "album_artist_names": list(entry["album_artist_names"]),
+            "image_url": None,
+            "url": _spotify_album_url(album_id),
+            "release_year": entry["release_year"],
+            "total_tracks": track_count or None,
+            "cached_track_count": track_count,
+            "matching_artist_names": targets,
+            "matching_track_count_by_artist": {name: 0 for name in targets},
+            "all_targets_present": True,
+            "tracklist_complete": False,
+            "relationship": "album",
+            "evidence": "Internal album artist link",
+        }
+        name_key = _normalize_name(album_name)
+        existing = items_by_name.get(name_key)
+        if not existing or (not existing.get("album_id") and album_id):
+            items_by_name[name_key] = item
+    return list(items_by_name.values())
+
+
 def list_artist_album_evidence(
     artist_names: list[str],
     source_album_id: str | None = None,
@@ -127,6 +229,7 @@ def list_artist_album_evidence(
             WHERE lower(COALESCE(last_status, '')) != 'error'
             """
         ).fetchall()
+        entity_items = _entity_album_evidence(connection, targets)
 
     tracks_by_album: dict[str, list[sqlite3.Row]] = {}
     for row in track_rows:
@@ -216,6 +319,13 @@ def list_artist_album_evidence(
                 "evidence": evidence,
             }
         )
+
+    existing_keys = {_dedupe_key(item) for item in items}
+    for entity_item in entity_items:
+        key = _dedupe_key(entity_item)
+        if key not in existing_keys:
+            existing_keys.add(key)
+            items.append(entity_item)
 
     relationship_rank = {"album": 0, "appears_on": 1, "unknown": 2}
 

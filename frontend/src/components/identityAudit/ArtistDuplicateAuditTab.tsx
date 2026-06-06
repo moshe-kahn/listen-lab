@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { fetchArtistDuplicateAudit, repairArtistDuplicates } from "../../api/appApi";
+import { cleanupArtistCompositeCredits, fetchArtistDuplicateAudit, repairArtistDuplicates } from "../../api/appApi";
 import type {
+  ArtistCompositeCreditCleanupResponse,
   ArtistDuplicateAuditArtist,
   ArtistDuplicateAuditResponse,
   ArtistDuplicateRepairResponse,
@@ -249,11 +250,14 @@ function evidenceSummary(plan: ArtistDuplicateRepairResponse | null) {
 export function ArtistDuplicateAuditTab() {
   const [audit, setAudit] = useState<ArtistDuplicateAuditResponse | null>(null);
   const [repairPlan, setRepairPlan] = useState<ArtistDuplicateRepairResponse | null>(null);
+  const [compositeCleanupPlan, setCompositeCleanupPlan] = useState<ArtistCompositeCreditCleanupResponse | null>(null);
   const [category, setCategory] = useState<ArtistAuditCategory>("exact_name");
   const [loading, setLoading] = useState(false);
   const [repairLoading, setRepairLoading] = useState(false);
+  const [compositeCleanupLoading, setCompositeCleanupLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
+  const [compositeCleanupError, setCompositeCleanupError] = useState<string | null>(null);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | null>(null);
   const [lastRepairAt, setLastRepairAt] = useState<string | null>(null);
 
@@ -297,6 +301,32 @@ export function ArtistDuplicateAuditTab() {
     }
   }
 
+  async function runCompositeCleanup(dryRun: boolean) {
+    if (!dryRun) {
+      const albumDeleteCount = compositeCleanupPlan?.album_links_to_delete.length ?? 0;
+      const trackDeleteCount = compositeCleanupPlan?.track_links_to_delete.length ?? 0;
+      const ok = window.confirm(
+        `Apply composite credit cleanup?\n\nOnly ready composite credit groups are modified. Review-only groups and provider-backed comma artist names are not modified.\n\nPlanned deletes:\n${albumDeleteCount} album links\n${trackDeleteCount} track links`,
+      );
+      if (!ok) {
+        return;
+      }
+    }
+    setCompositeCleanupLoading(true);
+    setCompositeCleanupError(null);
+    try {
+      const payload = await cleanupArtistCompositeCredits(dryRun);
+      setCompositeCleanupPlan(payload);
+      if (!dryRun) {
+        await loadAudit();
+      }
+    } catch (loadError) {
+      setCompositeCleanupError(loadError instanceof Error ? loadError.message : "Failed to run composite credit cleanup.");
+    } finally {
+      setCompositeCleanupLoading(false);
+    }
+  }
+
   useEffect(() => {
     void loadAudit();
   }, []);
@@ -309,6 +339,11 @@ export function ArtistDuplicateAuditTab() {
   }, [audit, category]);
 
   const canApplyRepair = Boolean(repairPlan?.dry_run && repairPlan.safe_groups.length > 0 && repairCount(repairPlan) > 0);
+  const canApplyCompositeCleanup = Boolean(
+    compositeCleanupPlan?.dry_run
+    && compositeCleanupPlan.safe_groups.length > 0
+    && (compositeCleanupPlan.album_links_to_delete.length + compositeCleanupPlan.track_links_to_delete.length) > 0,
+  );
 
   const visibleCategories = useMemo(() => {
     if (!audit) {
@@ -354,6 +389,12 @@ export function ArtistDuplicateAuditTab() {
             <button className="secondary-button" disabled={repairLoading || !canApplyRepair} onClick={() => void runRepair(false)} type="button">
               Apply Repair
             </button>
+            <button className="secondary-button" disabled={compositeCleanupLoading} onClick={() => void runCompositeCleanup(true)} type="button">
+              {compositeCleanupLoading ? "Running..." : "Dry Run Composite"}
+            </button>
+            <button className="secondary-button" disabled={compositeCleanupLoading || !canApplyCompositeCleanup} onClick={() => void runCompositeCleanup(false)} type="button">
+              Apply Composite
+            </button>
           </div>
         </div>
         <div className="identity-audit-ambiguous-summary">
@@ -385,6 +426,7 @@ export function ArtistDuplicateAuditTab() {
         </div>
         {error ? <p className="empty-copy">{error}</p> : null}
         {repairError ? <p className="empty-copy">{repairError}</p> : null}
+        {compositeCleanupError ? <p className="empty-copy">{compositeCleanupError}</p> : null}
         {repairPlan ? (
           <div className="identity-audit-stats">
             <span className="identity-audit-stat"><span>Safe groups</span><strong>{repairPlan.safe_groups.length}</strong></span>
@@ -396,6 +438,15 @@ export function ArtistDuplicateAuditTab() {
             {Object.entries(repairPlan.evidence_type_counts ?? {}).map(([type, count]) => (
               <span className="identity-audit-stat" key={`artist-repair-evidence-${type}`}><span>{type}</span><strong>{count}</strong></span>
             ))}
+          </div>
+        ) : null}
+        {compositeCleanupPlan ? (
+          <div className="identity-audit-stats">
+            <span className="identity-audit-stat"><span>Composite safe groups</span><strong>{compositeCleanupPlan.safe_groups.length}</strong></span>
+            <span className="identity-audit-stat"><span>Composite skipped</span><strong>{compositeCleanupPlan.skipped_groups.length}</strong></span>
+            <span className="identity-audit-stat"><span>Composite album links</span><strong>{compositeCleanupPlan.album_links_to_delete.length} delete</strong></span>
+            <span className="identity-audit-stat"><span>Composite track links</span><strong>{compositeCleanupPlan.track_links_to_delete.length} delete</strong></span>
+            <span className="identity-audit-stat"><span>Composite artists</span><strong>{compositeCleanupPlan.artist_rows_to_delete.length} check orphan</strong></span>
           </div>
         ) : null}
         {!loading && !error && activeGroups.length === 0 ? <p className="empty-copy">No artist duplicate candidates in this category.</p> : null}
@@ -432,9 +483,15 @@ export function ArtistDuplicateAuditTab() {
               <div className="identity-audit-example-header">
                 {renderGroupTitle(
                   group.normalized_names.join(" / "),
-                  `${group.artists.length} artist rows · key ${group.stylization_key}`,
+                  `${group.artists.length} rows · uniform ${group.uniform_matching_text ?? group.matching_key ?? group.stylization_key}`,
                 )}
                 <span className="identity-audit-type-badge recording-track-warn">review only</span>
+              </div>
+              <div className="identity-audit-stats">
+                <span className="identity-audit-stat">
+                  <span>matching key</span>
+                  <strong>{group.matching_key ?? group.stylization_key}</strong>
+                </span>
               </div>
               {renderArtistRows(group.artists)}
             </article>
@@ -457,6 +514,22 @@ export function ArtistDuplicateAuditTab() {
                     <strong>{album.album_name}</strong>
                   </span>
                 ))}
+                {group.cleanup_plan ? (
+                  <>
+                    <span className="identity-audit-stat">
+                      <span>credit parts</span>
+                      <strong>{group.cleanup_plan.credit_parts.map((part) => part.display_name).join(" + ")}</strong>
+                    </span>
+                    <span className="identity-audit-stat">
+                      <span>cleanup</span>
+                      <strong>{group.cleanup_plan.ready_for_cleanup ? "ready for dry-run cleanup" : "needs review"}</strong>
+                    </span>
+                    <span className="identity-audit-stat">
+                      <span>planned deletes</span>
+                      <strong>{group.cleanup_plan.album_links_to_delete.length} album · {group.cleanup_plan.track_links_to_delete.length} track</strong>
+                    </span>
+                  </>
+                ) : null}
               </div>
               {renderArtistRows(group.artists)}
             </article>

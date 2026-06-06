@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.app.db import (
+    backfill_spotify_source_entities,
     complete_ingest_run_and_patch_spotify_sync_state,
     get_spotify_sync_state,
     insert_ingest_run,
@@ -238,10 +239,16 @@ def ingest_spotify_recent_rows(
     row_outcomes: list[dict[str, Any]] = []
 
     canonical_projection_summary: dict[str, Any] | None = None
+    downstream_entity_summary: dict[str, Any] = {
+        "ran": False,
+        "skipped_reason": None,
+        "steps": {},
+    }
     raw_inserts_elapsed_ms = 0.0
     final_commit_elapsed_ms = 0.0
     matcher_elapsed_ms = 0.0
     projector_elapsed_ms = 0.0
+    entity_backfill_elapsed_ms = 0.0
     last_heartbeat_touch = perf_counter()
     try:
         _annotate_recent_fallback_sequences(rows)
@@ -404,12 +411,27 @@ def ingest_spotify_recent_rows(
         matcher_elapsed_ms = float(canonical_projection_summary.get("matcher_ms", 0.0))
         projector_elapsed_ms = float(canonical_projection_summary.get("projector_ms", projector_elapsed_ms))
 
+        if inserted_count > 0:
+            entity_backfill_started = perf_counter()
+            spotify_exact = backfill_spotify_source_entities()
+            entity_backfill_elapsed_ms = (perf_counter() - entity_backfill_started) * 1000
+            downstream_entity_summary = {
+                "ran": True,
+                "skipped_reason": None,
+                "steps": {
+                    "backfill_spotify_source_entities": spotify_exact,
+                },
+            }
+        else:
+            downstream_entity_summary["skipped_reason"] = "no_new_rows_inserted"
+
         patch_ingest_run_timing_phases(
             run_id=run_id,
             timing_phases_ms={
                 "raw_inserts_ms": raw_inserts_elapsed_ms,
                 "matcher_ms": matcher_elapsed_ms,
                 "projector_ms": projector_elapsed_ms,
+                "entity_backfill_ms": entity_backfill_elapsed_ms,
                 "final_commit_ms": final_commit_elapsed_ms,
                 "total_duration_ms": (perf_counter() - total_started) * 1000,
             },
@@ -439,6 +461,7 @@ def ingest_spotify_recent_rows(
         "last_successful_played_at": max_played_at,
         "row_outcomes": row_outcomes,
         "canonical_projection_summary": canonical_projection_summary,
+        "downstream_entity_summary": downstream_entity_summary,
     }
 
 

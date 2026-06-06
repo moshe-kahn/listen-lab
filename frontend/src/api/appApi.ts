@@ -3,6 +3,7 @@ import type {
   AlbumDuplicateLookupResponse,
   AlbumNameDuplicateLookupResponse,
   ArtistAlbumEvidenceResponse,
+  ArtistCompositeCreditCleanupResponse,
   ArtistDuplicateAuditResponse,
   ArtistDuplicateRepairResponse,
   CatalogBackfillCoverageResponse,
@@ -681,6 +682,32 @@ export async function repairArtistDuplicates(dryRun: boolean = true): Promise<Ar
       throw new Error(`Artist Duplicate Repair (${response.status}): ${detail}`);
     }
     return (await response.json()) as ArtistDuplicateRepairResponse;
+  }
+
+export async function cleanupArtistCompositeCredits(dryRun: boolean = true): Promise<ArtistCompositeCreditCleanupResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/artists/composite-credit-cleanup?dry_run=${encodeURIComponent(String(dryRun))}`,
+      {
+        method: "POST",
+        credentials: "include",
+      },
+    );
+    if (!response.ok) {
+      let detail = "Failed to clean up artist composite credits.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Artist Composite Credit Cleanup (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ArtistCompositeCreditCleanupResponse;
   }
 
 export async function fetchIdentityAuditSuggestedGroups(): Promise<SuggestedGroupsResponse> {

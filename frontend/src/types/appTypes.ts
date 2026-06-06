@@ -658,10 +658,28 @@ export type ArtistExactDuplicateGroup = {
 export type ArtistStylizationDuplicateGroup = {
   category: "stylization";
   stylization_key: string;
+  matching_key?: string;
+  uniform_matching_text?: string;
   normalized_names: string[];
   repairable: false;
   reason: string;
   artists: ArtistDuplicateAuditArtist[];
+};
+
+export type ArtistCompositeCleanupPlan = {
+  composite_artist_id: number;
+  composite_display_name: string;
+  credit_parts: Array<{ display_name: string; normalized_name: string }>;
+  matched_parts: Array<{ display_name: string; normalized_name: string; matched_artist_ids: number[] }>;
+  missing_parts: Array<{ display_name: string; normalized_name: string; matched_artist_ids: number[] }>;
+  ambiguous_parts: Array<{ display_name: string; normalized_name: string; matched_artist_ids: number[] }>;
+  matched_artist_ids: number[];
+  all_parts_matched: boolean;
+  album_links_to_delete: Array<{ link_id: number; release_album_id: number; artist_id: number; role: string }>;
+  album_links_to_insert: Array<{ release_album_id: number; artist_id: number; role: string }>;
+  track_links_to_delete: Array<{ link_id: number; release_track_id: number; artist_id: number; role: string; matched_artist_ids: number[] }>;
+  track_links_review_only: Array<{ link_id: number; release_track_id: number; artist_id: number; role: string; matched_artist_ids: number[]; missing_artist_ids: number[] }>;
+  ready_for_cleanup: boolean;
 };
 
 export type ArtistSimilarSameAlbumGroup = {
@@ -671,6 +689,8 @@ export type ArtistSimilarSameAlbumGroup = {
   name_similarity?: number;
   shared_album_count: number;
   shared_albums: Array<{ release_album_id: number; album_name: string; role: string }>;
+  composite_artist_id?: number;
+  cleanup_plan?: ArtistCompositeCleanupPlan;
   artists: ArtistDuplicateAuditArtist[];
 };
 
@@ -762,6 +782,25 @@ export type ArtistDuplicateRepairResponse = {
   track_links_to_delete: Array<Record<string, unknown>>;
   artist_rows_to_delete: number[];
   evidence_type_counts: Record<string, number>;
+  artist_rows_deleted?: number[];
+  artist_row_deletes_skipped?: Array<Record<string, unknown>>;
+};
+
+export type ArtistCompositeCreditCleanupResponse = {
+  dry_run: boolean;
+  groups_found: number;
+  safe_groups: Array<{
+    composite_artist_id: number;
+    composite_display_name: string;
+    matched_artist_ids: number[];
+    credit_parts: Array<{ display_name: string; normalized_name: string }>;
+    album_links_to_delete: Array<Record<string, unknown>>;
+    track_links_to_delete: Array<Record<string, unknown>>;
+  }>;
+  skipped_groups: Array<Record<string, unknown>>;
+  album_links_to_delete: Array<Record<string, unknown>>;
+  track_links_to_delete: Array<Record<string, unknown>>;
+  artist_rows_to_delete: number[];
   artist_rows_deleted?: number[];
   artist_row_deletes_skipped?: Array<Record<string, unknown>>;
 };

@@ -303,6 +303,13 @@ These items are explicitly deferred until after the MVP is stable.
 ### Phase 2.3 - Concert Awareness
 - Explore third-party integrations for concert discovery near the user.
 
+### Low-Priority Future Model - Artist Groups And Musicians
+- Consider a separate musician/member graph after artist identity repair and MVP scoring are stable.
+- Current `artist` rows should continue to represent credited performing entities, so durable group names such as `Crosby, Stills & Nash`, `Crosby, Stills, Nash & Young`, `Earth, Wind & Fire`, and `Peter, Paul and Mary` remain valid artist identities.
+- A future model could add `musician` or person-level identity plus `artist_member` links from group artists to musician/solo-artist identities, with optional membership date ranges and roles.
+- This should not block current composite-credit cleanup. Raw composite credits such as `Dave Harrington, Tim Mislock` can still be repaired separately when album/track evidence proves they are separate credited artists.
+- Do not infer group membership or split provider-backed group names merely because a comma, ampersand, or member name appears in the artist display name.
+
 ## Roadmap Validation Checklist
 The roadmap is ready to execute when:
 - each milestone maps cleanly to the architecture doc

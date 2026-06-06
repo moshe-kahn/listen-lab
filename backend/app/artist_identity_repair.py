@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import unicodedata
+import re
 from collections import defaultdict
 from difflib import SequenceMatcher
 from typing import Any
@@ -92,6 +93,32 @@ def _stylization_key(value: str | None) -> str | None:
     without_marks = "".join(char for char in normalized if not unicodedata.combining(char))
     folded = "".join(char.lower() for char in without_marks if char.isalnum())
     return folded or None
+
+
+def _uniform_artist_match_text(value: str | None) -> str | None:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    without_marks = "".join(char for char in normalized if not unicodedata.combining(char))
+    folded = "".join(char.lower() if char.isalnum() else " " for char in without_marks)
+    uniform = " ".join(folded.split())
+    return uniform or None
+
+
+def _split_composite_credit_parts(value: str | None) -> list[dict[str, str]]:
+    if not _is_composite_credit_name(value):
+        return []
+    seen: set[str] = set()
+    parts: list[dict[str, str]] = []
+    raw_parts = str(value or "").split(",")
+    for index, raw_part in enumerate(raw_parts):
+        display = " ".join(raw_part.strip().split())
+        if index == len(raw_parts) - 1:
+            display = re.sub(r"\s+(?:&|and)\s+friends\.?$", "", display, flags=re.IGNORECASE).strip()
+        normalized = _normalize_name(display)
+        if not display or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        parts.append({"display_name": display, "normalized_name": normalized})
+    return parts if len(parts) > 1 else []
 
 
 def _has_non_latin_text(value: str | None) -> bool:
@@ -751,6 +778,8 @@ def _build_stylization_groups(connection: sqlite3.Connection, artist_rows: list[
             {
                 "category": "stylization",
                 "stylization_key": key,
+                "matching_key": key,
+                "uniform_matching_text": _uniform_artist_match_text(str(rows[0]["canonical_name"] or rows[0]["sort_name"] or "")),
                 "normalized_names": sorted(str(name) for name in normalized_names),
                 "repairable": False,
                 "reason": "accent_punctuation_or_spacing_variant",
@@ -761,6 +790,153 @@ def _build_stylization_groups(connection: sqlite3.Connection, artist_rows: list[
             }
         )
     return groups
+
+
+def _build_composite_credit_cleanup_plan(
+    connection: sqlite3.Connection,
+    *,
+    composite_artist_id: int,
+    release_album_id: int | None,
+    role: str,
+    artist_ids: set[int],
+    row_by_id: dict[int, sqlite3.Row],
+) -> dict[str, Any]:
+    composite_name = str(row_by_id[composite_artist_id]["canonical_name"] or "")
+    credit_parts = _split_composite_credit_parts(composite_name)
+    candidate_artist_ids = [artist_id for artist_id in sorted(artist_ids) if artist_id != composite_artist_id]
+    matched_parts: list[dict[str, Any]] = []
+    ambiguous_parts: list[dict[str, Any]] = []
+    missing_parts: list[dict[str, Any]] = []
+    matched_artist_ids: list[int] = []
+
+    for part in credit_parts:
+        matching_artist_ids = [
+            artist_id
+            for artist_id in candidate_artist_ids
+            if _normalize_name(str(row_by_id[artist_id]["canonical_name"] or row_by_id[artist_id]["sort_name"] or ""))
+            == part["normalized_name"]
+        ]
+        part_payload = {**part, "matched_artist_ids": matching_artist_ids}
+        if len(matching_artist_ids) == 1:
+            matched_parts.append(part_payload)
+            matched_artist_ids.append(matching_artist_ids[0])
+        elif len(matching_artist_ids) > 1:
+            ambiguous_parts.append(part_payload)
+        else:
+            missing_parts.append(part_payload)
+
+    album_links_to_delete: list[dict[str, Any]] = []
+    album_links_to_insert: list[dict[str, Any]] = []
+    track_links_to_delete: list[dict[str, Any]] = []
+    track_links_review_only: list[dict[str, Any]] = []
+    all_parts_matched = bool(credit_parts) and len(matched_parts) == len(credit_parts)
+
+    if all_parts_matched and release_album_id is not None:
+        composite_album_links = connection.execute(
+            """
+            SELECT id
+            FROM album_artist
+            WHERE release_album_id = ?
+              AND artist_id = ?
+              AND COALESCE(role, 'primary') = ?
+            ORDER BY id ASC
+            """,
+            (release_album_id, composite_artist_id, role),
+        ).fetchall()
+        for row in composite_album_links:
+            album_links_to_delete.append(
+                {
+                    "link_id": int(row["id"]),
+                    "release_album_id": release_album_id,
+                    "artist_id": composite_artist_id,
+                    "role": role,
+                }
+            )
+
+        for artist_id in matched_artist_ids:
+            existing = connection.execute(
+                """
+                SELECT id
+                FROM album_artist
+                WHERE release_album_id = ?
+                  AND artist_id = ?
+                  AND COALESCE(role, 'primary') = ?
+                LIMIT 1
+                """,
+                (release_album_id, artist_id, role),
+            ).fetchone()
+            if existing is None:
+                album_links_to_insert.append(
+                    {
+                        "release_album_id": release_album_id,
+                        "artist_id": artist_id,
+                        "role": role,
+                    }
+                )
+
+        composite_track_links = connection.execute(
+            """
+            SELECT ta.id, ta.release_track_id
+            FROM track_artist ta
+            JOIN album_track at
+              ON at.release_track_id = ta.release_track_id
+            WHERE at.release_album_id = ?
+              AND ta.artist_id = ?
+              AND COALESCE(ta.role, 'primary') = ?
+            ORDER BY ta.release_track_id ASC, ta.id ASC
+            """,
+            (release_album_id, composite_artist_id, role),
+        ).fetchall()
+        for row in composite_track_links:
+            release_track_id = int(row["release_track_id"])
+            missing_track_artist_ids = [
+                artist_id
+                for artist_id in matched_artist_ids
+                if connection.execute(
+                    """
+                    SELECT 1
+                    FROM track_artist
+                    WHERE release_track_id = ?
+                      AND artist_id = ?
+                      AND COALESCE(role, 'primary') = ?
+                    LIMIT 1
+                    """,
+                    (release_track_id, artist_id, role),
+                ).fetchone()
+                is None
+            ]
+            payload = {
+                "link_id": int(row["id"]),
+                "release_track_id": release_track_id,
+                "artist_id": composite_artist_id,
+                "role": role,
+                "matched_artist_ids": matched_artist_ids,
+            }
+            if missing_track_artist_ids:
+                track_links_review_only.append({**payload, "missing_artist_ids": missing_track_artist_ids})
+            else:
+                track_links_to_delete.append(payload)
+
+    return {
+        "composite_artist_id": composite_artist_id,
+        "composite_display_name": composite_name,
+        "credit_parts": credit_parts,
+        "matched_parts": matched_parts,
+        "missing_parts": missing_parts,
+        "ambiguous_parts": ambiguous_parts,
+        "matched_artist_ids": sorted(set(matched_artist_ids)),
+        "all_parts_matched": all_parts_matched,
+        "album_links_to_delete": album_links_to_delete,
+        "album_links_to_insert": album_links_to_insert,
+        "track_links_to_delete": track_links_to_delete,
+        "track_links_review_only": track_links_review_only,
+        "ready_for_cleanup": all_parts_matched
+        and not ambiguous_parts
+        and not missing_parts
+        and release_album_id is not None
+        and not album_links_to_insert
+        and not track_links_review_only,
+    }
 
 
 def _artist_candidate_payload(
@@ -880,8 +1056,10 @@ def _build_same_album_review_groups(
             }
         )
     composite_groups: list[dict[str, Any]] = []
+    composite_artist_ids_with_same_album_context: set[int] = set()
     for key, artist_ids in composite_group_members.items():
-        composite_artist_id, _release_album_id, _role = key
+        composite_artist_id, release_album_id, role = key
+        composite_artist_ids_with_same_album_context.add(composite_artist_id)
         sorted_artist_ids = sorted(
             artist_ids,
             key=lambda artist_id: (artist_id == composite_artist_id, str(row_by_id[artist_id]["canonical_name"]).lower()),
@@ -889,6 +1067,14 @@ def _build_same_album_review_groups(
         source_maps_by_artist = _artist_source_maps(connection, sorted_artist_ids)
         album_counts = _link_counts(connection, "album_artist", sorted_artist_ids)
         track_counts = _link_counts(connection, "track_artist", sorted_artist_ids)
+        cleanup_plan = _build_composite_credit_cleanup_plan(
+            connection,
+            composite_artist_id=composite_artist_id,
+            release_album_id=release_album_id,
+            role=role,
+            artist_ids=artist_ids,
+            row_by_id=row_by_id,
+        )
         composite_groups.append(
             {
                 "category": "composite_credit",
@@ -897,6 +1083,7 @@ def _build_same_album_review_groups(
                 "shared_album_count": 1,
                 "shared_albums": [composite_group_albums[key]],
                 "composite_artist_id": composite_artist_id,
+                "cleanup_plan": cleanup_plan,
                 "artists": [
                     _artist_candidate_payload(connection, row_by_id[artist_id], source_maps_by_artist, album_counts, track_counts)
                     for artist_id in sorted_artist_ids
@@ -904,9 +1091,92 @@ def _build_same_album_review_groups(
                 ],
             }
         )
+    composite_groups.extend(
+        _build_matched_comma_credit_review_groups(
+            connection,
+            artist_rows=artist_rows,
+            row_by_id=row_by_id,
+            excluded_composite_artist_ids=composite_artist_ids_with_same_album_context,
+        )
+    )
     similar_groups.sort(key=lambda group: (-int(group["shared_album_count"]), -float(group["name_similarity"])))
     composite_groups.sort(key=lambda group: -int(group["shared_album_count"]))
     return similar_groups, composite_groups
+
+
+def _build_matched_comma_credit_review_groups(
+    connection: sqlite3.Connection,
+    *,
+    artist_rows: list[sqlite3.Row],
+    row_by_id: dict[int, sqlite3.Row],
+    excluded_composite_artist_ids: set[int],
+) -> list[dict[str, Any]]:
+    artist_ids_by_normalized_name: dict[str, list[int]] = defaultdict(list)
+    for row in artist_rows:
+        artist_id = int(row["id"])
+        normalized_name = _normalize_name(str(row["canonical_name"] or row["sort_name"] or ""))
+        if normalized_name:
+            artist_ids_by_normalized_name[normalized_name].append(artist_id)
+
+    groups: list[dict[str, Any]] = []
+    for row in artist_rows:
+        composite_artist_id = int(row["id"])
+        if composite_artist_id in excluded_composite_artist_ids:
+            continue
+        display_name = str(row["canonical_name"] or "")
+        parts = _split_composite_credit_parts(display_name)
+        if len(parts) <= 1:
+            continue
+        if _provider_source_keys(_artist_source_maps(connection, [composite_artist_id]).get(composite_artist_id, [])):
+            continue
+
+        matched_artist_ids: set[int] = set()
+        ambiguous = False
+        for part in parts:
+            matches = [
+                artist_id
+                for artist_id in artist_ids_by_normalized_name.get(part["normalized_name"], [])
+                if artist_id != composite_artist_id
+            ]
+            if len(matches) != 1:
+                ambiguous = True
+                break
+            matched_artist_ids.add(matches[0])
+        if ambiguous or len(matched_artist_ids) != len(parts):
+            continue
+
+        group_artist_ids = sorted(
+            [*matched_artist_ids, composite_artist_id],
+            key=lambda artist_id: (artist_id == composite_artist_id, str(row_by_id[artist_id]["canonical_name"]).lower()),
+        )
+        source_maps_by_artist = _artist_source_maps(connection, group_artist_ids)
+        album_counts = _link_counts(connection, "album_artist", group_artist_ids)
+        track_counts = _link_counts(connection, "track_artist", group_artist_ids)
+        cleanup_plan = _build_composite_credit_cleanup_plan(
+            connection,
+            composite_artist_id=composite_artist_id,
+            release_album_id=None,
+            role="primary",
+            artist_ids=set(group_artist_ids),
+            row_by_id=row_by_id,
+        )
+        groups.append(
+            {
+                "category": "composite_credit",
+                "repairable": False,
+                "reason": "comma_credit_parts_match_existing_artists_review_only",
+                "shared_album_count": 0,
+                "shared_albums": [],
+                "composite_artist_id": composite_artist_id,
+                "cleanup_plan": cleanup_plan,
+                "artists": [
+                    _artist_candidate_payload(connection, row_by_id[artist_id], source_maps_by_artist, album_counts, track_counts)
+                    for artist_id in group_artist_ids
+                    if artist_id in row_by_id
+                ],
+            }
+        )
+    return groups
 
 
 def plan_duplicate_artist_repair(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -1048,6 +1318,108 @@ def plan_duplicate_artist_repair(connection: sqlite3.Connection) -> dict[str, An
         "artist_rows_to_delete": sorted(set(artist_rows_to_delete)),
         "evidence_type_counts": dict(sorted(evidence_type_counts.items())),
     }
+
+
+def plan_composite_artist_credit_cleanup(connection: sqlite3.Connection) -> dict[str, Any]:
+    audit = _build_duplicate_artist_audit_with_connection(connection)
+    safe_groups: list[dict[str, Any]] = []
+    skipped_groups: list[dict[str, Any]] = []
+    album_links_to_delete: list[dict[str, Any]] = []
+    track_links_to_delete: list[dict[str, Any]] = []
+    artist_rows_to_delete: list[int] = []
+
+    for group in audit["candidate_categories"]["composite_credit"]["groups"]:
+        cleanup_plan = group.get("cleanup_plan") or {}
+        composite_artist_id = int(group.get("composite_artist_id") or cleanup_plan.get("composite_artist_id") or 0)
+        if not bool(cleanup_plan.get("ready_for_cleanup")):
+            skipped_groups.append(
+                {
+                    "composite_artist_id": composite_artist_id,
+                    "reason": group.get("reason") or "not_ready_for_cleanup",
+                    "ready_for_cleanup": False,
+                    "credit_parts": cleanup_plan.get("credit_parts", []),
+                }
+            )
+            continue
+
+        album_deletes = [
+            {
+                **item,
+                "composite_artist_id": composite_artist_id,
+                "composite_display_name": cleanup_plan.get("composite_display_name"),
+            }
+            for item in cleanup_plan.get("album_links_to_delete", [])
+        ]
+        track_deletes = [
+            {
+                **item,
+                "composite_artist_id": composite_artist_id,
+                "composite_display_name": cleanup_plan.get("composite_display_name"),
+            }
+            for item in cleanup_plan.get("track_links_to_delete", [])
+        ]
+        if not album_deletes and not track_deletes:
+            skipped_groups.append(
+                {
+                    "composite_artist_id": composite_artist_id,
+                    "reason": "no_composite_links_to_delete",
+                    "ready_for_cleanup": True,
+                    "credit_parts": cleanup_plan.get("credit_parts", []),
+                }
+            )
+            continue
+
+        safe_groups.append(
+            {
+                "composite_artist_id": composite_artist_id,
+                "composite_display_name": cleanup_plan.get("composite_display_name"),
+                "matched_artist_ids": cleanup_plan.get("matched_artist_ids", []),
+                "credit_parts": cleanup_plan.get("credit_parts", []),
+                "album_links_to_delete": album_deletes,
+                "track_links_to_delete": track_deletes,
+            }
+        )
+        album_links_to_delete.extend(album_deletes)
+        track_links_to_delete.extend(track_deletes)
+        artist_rows_to_delete.append(composite_artist_id)
+
+    return {
+        "groups_found": len(audit["candidate_categories"]["composite_credit"]["groups"]),
+        "safe_groups": safe_groups,
+        "skipped_groups": skipped_groups,
+        "album_links_to_delete": album_links_to_delete,
+        "track_links_to_delete": track_links_to_delete,
+        "artist_rows_to_delete": sorted(set(artist_rows_to_delete)),
+    }
+
+
+def repair_composite_artist_credits(*, dry_run: bool = True) -> dict[str, Any]:
+    with sqlite_connection(write=not dry_run, row_factory=sqlite3.Row) as connection:
+        plan = plan_composite_artist_credit_cleanup(connection)
+        if dry_run:
+            return {"dry_run": True, **plan}
+
+        for item in plan["track_links_to_delete"]:
+            connection.execute("DELETE FROM track_artist WHERE id = ?", (item["link_id"],))
+        for item in plan["album_links_to_delete"]:
+            connection.execute("DELETE FROM album_artist WHERE id = ?", (item["link_id"],))
+
+        deleted_artist_ids: list[int] = []
+        skipped_artist_deletes: list[dict[str, Any]] = []
+        for artist_id in plan["artist_rows_to_delete"]:
+            references = _artist_reference_counts(connection, artist_id)
+            if all(count == 0 for count in references.values()):
+                connection.execute("DELETE FROM artist WHERE id = ?", (artist_id,))
+                deleted_artist_ids.append(artist_id)
+            else:
+                skipped_artist_deletes.append({"artist_id": artist_id, "remaining_references": references})
+
+        return {
+            "dry_run": False,
+            **plan,
+            "artist_rows_deleted": deleted_artist_ids,
+            "artist_row_deletes_skipped": skipped_artist_deletes,
+        }
 
 
 def _plan_link_moves(

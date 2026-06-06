@@ -64,6 +64,12 @@ Current artist representation is mixed:
 - normalized artist rows exist in `artist`
 - album and track artists connect through `album_artist` and `track_artist`
 
+### Known Limitation: Artist Groups vs Musicians
+
+`artist` currently represents credited performing entities, not people/musicians or formal group membership. A durable group name such as `Crosby, Stills, Nash & Young`, `Earth, Wind & Fire`, or `Peter, Paul and Mary` should remain a valid artist identity even though its name contains member names and those members may also have solo artist identities. This is distinct from a raw composite credit such as `Dave Harrington, Tim Mislock`, where a history text value is only a comma-separated credit for multiple existing artists on a track or album.
+
+That model is intentionally out of scope for current identity repair. Current repair/audit work should focus on preventing duplicate artist rows and cleaning up raw composite credits when album/track evidence proves they are separate credited artists. It should not infer group membership or split provider-backed group names just because a comma, ampersand, or member name appears in the artist display name. Low-priority future musician/member graph work is tracked in `docs/overview/roadmap.md`.
+
 Fallback/history text paths can split identities from later provider-backed paths. History import may only know artist text, album text, and track text; Spotify API/catalog paths later provide stable Spotify IDs. If the later provider-backed source is inserted as a new canonical row instead of being reconciled to the text-backed row, the product can show duplicate artists or miss album/track metadata attached to the other row.
 
 Confirmed local example:

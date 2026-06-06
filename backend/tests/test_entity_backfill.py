@@ -17,6 +17,7 @@ from backend.app.db import (
     refresh_conservative_analysis_track_links,
     suggest_conservative_analysis_track_links,
 )
+from backend.app.sync_state import ingest_spotify_recent_rows
 
 
 class EntityBackfillTests(unittest.TestCase):
@@ -36,6 +37,103 @@ class EntityBackfillTests(unittest.TestCase):
     def tearDown(self) -> None:
         if os.path.exists(self.db_path):
             os.remove(self.db_path)
+
+    def test_recent_sync_runs_spotify_entity_backfill_for_inserted_rows(self) -> None:
+        payload = {
+            "item": {
+                "id": "recent-track-1",
+                "name": "Recent Song",
+                "uri": "spotify:track:recent-track-1",
+                "duration_ms": 180000,
+                "artists": [
+                    {"id": "recent-artist-1", "name": "Recent Artist", "uri": "spotify:artist:recent-artist-1"},
+                ],
+                "album": {
+                    "id": "recent-album-1",
+                    "name": "Recent Album",
+                    "uri": "spotify:album:recent-album-1",
+                },
+            }
+        }
+
+        result = ingest_spotify_recent_rows(
+            rows=[
+                {
+                    "source_event_id": "recent-event-1",
+                    "source_row_key": "recent-row-1",
+                    "cross_source_event_key": "recent-cross-1",
+                    "played_at": "2026-04-18T12:00:00Z",
+                    "ms_played": 120000,
+                    "ms_played_method": "api_chronology",
+                    "track_duration_ms": 180000,
+                    "spotify_track_uri": "spotify:track:recent-track-1",
+                    "spotify_track_id": "recent-track-1",
+                    "track_name_raw": "Recent Song",
+                    "artist_name_raw": "Recent Artist",
+                    "album_name_raw": "Recent Album",
+                    "spotify_album_id": "recent-album-1",
+                    "spotify_artist_ids_json": json.dumps(["recent-artist-1"]),
+                    "raw_payload_json": json.dumps(payload, sort_keys=True),
+                }
+            ],
+            source_ref="test",
+        )
+
+        self.assertEqual(1, result["inserted_count"])
+        self.assertTrue(result["downstream_entity_summary"]["ran"])
+        self.assertEqual(
+            1,
+            result["downstream_entity_summary"]["steps"]["backfill_spotify_source_entities"]["source_artists_created"],
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT a.canonical_name, sa.source_name, sa.external_id, sam.match_method
+                FROM artist a
+                JOIN source_artist_map sam
+                  ON sam.artist_id = a.id
+                JOIN source_artist sa
+                  ON sa.id = sam.source_artist_id
+                WHERE sa.source_name = 'spotify'
+                """
+            ).fetchall()
+        self.assertEqual([("Recent Artist", "spotify", "recent-artist-1", "provider_identity")], rows)
+
+    def test_recent_sync_skips_entity_backfill_when_no_rows_inserted(self) -> None:
+        row = {
+            "source_event_id": "recent-event-1",
+            "source_row_key": "recent-row-1",
+            "cross_source_event_key": "recent-cross-1",
+            "played_at": "2026-04-18T12:00:00Z",
+            "ms_played": 120000,
+            "ms_played_method": "api_chronology",
+            "track_duration_ms": 180000,
+            "spotify_track_uri": "spotify:track:recent-track-1",
+            "spotify_track_id": "recent-track-1",
+            "track_name_raw": "Recent Song",
+            "artist_name_raw": "Recent Artist",
+            "album_name_raw": "Recent Album",
+            "spotify_album_id": "recent-album-1",
+            "spotify_artist_ids_json": json.dumps(["recent-artist-1"]),
+            "raw_payload_json": json.dumps(
+                {
+                    "item": {
+                        "id": "recent-track-1",
+                        "name": "Recent Song",
+                        "artists": [{"id": "recent-artist-1", "name": "Recent Artist"}],
+                        "album": {"id": "recent-album-1", "name": "Recent Album"},
+                    }
+                },
+                sort_keys=True,
+            ),
+        }
+        ingest_spotify_recent_rows(rows=[row], source_ref="test")
+
+        result = ingest_spotify_recent_rows(rows=[row], source_ref="test")
+
+        self.assertEqual(0, result["inserted_count"])
+        self.assertFalse(result["downstream_entity_summary"]["ran"])
+        self.assertEqual("no_new_rows_inserted", result["downstream_entity_summary"]["skipped_reason"])
 
     def test_backfill_creates_exact_spotify_entities_and_links(self) -> None:
         payload = {
@@ -269,6 +367,117 @@ class EntityBackfillTests(unittest.TestCase):
         self.assertEqual("Brian Eno", _normalize_fallback_artist_text("Brian Eno, David Byrne"))
         self.assertEqual("", _normalize_fallback_artist_text(""))
         self.assertEqual("", _normalize_fallback_artist_text(None))
+
+    def test_local_text_backfill_preserves_unevidenced_comma_artist_name(self) -> None:
+        insert_raw_play_event(
+            source_type="spotify_history",
+            source_row_key="history-comma-name-row",
+            played_at="2026-04-18T12:00:00Z",
+            ms_played=100000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(
+                {
+                    "master_metadata_track_name": "Comma Name Song",
+                    "master_metadata_album_artist_name": "Peter, Paul & Mary",
+                    "master_metadata_album_album_name": "Comma Name Album",
+                },
+                sort_keys=True,
+            ),
+            spotify_track_uri=None,
+            spotify_track_id=None,
+            track_name_raw="Comma Name Song",
+            artist_name_raw="Peter, Paul & Mary",
+            album_name_raw="Comma Name Album",
+            spotify_album_id=None,
+            spotify_artist_ids_json=None,
+        )
+
+        local = backfill_local_text_entities()
+
+        self.assertEqual(1, local["release_albums_created"])
+        self.assertEqual(1, local["release_tracks_created"])
+        self.assertEqual(1, local["artists_created"])
+        self.assertEqual(1, local["source_artists_created"])
+        self.assertEqual(1, local["album_artist_links_created"])
+        self.assertEqual(1, local["track_artist_links_created"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_names = [row[0] for row in connection.execute("SELECT canonical_name FROM artist").fetchall()]
+            source_artist_names = [
+                row[0] for row in connection.execute("SELECT source_name_raw FROM source_artist").fetchall()
+            ]
+        self.assertEqual(["Peter, Paul & Mary"], artist_names)
+        self.assertEqual(["Peter, Paul & Mary"], source_artist_names)
+
+    def test_local_text_backfill_does_not_create_artist_identity_for_evidenced_composite_credit(self) -> None:
+        spotify_payload = {
+            "item": {
+                "id": "composite-track",
+                "name": "Composite Song",
+                "uri": "spotify:track:composite-track",
+                "artists": [
+                    {"id": "artist-brian-eno", "name": "Brian Eno", "uri": "spotify:artist:artist-brian-eno"},
+                    {"id": "artist-david-byrne", "name": "David Byrne", "uri": "spotify:artist:artist-david-byrne"},
+                ],
+                "album": {"id": "composite-album", "name": "Composite Album", "uri": "spotify:album:composite-album"},
+            }
+        }
+        insert_raw_play_event(
+            source_type="spotify_recent",
+            source_row_key="recent-composite-row",
+            played_at="2026-04-18T11:00:00Z",
+            ms_played=100000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(spotify_payload, sort_keys=True),
+            spotify_track_uri="spotify:track:composite-track",
+            spotify_track_id="composite-track",
+            track_name_raw="Composite Song",
+            artist_name_raw="Brian Eno, David Byrne",
+            album_name_raw="Composite Album",
+            spotify_album_id="composite-album",
+            spotify_artist_ids_json=json.dumps(["artist-brian-eno", "artist-david-byrne"]),
+        )
+        backfill_spotify_source_entities()
+        insert_raw_play_event(
+            source_type="spotify_history",
+            source_row_key="history-composite-row",
+            played_at="2026-04-18T12:00:00Z",
+            ms_played=100000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(
+                {
+                    "master_metadata_track_name": "Composite Song",
+                    "master_metadata_album_artist_name": "Brian Eno, David Byrne",
+                    "master_metadata_album_album_name": "Composite Album",
+                },
+                sort_keys=True,
+            ),
+            spotify_track_uri="spotify:track:composite-track",
+            spotify_track_id="composite-track",
+            track_name_raw="Composite Song",
+            artist_name_raw="Brian Eno, David Byrne",
+            album_name_raw="Composite Album",
+            spotify_album_id="composite-album",
+            spotify_artist_ids_json=None,
+        )
+
+        local = backfill_local_text_entities()
+
+        self.assertEqual(0, local["artists_created"])
+        self.assertEqual(0, local["source_artists_created"])
+        self.assertEqual(0, local["album_artist_links_created"])
+        self.assertEqual(0, local["track_artist_links_created"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_names = [
+                row[0] for row in connection.execute("SELECT canonical_name FROM artist ORDER BY canonical_name").fetchall()
+            ]
+            source_artist_names = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT source_name_raw FROM source_artist WHERE source_name = 'history_raw'"
+                ).fetchall()
+            ]
+        self.assertEqual(["Brian Eno", "David Byrne"], artist_names)
+        self.assertEqual([], source_artist_names)
 
     def test_local_text_backfill_fallback_stable_key_uses_normalized_artist(self) -> None:
         base_payload = {

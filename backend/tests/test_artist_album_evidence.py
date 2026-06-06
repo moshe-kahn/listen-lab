@@ -89,6 +89,47 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
                 ),
             )
 
+    def _insert_entity_album(
+        self,
+        album_name: str,
+        artist_names: tuple[str, ...],
+        spotify_album_id: str | None = None,
+    ) -> None:
+        with sqlite_connection(write=True) as connection:
+            album_id = connection.execute(
+                "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                (album_name, album_name.strip().lower()),
+            ).lastrowid
+            if spotify_album_id:
+                source_album_id = connection.execute(
+                    """
+                    INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw)
+                    VALUES ('spotify', ?, ?, ?)
+                    """,
+                    (spotify_album_id, f"spotify:album:{spotify_album_id}", album_name),
+                ).lastrowid
+                connection.execute(
+                    """
+                    INSERT INTO source_album_map (
+                      source_album_id, release_album_id, match_method, confidence, status
+                    ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted')
+                    """,
+                    (source_album_id, album_id),
+                )
+            for index, artist_name in enumerate(artist_names):
+                artist_id = connection.execute(
+                    "INSERT INTO artist (canonical_name) VALUES (?)",
+                    (artist_name,),
+                ).lastrowid
+                connection.execute(
+                    """
+                    INSERT INTO album_artist (
+                      release_album_id, artist_id, role, billing_index, credited_as, match_method, confidence, source_basis
+                    ) VALUES (?, ?, 'primary', ?, ?, 'provider_identity', 1.0, 'spotify_structured_artist_ids')
+                    """,
+                    (album_id, artist_id, index, artist_name),
+                )
+
     def _seed_catalog(self) -> None:
         self._insert_album("album-primary", "Primary Album", ("Primary Artist",), 3)
         for index in range(1, 4):
@@ -141,6 +182,20 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
         self.assertEqual("album-guest", items_by_id[0]["album_id"])
         items_by_name = list_artist_album_evidence(["Shared Main"], source_album_name="Shared Album")
         self.assertEqual("album-shared", items_by_name[0]["album_id"])
+
+    def test_entity_album_link_fills_catalog_gap(self) -> None:
+        self._insert_entity_album("Entity Album", ("Entity Artist",), spotify_album_id="entity-album")
+        items = list_artist_album_evidence(["Entity Artist"])
+        self.assertEqual(["entity-album"], [item["album_id"] for item in items])
+        self.assertEqual("album", items[0]["relationship"])
+        self.assertEqual("Internal album artist link", items[0]["evidence"])
+
+    def test_entity_album_link_dedupes_catalog_match(self) -> None:
+        self._insert_entity_album("Primary Album", ("Primary Artist",), spotify_album_id="album-primary")
+        items = list_artist_album_evidence(["Primary Artist"])
+        matching = [item for item in items if item["album_id"] == "album-primary"]
+        self.assertEqual(1, len(matching))
+        self.assertEqual("Album artist match", matching[0]["evidence"])
 
     def test_stable_response_shape(self) -> None:
         item = list_artist_album_evidence(["Guest Artist"])[0]

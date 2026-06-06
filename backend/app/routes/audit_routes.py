@@ -6,7 +6,11 @@ from fastapi import APIRouter, Body, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from backend.app.auth.session import _require_local_data_session
-from backend.app.artist_identity_repair import build_duplicate_artist_audit, repair_duplicate_artists
+from backend.app.artist_identity_repair import (
+    build_duplicate_artist_audit,
+    repair_composite_artist_credits,
+    repair_duplicate_artists,
+)
 from backend.app.merged_track_aggregate import _merged_track_aggregate_payload
 from backend.app.recording_track_candidates import (
     get_recording_track_candidate_for_release_track,
@@ -50,6 +54,15 @@ async def debug_artists_duplicate_repair(
 ) -> dict[str, Any]:
     _require_local_data_session(request)
     return repair_duplicate_artists(dry_run=dry_run)
+
+
+@router.post("/debug/artists/composite-credit-cleanup")
+async def debug_artists_composite_credit_cleanup(
+    request: Request,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return repair_composite_artist_credits(dry_run=dry_run)
 
 
 @router.get("/tracks/merged-aggregate")

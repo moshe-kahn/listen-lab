@@ -253,6 +253,15 @@ function artistEntriesFromText(value: string | null | undefined): TrackArtistEnt
     .map((name) => ({ name }));
 }
 
+function artistEntryFromDisplayText(value: string | null | undefined): TrackArtistEntry[] {
+  const name = String(value ?? "").trim();
+  return name ? [{ name }] : [];
+}
+
+function hasStableArtistIdentity(artist: TrackArtistEntry | null | undefined): boolean {
+  return Boolean(artist?.artist_id?.trim() || artist?.id?.trim() || artist?.url?.trim() || artist?.image_url?.trim());
+}
+
 function uniqueArtistEntries(...groups: Array<RecentTrack["artists"] | null | undefined>): TrackArtistEntry[] {
   const entries: TrackArtistEntry[] = [];
   const seenIds = new Set<string>();
@@ -278,6 +287,12 @@ function uniqueArtistEntries(...groups: Array<RecentTrack["artists"] | null | un
     }
   }
   return entries;
+}
+
+function artistEntriesForAlbumTrack(track: AlbumTrackEntry): TrackArtistEntry[] {
+  return track.sourceTrack?.artists?.length
+    ? uniqueArtistEntries(track.sourceTrack.artists)
+    : uniqueArtistEntries(artistEntryFromDisplayText(track.artistName));
 }
 
 function artistNameMatches(candidate: string | null | undefined, target: string | null | undefined) {
@@ -793,11 +808,20 @@ export function App() {
         : uniqueArtistEntries(artistEntriesFromText(selectedPreview.artistName ?? selectedPreview.label))
     )
     : selectedPreview?.kind === "track" || selectedPreview?.kind === "album"
-      ? uniqueArtistEntries(
-        selectedPreview.artists,
-        selectedPreview.sourceTrack?.artists,
-        artistEntriesFromText(selectedPreview.artistName ?? selectedPreview.meta),
-      )
+      ? (() => {
+        const structuredArtists = uniqueArtistEntries(selectedPreview.artists, selectedPreview.sourceTrack?.artists);
+        const displayArtistText = selectedPreview.artistName ?? selectedPreview.meta;
+        if (
+          structuredArtists.length > 1
+          && displayArtistText?.includes(",")
+          && !structuredArtists.some(hasStableArtistIdentity)
+        ) {
+          return uniqueArtistEntries(artistEntryFromDisplayText(displayArtistText));
+        }
+        return structuredArtists.length > 0
+          ? structuredArtists
+          : uniqueArtistEntries(artistEntryFromDisplayText(displayArtistText));
+      })()
       : [];
   const selectedPreviewPrimaryArtistName = selectedPreview?.kind === "track" || selectedPreview?.kind === "album" || selectedPreview?.kind === "artist"
     ? (
@@ -833,7 +857,7 @@ export function App() {
     }
     const artistCounts = new Map<string, { artist: TrackArtistEntry; count: number }>();
     for (const track of albumTrackEntries) {
-      for (const artist of uniqueArtistEntries(artistEntriesFromText(track.artistName))) {
+      for (const artist of artistEntriesForAlbumTrack(track)) {
         const artistName = artist.name?.trim();
         if (!artistName) {
           continue;
@@ -855,7 +879,7 @@ export function App() {
     const primaryNames = new Set(
       selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
     );
-    const guestArtists = albumTrackEntries.flatMap((track) => artistEntriesFromText(track.artistName));
+    const guestArtists = albumTrackEntries.flatMap((track) => artistEntriesForAlbumTrack(track));
     return uniqueArtistEntries(guestArtists).filter((artist) => {
       const artistName = artist.name?.trim().toLocaleLowerCase();
       return Boolean(artistName && !primaryNames.has(artistName));
@@ -869,7 +893,7 @@ export function App() {
       selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
     );
     return albumTrackEntries.some((track) => (
-      uniqueArtistEntries(artistEntriesFromText(track.artistName)).some((artist) => {
+      artistEntriesForAlbumTrack(track).some((artist) => {
         const artistName = artist.name?.trim().toLocaleLowerCase();
         return Boolean(artistName && !mainArtistNames.has(artistName));
       })
@@ -1274,12 +1298,44 @@ export function App() {
       evidence: item.evidence,
     }));
   }, [artistAlbumEvidenceItems, selectedPreview]);
-  const selectedPreviewArtistAlbumsForDisplay = backendSelectedPreviewArtistAlbums ?? selectedPreviewArtistAlbums;
+  const selectedPreviewSourceAlbumEntry = useMemo<ArtistAlbumEntry | null>(() => {
+    if (selectedPreview?.kind !== "artist" || !selectedPreview.sourceAlbumName) {
+      return null;
+    }
+    return {
+      albumId: selectedPreview.sourceAlbumId ?? null,
+      name: selectedPreview.sourceAlbumName,
+      artistName: selectedPreview.sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.label,
+      imageUrl: selectedPreview.sourceAlbumImage ?? selectedPreview.sourceTrack?.image_url ?? null,
+      url: selectedPreview.sourceAlbumUrl ?? selectedPreview.sourceTrack?.album_url ?? spotifyEntityUrl("album", selectedPreview.sourceAlbumId),
+      releaseYear: selectedPreview.sourceAlbumYear ?? selectedPreview.sourceTrack?.album_release_year ?? null,
+      trackCount: null,
+      source: "track",
+      isHighlighted: true,
+      relationship: "appears_on",
+      evidence: "selected track context",
+    };
+  }, [selectedPreview]);
+  const selectedPreviewArtistAlbumsForDisplay = useMemo<ArtistAlbumEntry[]>(() => {
+    const entries = backendSelectedPreviewArtistAlbums ?? selectedPreviewArtistAlbums;
+    if (!selectedPreviewSourceAlbumEntry) {
+      return entries;
+    }
+    const sourceAlbumKey = selectedPreviewSourceAlbumEntry.albumId
+      ? `id:${selectedPreviewSourceAlbumEntry.albumId}`
+      : `name:${selectedPreviewSourceAlbumEntry.name.trim().toLocaleLowerCase()}`;
+    const hasSourceAlbum = entries.some((entry) => (
+      entry.albumId
+        ? `id:${entry.albumId}` === sourceAlbumKey
+        : `name:${entry.name.trim().toLocaleLowerCase()}` === sourceAlbumKey
+    ));
+    return hasSourceAlbum ? entries : [selectedPreviewSourceAlbumEntry, ...entries];
+  }, [backendSelectedPreviewArtistAlbums, selectedPreviewArtistAlbums, selectedPreviewSourceAlbumEntry]);
   const selectedPreviewPrimaryArtistAlbums = backendSelectedPreviewArtistAlbums && !selectedPreviewIsSharedArtistPage
     ? backendSelectedPreviewArtistAlbums.filter((album) => album.relationship === "album")
     : selectedPreviewArtistAlbumsForDisplay;
   const selectedPreviewAppearsOnAlbums = backendSelectedPreviewArtistAlbums && !selectedPreviewIsSharedArtistPage
-    ? backendSelectedPreviewArtistAlbums.filter((album) => album.relationship === "appears_on" || album.relationship === "unknown")
+    ? selectedPreviewArtistAlbumsForDisplay.filter((album) => album.relationship === "appears_on" || album.relationship === "unknown")
     : [];
   const selectedPreviewTrackOptimisticSummary: PlayerTrackSummary | null = selectedPreview?.kind === "track"
     ? {
@@ -4489,7 +4545,7 @@ export function App() {
       hasReleaseTrackSiblings: track.hasReleaseTrackSiblings,
       albumId: contextAlbumId,
       artistName: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview.artistName ?? null,
-      artists: uniqueArtistEntries(track.sourceTrack?.artists, artistEntriesFromText(track.artistName)),
+      artists: uniqueArtistEntries(track.sourceTrack?.artists, artistEntryFromDisplayText(track.artistName)),
       targetArtists: null,
       sourceAlbumId: contextAlbumId,
       sourceAlbumName: track.sourceTrack?.album_name ?? contextAlbumName,
@@ -4652,7 +4708,7 @@ export function App() {
       trackId: null,
       albumId: album.albumId,
       artistName: album.artistName,
-      artists: artistEntriesFromText(album.artistName),
+      artists: artistEntryFromDisplayText(album.artistName),
       targetArtists: null,
       sourceAlbumId: album.albumId,
       sourceAlbumName: album.name,
@@ -4687,7 +4743,7 @@ export function App() {
       trackId: null,
       albumId,
       artistName: sourceTrack?.artist_name ?? selectedPreview.artistName ?? null,
-      artists: uniqueArtistEntries(sourceTrack?.artists, selectedPreview.artists, artistEntriesFromText(sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.meta)),
+      artists: uniqueArtistEntries(sourceTrack?.artists, selectedPreview.artists, artistEntryFromDisplayText(sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.meta)),
       targetArtists: null,
       sourceAlbumId: albumId,
       sourceAlbumName: albumName,
@@ -5540,7 +5596,7 @@ export function App() {
       trackId: null,
       albumId: spotifyAlbumId,
       artistName: item.artist_name ?? null,
-      artists: artistEntriesFromText(item.artist_name),
+      artists: artistEntryFromDisplayText(item.artist_name),
       sourceAlbumId: spotifyAlbumId,
       sourceAlbumName: item.release_album_name,
       sourceAlbumImage: null,
@@ -12940,7 +12996,7 @@ export function App() {
                           : [],
                       );
                       const rowWithArtists = selectedPreview.kind === "album" || selectedPreview.kind === "track"
-                        ? uniqueArtistEntries(artistEntriesFromText(track.artistName)).filter((artist) => {
+                        ? artistEntriesForAlbumTrack(track).filter((artist) => {
                           const artistName = artist.name?.trim().toLocaleLowerCase();
                           return Boolean(artistName && !mainArtistNames.has(artistName));
                         })

@@ -6,7 +6,11 @@ import sqlite3
 import unittest
 from contextlib import closing
 
-from backend.app.artist_identity_repair import build_duplicate_artist_audit, repair_duplicate_artists
+from backend.app.artist_identity_repair import (
+    build_duplicate_artist_audit,
+    repair_composite_artist_credits,
+    repair_duplicate_artists,
+)
 from backend.app.db import (
     _normalize_name,
     apply_pending_migrations,
@@ -504,6 +508,8 @@ class ArtistIdentityRepairTests(unittest.TestCase):
         self.assertEqual(1, audit["summary"]["stylization_groups"])
         group = audit["candidate_categories"]["stylization"]["groups"][0]
         self.assertFalse(group["repairable"])
+        self.assertEqual("beyonce", group["matching_key"])
+        self.assertEqual("beyonce", group["uniform_matching_text"])
         self.assertEqual(["beyonce", "beyoncé"], group["normalized_names"])
         self.assertEqual({artist_1, artist_2}, {artist["artist_id"] for artist in group["artists"]})
 
@@ -632,21 +638,40 @@ class ArtistIdentityRepairTests(unittest.TestCase):
             album_id = connection.execute(
                 "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Shared Album', 'shared album')"
             ).lastrowid
+            track_id = connection.execute(
+                "INSERT INTO release_track (primary_name, normalized_name) VALUES ('Shared Track', 'shared track')"
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)",
+                (album_id, track_id),
+            )
             text_album_id = connection.execute(
                 "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Unrelated Album', 'unrelated album')"
             ).lastrowid
-            connection.execute(
+            spotify_album_link_id = connection.execute(
                 "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 1)",
                 (album_id, spotify_artist_id),
-            )
-            connection.execute(
+            ).lastrowid
+            second_album_link_id = connection.execute(
                 "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 2)",
                 (album_id, second_spotify_artist_id),
-            )
-            connection.execute(
+            ).lastrowid
+            composite_album_link_id = connection.execute(
                 "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
                 (album_id, composite_artist_id),
-            )
+            ).lastrowid
+            spotify_track_link_id = connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 1)",
+                (track_id, spotify_artist_id),
+            ).lastrowid
+            second_track_link_id = connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 2)",
+                (track_id, second_spotify_artist_id),
+            ).lastrowid
+            composite_track_link_id = connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (track_id, composite_artist_id),
+            ).lastrowid
             connection.execute(
                 "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
                 (text_album_id, text_artist_id),
@@ -670,6 +695,25 @@ class ArtistIdentityRepairTests(unittest.TestCase):
             {spotify_artist_id, second_spotify_artist_id, composite_artist_id},
             {artist["artist_id"] for artist in group["artists"]},
         )
+        cleanup_plan = group["cleanup_plan"]
+        self.assertTrue(cleanup_plan["ready_for_cleanup"])
+        self.assertEqual(composite_artist_id, cleanup_plan["composite_artist_id"])
+        self.assertEqual(
+            ["myríad", "jj whitefield"],
+            [part["normalized_name"] for part in cleanup_plan["credit_parts"]],
+        )
+        self.assertEqual(
+            {spotify_artist_id, second_spotify_artist_id},
+            set(cleanup_plan["matched_artist_ids"]),
+        )
+        self.assertEqual([composite_album_link_id], [item["link_id"] for item in cleanup_plan["album_links_to_delete"]])
+        self.assertEqual([], cleanup_plan["album_links_to_insert"])
+        self.assertEqual([composite_track_link_id], [item["link_id"] for item in cleanup_plan["track_links_to_delete"]])
+        self.assertEqual([], cleanup_plan["track_links_review_only"])
+        self.assertNotIn(spotify_album_link_id, [item["link_id"] for item in cleanup_plan["album_links_to_delete"]])
+        self.assertNotIn(second_album_link_id, [item["link_id"] for item in cleanup_plan["album_links_to_delete"]])
+        self.assertNotIn(spotify_track_link_id, [item["link_id"] for item in cleanup_plan["track_links_to_delete"]])
+        self.assertNotIn(second_track_link_id, [item["link_id"] for item in cleanup_plan["track_links_to_delete"]])
 
         dry_run = repair_duplicate_artists(dry_run=True)
         write_result = repair_duplicate_artists(dry_run=False)
@@ -681,6 +725,276 @@ class ArtistIdentityRepairTests(unittest.TestCase):
         with closing(sqlite3.connect(self.db_path)) as connection:
             artist_ids = [row[0] for row in connection.execute("SELECT id FROM artist ORDER BY id ASC").fetchall()]
         self.assertEqual([spotify_artist_id, second_spotify_artist_id, composite_artist_id, text_artist_id], artist_ids)
+
+    def test_comma_credit_with_friends_suffix_matches_existing_artists_for_review(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            perfume_artist_id = self._insert_artist(connection, "Perfume Genius")
+            sharon_artist_id = self._insert_artist(connection, "Sharon Van Etten")
+            composite_artist_id = self._insert_artist(connection, "Perfume Genius, Sharon Van Etten & Friends")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=perfume_artist_id,
+                source_name="history_raw",
+                external_id="history-perfume",
+                match_method="history_raw_text",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=sharon_artist_id,
+                source_name="spotify",
+                external_id="spotify-sharon",
+                match_method="provider_identity",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=composite_artist_id,
+                source_name="history_raw",
+                external_id="history-composite-friends",
+                match_method="history_raw_text",
+            )
+            album_id = connection.execute(
+                "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Day of the Dead', 'day of the dead')"
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (album_id, composite_artist_id),
+            )
+            connection.commit()
+
+        audit = build_duplicate_artist_audit()
+
+        groups = audit["candidate_categories"]["composite_credit"]["groups"]
+        group = next(group for group in groups if group["composite_artist_id"] == composite_artist_id)
+        self.assertEqual("comma_credit_parts_match_existing_artists_review_only", group["reason"])
+        self.assertEqual(
+            {perfume_artist_id, sharon_artist_id, composite_artist_id},
+            {artist["artist_id"] for artist in group["artists"]},
+        )
+        cleanup_plan = group["cleanup_plan"]
+        self.assertFalse(cleanup_plan["ready_for_cleanup"])
+        self.assertTrue(cleanup_plan["all_parts_matched"])
+        self.assertEqual(
+            ["perfume genius", "sharon van etten"],
+            [part["normalized_name"] for part in cleanup_plan["credit_parts"]],
+        )
+
+    def test_composite_credit_cleanup_dry_run_does_not_mutate(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            spotify_artist_id = self._insert_artist(connection, "JJ Whitefield")
+            second_spotify_artist_id = self._insert_artist(connection, "Myríad")
+            composite_artist_id = self._insert_artist(connection, "Myríad, JJ Whitefield")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=spotify_artist_id,
+                source_name="spotify",
+                external_id="spotify-jj-whitefield",
+                match_method="provider_identity",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=second_spotify_artist_id,
+                source_name="spotify",
+                external_id="spotify-myriad",
+                match_method="provider_identity",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=composite_artist_id,
+                source_name="history_raw",
+                external_id="history-composite-credit",
+                match_method="history_raw_text",
+            )
+            album_id = connection.execute(
+                "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Shared Album', 'shared album')"
+            ).lastrowid
+            track_id = connection.execute(
+                "INSERT INTO release_track (primary_name, normalized_name) VALUES ('Shared Track', 'shared track')"
+            ).lastrowid
+            connection.execute("INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)", (album_id, track_id))
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 1)",
+                (album_id, spotify_artist_id),
+            )
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 2)",
+                (album_id, second_spotify_artist_id),
+            )
+            composite_album_link_id = connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (album_id, composite_artist_id),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 1)",
+                (track_id, spotify_artist_id),
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 2)",
+                (track_id, second_spotify_artist_id),
+            )
+            composite_track_link_id = connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (track_id, composite_artist_id),
+            ).lastrowid
+            connection.commit()
+
+        dry_run = repair_composite_artist_credits(dry_run=True)
+
+        self.assertTrue(dry_run["dry_run"])
+        self.assertEqual(1, len(dry_run["safe_groups"]))
+        self.assertEqual([composite_album_link_id], [item["link_id"] for item in dry_run["album_links_to_delete"]])
+        self.assertEqual([composite_track_link_id], [item["link_id"] for item in dry_run["track_links_to_delete"]])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(3, int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]))
+            self.assertEqual(3, int(connection.execute("SELECT count(*) FROM track_artist").fetchone()[0]))
+            self.assertEqual(3, int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]))
+
+    def test_composite_credit_cleanup_deletes_ready_links_but_keeps_source_mapped_artist(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            spotify_artist_id = self._insert_artist(connection, "JJ Whitefield")
+            second_spotify_artist_id = self._insert_artist(connection, "Myríad")
+            composite_artist_id = self._insert_artist(connection, "Myríad, JJ Whitefield")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=spotify_artist_id,
+                source_name="spotify",
+                external_id="spotify-jj-whitefield",
+                match_method="provider_identity",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=second_spotify_artist_id,
+                source_name="spotify",
+                external_id="spotify-myriad",
+                match_method="provider_identity",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=composite_artist_id,
+                source_name="history_raw",
+                external_id="history-composite-credit",
+                match_method="history_raw_text",
+            )
+            album_id = connection.execute(
+                "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Shared Album', 'shared album')"
+            ).lastrowid
+            track_id = connection.execute(
+                "INSERT INTO release_track (primary_name, normalized_name) VALUES ('Shared Track', 'shared track')"
+            ).lastrowid
+            connection.execute("INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)", (album_id, track_id))
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 1)",
+                (album_id, spotify_artist_id),
+            )
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 2)",
+                (album_id, second_spotify_artist_id),
+            )
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (album_id, composite_artist_id),
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 1)",
+                (track_id, spotify_artist_id),
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 2)",
+                (track_id, second_spotify_artist_id),
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (track_id, composite_artist_id),
+            )
+            connection.commit()
+
+        result = repair_composite_artist_credits(dry_run=False)
+
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(1, len(result["safe_groups"]))
+        self.assertEqual([], result["artist_rows_deleted"])
+        self.assertEqual(composite_artist_id, result["artist_row_deletes_skipped"][0]["artist_id"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(2, int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]))
+            self.assertEqual(2, int(connection.execute("SELECT count(*) FROM track_artist").fetchone()[0]))
+            self.assertEqual(3, int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]))
+            composite_album_links = int(
+                connection.execute("SELECT count(*) FROM album_artist WHERE artist_id = ?", (composite_artist_id,)).fetchone()[0]
+            )
+            composite_track_links = int(
+                connection.execute("SELECT count(*) FROM track_artist WHERE artist_id = ?", (composite_artist_id,)).fetchone()[0]
+            )
+        self.assertEqual(0, composite_album_links)
+        self.assertEqual(0, composite_track_links)
+
+    def test_composite_credit_cleanup_skips_review_only_groups(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            perfume_artist_id = self._insert_artist(connection, "Perfume Genius")
+            sharon_artist_id = self._insert_artist(connection, "Sharon Van Etten")
+            composite_artist_id = self._insert_artist(connection, "Perfume Genius, Sharon Van Etten & Friends")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=perfume_artist_id,
+                source_name="history_raw",
+                external_id="history-perfume",
+                match_method="history_raw_text",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=sharon_artist_id,
+                source_name="spotify",
+                external_id="spotify-sharon",
+                match_method="provider_identity",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=composite_artist_id,
+                source_name="history_raw",
+                external_id="history-composite-friends",
+                match_method="history_raw_text",
+            )
+            album_id = connection.execute(
+                "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Day of the Dead', 'day of the dead')"
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (album_id, composite_artist_id),
+            )
+            connection.commit()
+
+        result = repair_composite_artist_credits(dry_run=False)
+
+        self.assertEqual([], result["safe_groups"])
+        self.assertEqual(1, len(result["skipped_groups"]))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(1, int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]))
+            self.assertEqual(3, int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]))
+
+    def test_composite_credit_cleanup_skips_provider_backed_full_comma_name(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_id = self._insert_artist(connection, "Bela Fleck, Zakir Hussein & Edgar Meyer")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=artist_id,
+                source_name="spotify",
+                external_id="spotify-trio",
+                match_method="provider_identity",
+            )
+            album_id = connection.execute(
+                "INSERT INTO release_album (primary_name, normalized_name) VALUES ('As We Speak', 'as we speak')"
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (album_id, artist_id),
+            )
+            connection.commit()
+
+        result = repair_composite_artist_credits(dry_run=False)
+
+        self.assertEqual(0, result["groups_found"])
+        self.assertEqual([], result["safe_groups"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(1, int(connection.execute("SELECT count(*) FROM album_artist").fetchone()[0]))
+            self.assertEqual(1, int(connection.execute("SELECT count(*) FROM artist").fetchone()[0]))
 
     def test_similar_same_album_candidates_are_never_repaired(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -718,7 +1032,7 @@ class ArtistIdentityRepairTests(unittest.TestCase):
         self.assertEqual([], result["safe_groups"])
         self.assertEqual([], result["artist_rows_deleted"])
 
-    def test_spotify_ingest_promotes_existing_text_only_artist(self) -> None:
+    def test_spotify_ingest_does_not_promote_existing_text_only_artist_without_shared_evidence(self) -> None:
         insert_raw_play_event(
             source_type="spotify_history",
             source_row_key="history-row",
@@ -754,6 +1068,124 @@ class ArtistIdentityRepairTests(unittest.TestCase):
             track_name_raw="Spotify Track",
             artist_name_raw="Radiohead",
             album_name_raw="Spotify Album",
+            spotify_album_id="spotify-album",
+            spotify_artist_ids_json=json.dumps(["spotify-radiohead"]),
+        )
+        exact = backfill_spotify_source_entities()
+
+        self.assertEqual(1, exact["artists_created"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_count = int(connection.execute("SELECT count(*) FROM artist").fetchone()[0])
+            spotify_map_artist_id = int(
+                connection.execute(
+                    """
+                    SELECT sam.artist_id
+                    FROM source_artist_map sam
+                    JOIN source_artist sa
+                      ON sa.id = sam.source_artist_id
+                    WHERE sa.source_name = 'spotify'
+                      AND sa.external_id = 'spotify-radiohead'
+                    """
+                ).fetchone()[0]
+            )
+        self.assertEqual(2, artist_count)
+        self.assertNotEqual(text_artist_id, spotify_map_artist_id)
+
+    def test_spotify_ingest_promotes_existing_text_only_artist_with_shared_track_evidence(self) -> None:
+        insert_raw_play_event(
+            source_type="spotify_history",
+            source_row_key="history-row",
+            played_at="2026-04-18T10:00:00Z",
+            ms_played=90000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps({"master_metadata_album_artist_name": "Radiohead"}, sort_keys=True),
+            spotify_track_uri="spotify:track:spotify-track",
+            spotify_track_id="spotify-track",
+            track_name_raw="Shared Track",
+            artist_name_raw="Radiohead",
+            album_name_raw="Shared Album",
+            spotify_album_id="spotify-album",
+            spotify_artist_ids_json=None,
+        )
+        local = backfill_local_text_entities()
+        self.assertEqual(1, local["artists_created"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            text_artist_id = int(connection.execute("SELECT id FROM artist").fetchone()[0])
+
+        insert_raw_play_event(
+            source_type="spotify_recent",
+            source_row_key="recent-row",
+            played_at="2026-04-18T11:00:00Z",
+            ms_played=100000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(
+                {"item": {"artists": [{"id": "spotify-radiohead", "name": "Radiohead"}]}},
+                sort_keys=True,
+            ),
+            spotify_track_uri="spotify:track:spotify-track",
+            spotify_track_id="spotify-track",
+            track_name_raw="Shared Track",
+            artist_name_raw="Radiohead",
+            album_name_raw="Shared Album",
+            spotify_album_id="spotify-album",
+            spotify_artist_ids_json=json.dumps(["spotify-radiohead"]),
+        )
+        exact = backfill_spotify_source_entities()
+
+        self.assertEqual(0, exact["artists_created"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_count = int(connection.execute("SELECT count(*) FROM artist").fetchone()[0])
+            spotify_map_artist_id = int(
+                connection.execute(
+                    """
+                    SELECT sam.artist_id
+                    FROM source_artist_map sam
+                    JOIN source_artist sa
+                      ON sa.id = sam.source_artist_id
+                    WHERE sa.source_name = 'spotify'
+                      AND sa.external_id = 'spotify-radiohead'
+                    """
+                ).fetchone()[0]
+            )
+        self.assertEqual(1, artist_count)
+        self.assertEqual(text_artist_id, spotify_map_artist_id)
+
+    def test_spotify_ingest_promotes_existing_text_only_artist_with_album_title_provider_context(self) -> None:
+        insert_raw_play_event(
+            source_type="spotify_history",
+            source_row_key="history-row",
+            played_at="2026-04-18T10:00:00Z",
+            ms_played=90000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps({"master_metadata_album_artist_name": "Radiohead"}, sort_keys=True),
+            spotify_track_uri=None,
+            spotify_track_id=None,
+            track_name_raw="History Track",
+            artist_name_raw="Radiohead",
+            album_name_raw="Shared Album",
+            spotify_album_id=None,
+            spotify_artist_ids_json=None,
+        )
+        local = backfill_local_text_entities()
+        self.assertEqual(1, local["artists_created"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            text_artist_id = int(connection.execute("SELECT id FROM artist").fetchone()[0])
+
+        insert_raw_play_event(
+            source_type="spotify_recent",
+            source_row_key="recent-row",
+            played_at="2026-04-18T11:00:00Z",
+            ms_played=100000,
+            ms_played_method="history_source",
+            raw_payload_json=json.dumps(
+                {"item": {"artists": [{"id": "spotify-radiohead", "name": "Radiohead"}]}},
+                sort_keys=True,
+            ),
+            spotify_track_uri="spotify:track:spotify-track",
+            spotify_track_id="spotify-track",
+            track_name_raw="Spotify Track",
+            artist_name_raw="Radiohead",
+            album_name_raw="Shared Album",
             spotify_album_id="spotify-album",
             spotify_artist_ids_json=json.dumps(["spotify-radiohead"]),
         )

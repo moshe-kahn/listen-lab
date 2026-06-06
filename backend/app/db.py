@@ -3776,6 +3776,128 @@ def _normalize_fallback_artist_text(raw: str | None) -> str:
     return canonical_parts[0]
 
 
+def _comma_artist_credit_parts(raw: str | None) -> list[tuple[str, str]]:
+    if raw is None or "," not in str(raw):
+        return []
+    seen: set[str] = set()
+    parts: list[tuple[str, str]] = []
+    raw_parts = str(raw).split(",")
+    for index, raw_part in enumerate(raw_parts):
+        display = " ".join(raw_part.strip().split())
+        if index == len(raw_parts) - 1:
+            display = re.sub(r"\s+(?:&|and)\s+friends\.?$", "", display, flags=re.IGNORECASE).strip()
+        normalized = _normalize_name(display)
+        if not display or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        parts.append((display, normalized))
+    return parts
+
+
+def _normalized_history_artist_label(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    parts = _comma_artist_credit_parts(raw)
+    if len(parts) == 1:
+        return parts[0][0]
+    artist_label = " ".join(str(raw).strip().split())
+    return artist_label or None
+
+
+def _single_provider_artist_for_normalized_name(connection: sqlite3.Connection, normalized_name: str | None) -> int | None:
+    if not normalized_name:
+        return None
+    rows = connection.execute(
+        """
+        SELECT DISTINCT a.id
+        FROM artist a
+        JOIN source_artist_map sam
+          ON sam.artist_id = a.id
+        JOIN source_artist sa
+          ON sa.id = sam.source_artist_id
+         AND sa.source_name != 'history_raw'
+        WHERE COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
+        ORDER BY a.id ASC
+        """,
+        (normalized_name,),
+    ).fetchall()
+    return int(rows[0][0]) if len(rows) == 1 else None
+
+
+def _has_provider_artist_linked_to_context(
+    connection: sqlite3.Connection,
+    *,
+    normalized_name: str,
+    release_album_id: int | None,
+    release_track_id: int | None,
+) -> bool:
+    if release_track_id is not None:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM track_artist ta
+            JOIN artist a
+              ON a.id = ta.artist_id
+            JOIN source_artist_map sam
+              ON sam.artist_id = a.id
+            JOIN source_artist sa
+              ON sa.id = sam.source_artist_id
+             AND sa.source_name != 'history_raw'
+            WHERE ta.release_track_id = ?
+              AND COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
+            LIMIT 1
+            """,
+            (release_track_id, normalized_name),
+        ).fetchone()
+        if row is not None:
+            return True
+    if release_album_id is not None:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM album_artist aa
+            JOIN artist a
+              ON a.id = aa.artist_id
+            JOIN source_artist_map sam
+              ON sam.artist_id = a.id
+            JOIN source_artist sa
+              ON sa.id = sam.source_artist_id
+             AND sa.source_name != 'history_raw'
+            WHERE aa.release_album_id = ?
+              AND COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
+            LIMIT 1
+            """,
+            (release_album_id, normalized_name),
+        ).fetchone()
+        if row is not None:
+            return True
+    return False
+
+
+def _is_evidenced_composite_history_artist_credit(
+    connection: sqlite3.Connection,
+    *,
+    artist_name_raw: str | None,
+    release_album_id: int | None,
+    release_track_id: int | None,
+) -> bool:
+    parts = _comma_artist_credit_parts(artist_name_raw)
+    if len(parts) <= 1:
+        return False
+    full_normalized_name = _normalize_name(artist_name_raw)
+    if _single_provider_artist_for_normalized_name(connection, full_normalized_name) is not None:
+        return False
+    return all(
+        _has_provider_artist_linked_to_context(
+            connection,
+            normalized_name=normalized_part,
+            release_album_id=release_album_id,
+            release_track_id=release_track_id,
+        )
+        for _display_part, normalized_part in parts
+    )
+
+
 def _stable_text_key(*parts: str | None) -> str:
     payload = "|".join("" if part is None else str(part).strip() for part in parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -4030,6 +4152,8 @@ def _find_safe_text_only_artist_for_spotify_promotion(
     connection: sqlite3.Connection,
     *,
     artist_name: str | None,
+    release_album_id: int | None,
+    release_track_id: int | None,
 ) -> int | None:
     canonical_name = artist_name.strip() if artist_name and artist_name.strip() else None
     if canonical_name is None:
@@ -4074,7 +4198,75 @@ def _find_safe_text_only_artist_for_spotify_promotion(
         )
         return None
     if len(text_only_artist_ids) == 1:
-        return text_only_artist_ids[0]
+        artist_id = text_only_artist_ids[0]
+        has_track_evidence = release_track_id is not None and connection.execute(
+            """
+            SELECT 1
+            FROM track_artist
+            WHERE artist_id = ?
+              AND release_track_id = ?
+            LIMIT 1
+            """,
+            (artist_id, release_track_id),
+        ).fetchone() is not None
+        has_album_evidence = release_album_id is not None and connection.execute(
+            """
+            SELECT 1
+            FROM album_artist
+            WHERE artist_id = ?
+              AND release_album_id = ?
+            LIMIT 1
+            """,
+            (artist_id, release_album_id),
+        ).fetchone() is not None
+        if has_track_evidence or has_album_evidence:
+            return artist_id
+        has_album_title_provider_context = release_album_id is not None and connection.execute(
+            """
+            SELECT 1
+            FROM release_album provider_album
+            JOIN release_album text_album
+              ON text_album.id != provider_album.id
+             AND text_album.normalized_name = provider_album.normalized_name
+            JOIN album_artist text_album_artist
+              ON text_album_artist.release_album_id = text_album.id
+             AND text_album_artist.artist_id = ?
+            WHERE provider_album.id = ?
+              AND provider_album.normalized_name IS NOT NULL
+              AND (
+                EXISTS (
+                  SELECT 1
+                  FROM source_album_map provider_album_map
+                  JOIN source_album provider_source_album
+                    ON provider_source_album.id = provider_album_map.source_album_id
+                   AND provider_source_album.source_name != 'history_raw'
+                  WHERE provider_album_map.release_album_id = provider_album.id
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM album_track provider_album_track
+                  JOIN source_track_map provider_track_map
+                    ON provider_track_map.release_track_id = provider_album_track.release_track_id
+                  JOIN source_track provider_source_track
+                    ON provider_source_track.id = provider_track_map.source_track_id
+                   AND provider_source_track.source_name != 'history_raw'
+                  WHERE provider_album_track.release_album_id = provider_album.id
+                )
+              )
+            LIMIT 1
+            """,
+            (artist_id, release_album_id),
+        ).fetchone() is not None
+        if has_album_title_provider_context:
+            return artist_id
+        logger.info(
+            "event=spotify_artist_text_promotion_skipped reason=missing_album_track_evidence normalized_name=%s artist_id=%s release_album_id=%s release_track_id=%s",
+            normalized_name,
+            artist_id,
+            release_album_id,
+            release_track_id,
+        )
+        return None
     if len(text_only_artist_ids) > 1:
         logger.warning(
             "event=spotify_artist_text_promotion_skipped reason=ambiguous_text_only_artist normalized_name=%s artist_ids=%s",
@@ -4091,6 +4283,8 @@ def _ensure_source_artist_mapping_with_connection(
     external_uri: str | None,
     artist_name: str | None,
     raw_payload_json: str | None,
+    release_album_id: int | None = None,
+    release_track_id: int | None = None,
 ) -> int:
     existing = connection.execute(
         """
@@ -4144,6 +4338,8 @@ def _ensure_source_artist_mapping_with_connection(
     promoted_artist_id = _find_safe_text_only_artist_for_spotify_promotion(
         connection,
         artist_name=artist_name,
+        release_album_id=release_album_id,
+        release_track_id=release_track_id,
     )
     if promoted_artist_id is not None:
         artist_id = promoted_artist_id
@@ -4186,10 +4382,24 @@ def _ensure_history_text_artist_mapping_with_connection(
     connection: sqlite3.Connection,
     *,
     artist_name_raw: str | None,
+    release_album_id: int | None = None,
+    release_track_id: int | None = None,
 ) -> int | None:
-    artist_label = _normalize_fallback_artist_text(artist_name_raw)
-    if not artist_label:
-        artist_label = artist_name_raw.strip() if artist_name_raw and artist_name_raw.strip() else None
+    if _is_evidenced_composite_history_artist_credit(
+        connection,
+        artist_name_raw=artist_name_raw,
+        release_album_id=release_album_id,
+        release_track_id=release_track_id,
+    ):
+        logger.warning(
+            "event=history_text_artist_mapping_skipped reason=evidenced_composite_artist_credit artist_name_raw=%s release_album_id=%s release_track_id=%s",
+            artist_name_raw,
+            release_album_id,
+            release_track_id,
+        )
+        return None
+
+    artist_label = _normalized_history_artist_label(artist_name_raw)
     if artist_label is None:
         return None
 
@@ -4212,6 +4422,8 @@ def _ensure_history_text_artist_mapping_with_connection(
     if existing is not None and existing["artist_id"] is not None:
         return int(existing["artist_id"])
 
+    provider_artist_id = _single_provider_artist_for_normalized_name(connection, _normalize_name(artist_label))
+
     if existing is None:
         cursor = connection.execute(
             """
@@ -4230,17 +4442,20 @@ def _ensure_history_text_artist_mapping_with_connection(
     else:
         source_artist_id = int(existing["source_artist_id"])
 
-    cursor = connection.execute(
-        """
-        INSERT INTO artist (
-          canonical_name,
-          sort_name
+    if provider_artist_id is not None:
+        artist_id = provider_artist_id
+    else:
+        cursor = connection.execute(
+            """
+            INSERT INTO artist (
+              canonical_name,
+              sort_name
+            )
+            VALUES (?, ?)
+            """,
+            (artist_label, _normalize_name(artist_label)),
         )
-        VALUES (?, ?)
-        """,
-        (artist_label, _normalize_name(artist_label)),
-    )
-    artist_id = int(cursor.lastrowid)
+        artist_id = int(cursor.lastrowid)
     connection.execute(
         """
         INSERT OR IGNORE INTO source_artist_map (
@@ -4960,6 +5175,8 @@ def backfill_spotify_source_entities() -> dict[str, int]:
                     external_uri=artist_ref.get("external_uri") or f"spotify:artist:{external_id}",
                     artist_name=artist_ref.get("name"),
                     raw_payload_json=row["raw_payload_json"],
+                    release_album_id=release_album_id,
+                    release_track_id=release_track_id,
                 )
                 if artist_id not in artist_ids:
                     artist_ids.append(artist_id)
@@ -5190,6 +5407,8 @@ def backfill_local_text_entities() -> dict[str, int]:
                 artist_id = _ensure_history_text_artist_mapping_with_connection(
                     connection,
                     artist_name_raw=row["artist_name_raw"],
+                    release_album_id=release_album_id,
+                    release_track_id=release_track_id,
                 )
                 if artist_id is not None:
                     if release_track_id is not None:
