@@ -86,12 +86,15 @@ import type {
   ReleaseTrackDetailSourceVersion,
   RecordingTrackCandidateItem,
   RecordingTrackCandidateMember,
+  TrackArtistEntry,
+  ArtistAlbumEntry,
   PlayerTrackSummary,
   PlayerQueueTrack,
   SpotifyPlayerState,
   AlbumTrackEntry,
   SpotifyPlayerInstance,
-  PopupTrackPlaybackOptions
+  PopupTrackPlaybackOptions,
+  PlaybackActionRequest
 } from "./types/appTypes";
 import {
   DEFAULT_PLAYER_VOLUME,
@@ -152,8 +155,11 @@ import { DashboardAlbumColumn, DashboardArtistColumn } from "./components/dashbo
 import { MergedTrackSourceFilterToggle, RankMovementFilterToggle, TrackRankingToggle } from "./components/dashboard/DashboardControls";
 import { DashboardListCard } from "./components/dashboard/DashboardListCard";
 import { DashboardPlaylistsSection } from "./components/dashboard/DashboardPlaylistsSection";
+import { DashboardSections } from "./components/dashboard/DashboardSections";
 import { DashboardTrackColumn } from "./components/dashboard/DashboardTrackColumn";
+import { DetailPreviewModal } from "./components/dashboard/DetailPreviewModal";
 import { DualSectionCard } from "./components/dashboard/DualSectionCard";
+import { LoginHeroPanel } from "./components/dashboard/LoginHeroPanel";
 import {
   auditList,
   auditNumber,
@@ -163,9 +169,15 @@ import {
   renderIdentityAuditGroup,
   type TrackIdentityAuditExample,
 } from "./components/identityAudit/IdentityAuditDiagnostics";
-import { ArtistDuplicateAuditTab } from "./components/identityAudit/ArtistDuplicateAuditTab";
-import { RecordingTrackCandidatesTab } from "./components/identityAudit/RecordingTrackCandidatesTab";
-import { ReleaseTrackDurationConflictsTab } from "./components/identityAudit/ReleaseTrackDurationConflictsTab";
+import { AlbumIdentityAuditCatalogTab } from "./components/identityAudit/AlbumIdentityAuditCatalogTab";
+import { AlbumIdentityAuditMergeReviewTab } from "./components/identityAudit/AlbumIdentityAuditMergeReviewTab";
+import { AlbumDuplicateMergeCard } from "./components/identityAudit/AlbumDuplicateMergeCard";
+import { IdentityAuditPage } from "./components/identityAudit/IdentityAuditPage";
+import {
+  AlbumIdentityAuditOverviewCards,
+  TrackIdentityAuditOverviewCards,
+} from "./components/identityAudit/IdentityAuditOverviewCards";
+import { TrackIdentityAuditAmbiguousTab } from "./components/identityAudit/TrackIdentityAuditAmbiguousTab";
 import { FormulaLabPage } from "./components/formulaLab/FormulaLabPage";
 import {
   IssueFeed,
@@ -230,21 +242,6 @@ import {
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const ALBUM_TRACKS_FETCH_TIMEOUT_MS = 15_000;
-type TrackArtistEntry = NonNullable<RecentTrack["artists"]>[number];
-type ArtistAlbumEntry = {
-  albumId: string | null;
-  name: string;
-  artistName: string | null;
-  imageUrl: string | null;
-  url: string;
-  releaseYear: string | null;
-  trackCount: number | null;
-  source: "album" | "track";
-  isHighlighted: boolean;
-  relationship?: "album" | "appears_on" | "unknown";
-  evidence?: string | null;
-};
-
 function artistEntriesFromText(value: string | null | undefined): TrackArtistEntry[] {
   return String(value ?? "")
     .split(",")
@@ -317,11 +314,6 @@ function collaboratorLabel(artistNames: string | null | undefined, selectedArtis
     .filter((name) => name && name.toLocaleLowerCase() !== selectedKey);
   return collaborators.length > 0 ? `with ${collaborators.join(", ")}` : null;
 }
-
-type PlaybackActionRequest = PopupTrackPlaybackOptions & {
-  insertTracks?: PlayerQueueTrack[] | null;
-  trackUri: string | null;
-};
 
 type LastPlayedSortMode = "recent" | "oldest" | null;
 
@@ -6515,55 +6507,6 @@ export function App() {
     }
   }
 
-  function renderAlbumMemberRows(
-    rows: Array<{
-      release_album_id: number;
-      release_album_name: string;
-      artist_name: string;
-      spotify_album_id?: string | null;
-      spotify_album_name?: string | null;
-    }>,
-  ) {
-    return (
-      <div style={{ display: "grid", gap: "8px" }}>
-        {rows.map((row) => (
-          <div
-            key={`album-member-${row.release_album_id}`}
-            style={{
-              alignItems: "center",
-              background: "rgba(255, 255, 255, 0.03)",
-              borderRadius: "12px",
-              display: "grid",
-              gap: "4px",
-              gridTemplateColumns: "minmax(0, 1.3fr) minmax(0, 1fr)",
-              padding: "10px 12px",
-            }}
-          >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontWeight: 700, overflowWrap: "anywhere" }}>{row.release_album_name}</div>
-              <div className="empty-copy" style={{ margin: 0 }}>{row.artist_name}</div>
-            </div>
-            <div style={{ justifySelf: "end", textAlign: "right" }}>
-              <div style={{ fontFamily: "monospace", fontSize: "12px" }}>release_album {row.release_album_id}</div>
-              {row.spotify_album_id ? (
-                <a
-                  className="empty-copy"
-                  href={spotifyAlbumUrl(row.spotify_album_id)}
-                  rel="noreferrer"
-                  style={{ display: "block", margin: 0, overflowWrap: "anywhere" }}
-                  target="_blank"
-                >
-                  {row.spotify_album_id}
-                  {row.spotify_album_name ? ` (${row.spotify_album_name})` : ""}
-                </a>
-              ) : null}
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
   function renderAlbumDuplicateCard(
     target: AlbumMergeReviewTarget,
     rows: Array<{
@@ -6581,98 +6524,34 @@ export function App() {
     const dryRunError = releaseAlbumMergeDryRunErrorByKey[target.key];
     const warningSummary = summarizeAlbumMergeWarnings(preview) ?? target.warningSummary ?? null;
     return (
-      <article
-        key={`album-dup-card-${target.key}`}
-        style={{
-          background: "rgba(255, 255, 255, 0.03)",
-          border: "1px solid rgba(255, 255, 255, 0.08)",
-          borderRadius: "18px",
-          display: "grid",
-          gap: "14px",
-          padding: "18px",
+      <AlbumDuplicateMergeCard
+        target={target}
+        rows={rows}
+        extraMeta={extraMeta}
+        preview={preview}
+        dryRun={dryRun}
+        previewError={previewError}
+        dryRunError={dryRunError}
+        warningSummary={warningSummary}
+        previewLoadingKey={releaseAlbumMergePreviewLoadingKey}
+        dryRunLoadingKey={releaseAlbumMergeDryRunLoadingKey}
+        spotifyAlbumUrl={spotifyAlbumUrl}
+        albumMergeReasonLabel={albumMergeReasonLabel}
+        albumMergeReasonKey={albumMergeReasonKey}
+        plainEnglishAlbumMergeExplanation={plainEnglishAlbumMergeExplanation}
+        renderAlbumMergeReadinessBadge={renderAlbumMergeReadinessBadge}
+        renderReleaseAlbumMergePreview={renderReleaseAlbumMergePreview}
+        onPreviewMerge={(reviewTarget) => {
+          setSelectedAlbumMergeReviewKey(reviewTarget.key);
+          setAlbumIdentityAuditTab("merge_review");
+          void loadReleaseAlbumMergePreview(reviewTarget.key, reviewTarget.releaseAlbumIds);
         }}
-      >
-        <div style={{ alignItems: "start", display: "flex", gap: "16px", justifyContent: "space-between" }}>
-          <div style={{ minWidth: 0 }}>
-            {target.spotifyAlbumId ? (
-              <h3 style={{ margin: 0 }}>
-                <a href={spotifyAlbumUrl(target.spotifyAlbumId)} rel="noreferrer" target="_blank">{target.title}</a>
-              </h3>
-            ) : (
-              <h3 style={{ margin: 0 }}>{target.title}</h3>
-            )}
-            <p className="empty-copy" style={{ margin: "6px 0 0 0" }}>{target.subtitle}</p>
-          </div>
-          <div style={{ display: "grid", gap: "8px", justifyItems: "end" }}>
-            <span className="identity-audit-stat">
-              <span>Duplicate count</span>
-              <strong>{target.duplicateCount}</strong>
-            </span>
-            {preview ? renderAlbumMergeReadinessBadge(preview.merge_readiness) : null}
-          </div>
-        </div>
-        {extraMeta}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-          <span className="identity-audit-stat">
-            <span>Release album IDs</span>
-            <strong>{target.releaseAlbumIds.join(", ")}</strong>
-          </span>
-          <span className="identity-audit-stat">
-            <span>Warnings</span>
-            <strong>{preview?.warnings.length ?? 0}</strong>
-          </span>
-          <span className="identity-audit-stat">
-            <span>Review source</span>
-            <strong>{target.sourceLabel}</strong>
-          </span>
-          <span className="identity-audit-stat">
-            <span>Reason</span>
-            <strong>{albumMergeReasonLabel(albumMergeReasonKey(preview))}</strong>
-          </span>
-        </div>
-        {preview ? <p className="identity-audit-tab-copy" style={{ margin: 0 }}>{plainEnglishAlbumMergeExplanation(preview)}</p> : null}
-        {warningSummary ? <p className="empty-copy" style={{ margin: 0 }}>Warning summary: {warningSummary}</p> : null}
-        {previewError ? <p className="empty-copy">{previewError}</p> : null}
-        {dryRunError ? <p className="empty-copy">{dryRunError}</p> : null}
-        {renderAlbumMemberRows(rows)}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
-          <button
-            className="track-ranking-chip"
-            disabled={releaseAlbumMergePreviewLoadingKey !== null}
-            onClick={() => {
-              setSelectedAlbumMergeReviewKey(target.key);
-              setAlbumIdentityAuditTab("merge_review");
-              void loadReleaseAlbumMergePreview(target.key, target.releaseAlbumIds);
-            }}
-            type="button"
-          >
-            {releaseAlbumMergePreviewLoadingKey === target.key ? "Loading..." : "Preview merge"}
-          </button>
-          {preview?.survivor_release_album_id != null ? (() => {
-            const survivorReleaseAlbumId = preview.survivor_release_album_id;
-            return (
-              <button
-                className="secondary-button"
-                disabled={releaseAlbumMergeDryRunLoadingKey !== null}
-                onClick={() => {
-                  setSelectedAlbumMergeReviewKey(target.key);
-                  setAlbumIdentityAuditTab("merge_review");
-                  void loadReleaseAlbumMergeDryRun(target.key, target.releaseAlbumIds, survivorReleaseAlbumId);
-                }}
-                type="button"
-              >
-                {releaseAlbumMergeDryRunLoadingKey === target.key ? "Loading..." : "Dry run"}
-              </button>
-            );
-          })() : null}
-        </div>
-        {preview || dryRun ? (
-          <details>
-            <summary>Details</summary>
-            {preview ? renderReleaseAlbumMergePreview(target.key) : null}
-          </details>
-        ) : null}
-      </article>
+        onDryRunMerge={(reviewTarget, survivorReleaseAlbumId) => {
+          setSelectedAlbumMergeReviewKey(reviewTarget.key);
+          setAlbumIdentityAuditTab("merge_review");
+          void loadReleaseAlbumMergeDryRun(reviewTarget.key, reviewTarget.releaseAlbumIds, survivorReleaseAlbumId);
+        }}
+      />
     );
   }
 
@@ -6707,33 +6586,13 @@ export function App() {
     const suggestedCount = identityAuditSuggestedGroups?.summary.total_groups ?? 0;
     const ambiguousCount = identityAuditAmbiguous?.summary.total_review_entries ?? 0;
     return (
-      <div className="identity-audit-overview-grid">
-        <article className="identity-audit-overview-card">
-          <h3>Suspicious Splits</h3>
-          <p>Same normalized title/artist with multiple Spotify IDs.</p>
-          <strong>{canonicalCount}</strong>
-        </article>
-        <article className="identity-audit-overview-card">
-          <h3>Ambiguous Mappings</h3>
-          <p>Multiple source tracks folded under a single release track.</p>
-          <strong>{releaseCount}</strong>
-        </article>
-        <article className="identity-audit-overview-card">
-          <h3>Grouping Concerns</h3>
-          <p>Release tracks grouped together for analysis.</p>
-          <strong>{compositionCount}</strong>
-        </article>
-        <article className="identity-audit-overview-card">
-          <h3>Suggested Matches</h3>
-          <p>Conservative title/artist matches awaiting review.</p>
-          <strong>{suggestedCount}</strong>
-        </article>
-        <article className="identity-audit-overview-card">
-          <h3>Needs Review</h3>
-          <p>Items requiring human judgment across variant-rule families.</p>
-          <strong>{ambiguousCount}</strong>
-        </article>
-      </div>
+      <TrackIdentityAuditOverviewCards
+        canonicalCount={canonicalCount}
+        releaseCount={releaseCount}
+        compositionCount={compositionCount}
+        suggestedCount={suggestedCount}
+        ambiguousCount={ambiguousCount}
+      />
     );
   }
 
@@ -7249,28 +7108,12 @@ export function App() {
     const previewedCount = mergeTargets.filter((target) => releaseAlbumMergePreviewByKey[target.key]).length;
     const dryRunCount = mergeTargets.filter((target) => releaseAlbumMergeDryRunByKey[target.key]).length;
     return (
-      <div className="identity-audit-overview-grid">
-        <article className="identity-audit-overview-card">
-          <h3>Duplicate Albums</h3>
-          <p>Strongest album duplicate signal using one resolved Spotify album.</p>
-          <strong>{albumDuplicateLookupResult?.total ?? 0}</strong>
-        </article>
-        <article className="identity-audit-overview-card">
-          <h3>Duplicate Name + Artist</h3>
-          <p>Weaker text-based album duplicate signal when Spotify ID is missing or mixed.</p>
-          <strong>{albumNameDuplicateLookupResult?.total ?? 0}</strong>
-        </article>
-        <article className="identity-audit-overview-card">
-          <h3>Merge Previews</h3>
-          <p>Album groups already previewed in this session.</p>
-          <strong>{previewedCount}</strong>
-        </article>
-        <article className="identity-audit-overview-card">
-          <h3>Dry Runs</h3>
-          <p>Groups with a row-level dry-run plan available.</p>
-          <strong>{dryRunCount}</strong>
-        </article>
-      </div>
+      <AlbumIdentityAuditOverviewCards
+        duplicateAlbumCount={albumDuplicateLookupResult?.total ?? 0}
+        duplicateNameArtistCount={albumNameDuplicateLookupResult?.total ?? 0}
+        previewedCount={previewedCount}
+        dryRunCount={dryRunCount}
+      />
     );
   }
 
@@ -7533,58 +7376,16 @@ export function App() {
 
   function renderAlbumIdentityAuditMergeReviewTab() {
     const targets = collectAlbumMergeReviewTargets();
-    const selectedTarget = targets.find((target) => target.key === selectedAlbumMergeReviewKey) ?? null;
-    const reviewedTargets = targets.filter((target) => releaseAlbumMergePreviewByKey[target.key] || releaseAlbumMergeDryRunByKey[target.key]);
     return (
-      <div className="identity-audit-grid">
-        <p className="identity-audit-tab-copy">
-          Merge Review keeps the selected album group front and center and preserves full preview and dry-run details.
-        </p>
-        {!selectedTarget && reviewedTargets.length === 0 ? (
-          <p className="empty-copy">Choose Preview merge from an album duplicate group to start a review.</p>
-        ) : null}
-        {selectedTarget ? (
-          <div className="identity-audit-group">
-            <div className="tracks-formula-heading">
-              <h3>Selected Group</h3>
-              <span>{selectedTarget.sourceLabel}</span>
-            </div>
-            {renderReleaseAlbumMergePreview(selectedTarget.key)}
-          </div>
-        ) : null}
-        {reviewedTargets.length > 0 ? (
-          <div className="identity-audit-group">
-            <div className="tracks-formula-heading">
-              <h3>Reviewed Groups</h3>
-              <span>{reviewedTargets.length}</span>
-            </div>
-            <div style={{ display: "grid", gap: "12px" }}>
-              {reviewedTargets.map((target) => {
-                const preview = releaseAlbumMergePreviewByKey[target.key];
-                const dryRun = releaseAlbumMergeDryRunByKey[target.key];
-                return (
-                  <button
-                    key={`album-reviewed-target-${target.key}`}
-                    className="secondary-button"
-                    onClick={() => setSelectedAlbumMergeReviewKey(target.key)}
-                    style={{ alignItems: "center", display: "flex", justifyContent: "space-between", textAlign: "left" }}
-                    type="button"
-                  >
-                    <span>
-                      <strong>{target.title}</strong>
-                      <span className="empty-copy" style={{ display: "block", marginTop: "4px" }}>{target.releaseAlbumIds.join(", ")}</span>
-                    </span>
-                    <span style={{ alignItems: "center", display: "flex", gap: "8px" }}>
-                      {preview ? renderAlbumMergeReadinessBadge(preview.merge_readiness) : null}
-                      {dryRun ? <span className="empty-copy">Dry run ready</span> : null}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
-      </div>
+      <AlbumIdentityAuditMergeReviewTab
+        targets={targets}
+        selectedAlbumMergeReviewKey={selectedAlbumMergeReviewKey}
+        releaseAlbumMergePreviewByKey={releaseAlbumMergePreviewByKey}
+        releaseAlbumMergeDryRunByKey={releaseAlbumMergeDryRunByKey}
+        renderAlbumMergeReadinessBadge={renderAlbumMergeReadinessBadge}
+        renderReleaseAlbumMergePreview={renderReleaseAlbumMergePreview}
+        onSelectTarget={setSelectedAlbumMergeReviewKey}
+      />
     );
   }
 
@@ -7606,960 +7407,61 @@ export function App() {
   }
 
   function renderTrackIdentityAuditAmbiguousTab() {
-    const familyOptions = identityAuditAmbiguous?.family_counts ?? [];
-    const suggestedItems = identityAuditSuggestedGroups?.items ?? [];
-    const filteredItems = computeAmbiguousTrackItems();
-    const unifiedItems = computeUnifiedReviewItems();
-    const visibleItems = filteredItems.slice(0, identityAuditAmbiguousVisibleCount);
-    const focusedItem = identityAuditFocusedReviewKey == null
-      ? null
-      : (unifiedItems.find((item) => item.decision_key === identityAuditFocusedReviewKey) ?? null);
-    const focusedDecision = focusedItem ? identityAuditLocalDecisions[focusedItem.decision_key] : undefined;
-    const reviewedAmbiguousCount = filteredItems.reduce((count, item) => (
-      isReviewedDecision(identityAuditLocalDecisions[trackDecisionKey(item)]) ? count + 1 : count
-    ), 0);
-    const reviewedSuggestedCount = suggestedItems.reduce((count, group) => {
-      const decision = identityAuditLocalDecisions[groupDecisionKey(group)];
-      return isReviewedDecision(decision) ? count + 1 : count;
-    }, 0);
-    const reviewedCount = reviewedAmbiguousCount + reviewedSuggestedCount;
-    const totalReviewableCount = filteredItems.length + suggestedItems.length;
-    const summaryByFamily = new Map<string, { total: number; approved: number; rejected: number; skipped: number; unreviewed: number }>();
-    for (const item of unifiedItems) {
-      const current = summaryByFamily.get(item.family_label) ?? { total: 0, approved: 0, rejected: 0, skipped: 0, unreviewed: 0 };
-      current.total += 1;
-      const verdict = identityAuditLocalDecisions[item.decision_key]?.verdict ?? "unsure";
-      if (verdict === "good_to_group") {
-        current.approved += 1;
-      } else if (verdict === "not_good") {
-        current.rejected += 1;
-      } else if (verdict === "skipped") {
-        current.skipped += 1;
-      } else {
-        current.unreviewed += 1;
-      }
-      summaryByFamily.set(item.family_label, current);
-    }
-    const summaryEntries = Array.from(summaryByFamily.entries())
-      .sort((left, right) => right[1].total - left[1].total || left[0].localeCompare(right[0]));
-    const visibleSummaryEntries = summaryEntries.slice(0, 8);
-    const remainingSummaryCount = Math.max(0, summaryEntries.length - visibleSummaryEntries.length);
-
-    const groupApproved: Array<Record<string, unknown>> = [];
-    const groupRejected: Array<Record<string, unknown>> = [];
-    const groupSkipped: Array<Record<string, unknown>> = [];
-    const trackApproved: Array<Record<string, unknown>> = [];
-    const trackRejected: Array<Record<string, unknown>> = [];
-    const trackSkipped: Array<Record<string, unknown>> = [];
-
-    for (const item of unifiedItems) {
-      const decision = identityAuditLocalDecisions[item.decision_key];
-      if (!decision || decision.verdict === "unsure") {
-        continue;
-      }
-      if (item.item_type === "group") {
-        const group = item.group;
-        const label = group?.analysis_track_name || (group?.analysis_track_id != null ? `track_family ${group.analysis_track_id}` : item.decision_key);
-        const entry = {
-          decision_key: item.decision_key,
-          id: group?.analysis_track_id ?? item.decision_key,
-          decision: decision.verdict,
-          label,
-          family: group?.song_family_key ?? item.family_label,
-          bucket: item.bucket_label,
-          would: decision.verdict === "good_to_group"
-            ? `Would group as composition family: ${label}`
-            : decision.verdict === "not_good"
-              ? `Would keep suggested group separate: ${label}`
-              : `Would defer suggested group: ${label}`,
-          source: group
-            ? {
-                analysis_track_id: group.analysis_track_id,
-                analysis_track_name: group.analysis_track_name,
-                song_family_key: group.song_family_key,
-                release_track_count: group.release_track_count,
-                confidence: group.confidence,
-                match_method: group.match_method,
-              }
-            : null,
-        };
-        if (decision.verdict === "good_to_group") {
-          groupApproved.push(entry);
-        } else if (decision.verdict === "not_good") {
-          groupRejected.push(entry);
-        } else {
-          groupSkipped.push(entry);
-        }
-      } else {
-        const track = item.track;
-        const label = track?.release_track_name || (track?.release_track_id != null ? `release_track ${track.release_track_id}` : item.decision_key);
-        const entry = {
-          decision_key: item.decision_key,
-          id: track?.release_track_id ?? item.decision_key,
-          decision: decision.verdict,
-          label,
-          family: track?.dominant_family ?? item.family_label,
-          bucket: track?.bucket ?? item.bucket_label,
-          would: decision.verdict === "good_to_group"
-            ? `Would accept track identity mapping: ${label}`
-            : decision.verdict === "not_good"
-              ? `Would reject track identity mapping: ${label}`
-              : `Would defer track decision: ${label}`,
-          source: track
-            ? {
-                release_track_id: track.release_track_id,
-                release_track_name: track.release_track_name,
-                artist_name: track.artist_name,
-                analysis_name: track.analysis_name,
-                bucket: track.bucket,
-                dominant_family: track.dominant_family,
-                review_families: track.review_families,
-                confidence: track.confidence,
-              }
-            : null,
-        };
-        if (decision.verdict === "good_to_group") {
-          trackApproved.push(entry);
-        } else if (decision.verdict === "not_good") {
-          trackRejected.push(entry);
-        } else {
-          trackSkipped.push(entry);
-        }
-      }
-    }
-
-    const totalLocalDecisions = (
-      groupApproved.length
-      + groupRejected.length
-      + groupSkipped.length
-      + trackApproved.length
-      + trackRejected.length
-      + trackSkipped.length
-    );
-    const previewPayload = {
-      generated_at: new Date().toISOString(),
-      summary: {
-        total_local_decisions: totalLocalDecisions,
-        groups: {
-          approved: groupApproved.length,
-          rejected: groupRejected.length,
-          skipped: groupSkipped.length,
-        },
-        tracks: {
-          approved: trackApproved.length,
-          rejected: trackRejected.length,
-          skipped: trackSkipped.length,
-        },
-      },
-      decisions: {
-        groups: {
-          approved: groupApproved,
-          rejected: groupRejected,
-          skipped: groupSkipped,
-        },
-        tracks: {
-          approved: trackApproved,
-          rejected: trackRejected,
-          skipped: trackSkipped,
-        },
-      },
-    };
-    const previewJson = JSON.stringify(previewPayload, null, 2);
-    const canSaveSubmission = Boolean(
-      totalLocalDecisions > 0
-      && identityAuditPreviewValidationResult
-      && !identityAuditPreviewValidationLoading,
-    );
-
-    const copyPreviewJson = async () => {
-      if (!("clipboard" in navigator) || typeof navigator.clipboard?.writeText !== "function") {
-        setIdentityAuditPreviewCopyStatus("Clipboard unavailable");
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(previewJson);
-        setIdentityAuditPreviewCopyStatus("Copied JSON");
-      } catch {
-        setIdentityAuditPreviewCopyStatus("Copy failed");
-      }
-    };
-
-    const downloadPreviewJson = () => {
-      try {
-        const blob = new Blob([previewJson], { type: "application/json;charset=utf-8" });
-        const objectUrl = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = objectUrl;
-        link.download = "identity-audit-submission-preview.json";
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(objectUrl);
-      } catch {
-        // Keep silent; this is a convenience path only.
-      }
-    };
-
-    const validatePreviewJson = async () => {
-      if (identityAuditPreviewValidationLoading) {
-        return;
-      }
-      setIdentityAuditPreviewValidationLoading(true);
-      setIdentityAuditPreviewValidationError("");
-      try {
-        const response = await fetch(
-          `${apiBaseUrl}/debug/tracks/identity-audit/submission-preview/validate`,
-          {
-            method: "POST",
-            credentials: "include",
-            headers: { "Content-Type": "application/json" },
-            body: previewJson,
-          },
-        );
-        if (!response.ok) {
-          let detail = "Failed to validate submission preview.";
-          try {
-            const payload = (await response.json()) as { detail?: string };
-            if (payload.detail) {
-              detail = payload.detail;
-            }
-          } catch {
-            // keep fallback
-          }
-          throw new Error(detail);
-        }
-        const payload = (await response.json()) as SubmissionPreviewValidationResponse;
-        setIdentityAuditPreviewValidationResult(payload);
-        setIdentityAuditPreviewValidatedAt(Date.now());
-      } catch (error) {
-        setIdentityAuditPreviewValidationError(formatUiErrorMessage(error, "Failed to validate preview."));
-        setIdentityAuditPreviewValidationResult(null);
-        setIdentityAuditPreviewValidatedAt(null);
-      } finally {
-        setIdentityAuditPreviewValidationLoading(false);
-      }
-    };
-
-    const saveSubmissionPreview = async () => {
-      if (identityAuditSubmissionSaveLoading || !canSaveSubmission) {
-        return;
-      }
-      setIdentityAuditSubmissionSaveLoading(true);
-      setIdentityAuditSubmissionSaveError("");
-      setIdentityAuditSubmissionSaveResult(null);
-      try {
-        const response = await fetch(
-          `${apiBaseUrl}/debug/tracks/identity-audit/submissions`,
-          {
-            method: "POST",
-            credentials: "include",
-            headers: { "Content-Type": "application/json" },
-            body: previewJson,
-          },
-        );
-        if (!response.ok) {
-          let detail = "Failed to save submission.";
-          try {
-            const payload = (await response.json()) as { detail?: string };
-            if (payload.detail) {
-              detail = payload.detail;
-            }
-          } catch {
-            // keep fallback
-          }
-          throw new Error(detail);
-        }
-        const payload = (await response.json()) as IdentityAuditSubmissionSaveResponse;
-        setIdentityAuditSubmissionSaveResult(payload);
-        void loadIdentityAuditSavedSubmissions(true);
-      } catch (error) {
-        setIdentityAuditSubmissionSaveError(formatUiErrorMessage(error, "Failed to save submission."));
-      } finally {
-        setIdentityAuditSubmissionSaveLoading(false);
-      }
-    };
-
-    const renderPreviewBucket = (title: string, entries: Array<Record<string, unknown>>) => (
-      <div className="identity-audit-group" key={`preview-${title}`}>
-        <div className="tracks-formula-heading">
-          <h3>{title}</h3>
-          <span>{entries.length}</span>
-        </div>
-        {entries.length === 0 ? (
-          <p className="empty-copy">None</p>
-        ) : (
-          <div className="identity-audit-variant-list">
-            {entries.map((entry, index) => (
-              <div className="identity-audit-variant" key={`preview-entry-${title}-${String(entry.decision_key)}-${index}`}>
-                <div className="identity-audit-variant-main">
-                  <strong>{String(entry.label ?? entry.id ?? "Unknown item")}</strong>
-                  <span>{String(entry.would ?? "")}</span>
-                  <code>{String(entry.decision_key ?? "")}</code>
-                </div>
-                <div className="identity-audit-variant-stats">
-                  {entry.family ? <span>{String(entry.family)}</span> : null}
-                  {entry.bucket ? <span>{String(entry.bucket)}</span> : null}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-
-    const applyFocusedAction = (verdict: LocalReviewVerdict) => {
-      if (!focusedItem) {
-        return;
-      }
-      const nextDecisions = {
-        ...identityAuditLocalDecisions,
-        [focusedItem.decision_key]: {
-          verdict,
-          grouping_target: verdict === "good_to_group"
-            ? (identityAuditLocalDecisions[focusedItem.decision_key]?.grouping_target ?? "same_composition")
-            : null,
-          note: identityAuditLocalDecisions[focusedItem.decision_key]?.note ?? "",
-          updated_at_ms: Date.now(),
-        },
-      };
-      updateLocalReviewDecision(focusedItem.decision_key, {
-        verdict,
-        grouping_target: verdict === "good_to_group"
-          ? (identityAuditLocalDecisions[focusedItem.decision_key]?.grouping_target ?? "same_composition")
-          : null,
-      });
-      setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedItem.decision_key, nextDecisions));
-    };
-
     return (
-      <div className="identity-audit-grid">
-        <div className="identity-audit-ambiguous-toolbar">
-          <p className="identity-audit-tab-copy">
-            Work one queue from candidate to decision, then validate and save. Saved submissions remain dry-run only unless a future apply path is added.
-          </p>
-          <div className="identity-audit-ambiguous-summary">
-            <span className="identity-audit-pill">Local only (not saved)</span>
-            <span className="identity-audit-pill">Reviewed {reviewedCount} / {totalReviewableCount}</span>
-            <span className="identity-audit-pill">Shortcuts: A approve, R reject, S skip, N next</span>
-            <button
-              className="secondary-button"
-              onClick={() => {
-                setIdentityAuditLocalDecisions({});
-                setIdentityAuditPreviewCopyStatus("");
-                setIdentityAuditPreviewValidationLoading(false);
-                setIdentityAuditPreviewValidationError("");
-                setIdentityAuditPreviewValidationResult(null);
-                setIdentityAuditPreviewValidatedAt(null);
-                setIdentityAuditSubmissionSaveLoading(false);
-                setIdentityAuditSubmissionSaveError("");
-                setIdentityAuditSubmissionSaveResult(null);
-              }}
-              type="button"
-            >
-              Reset local decisions
-            </button>
-          </div>
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Workflow</h3>
-            <span>{reviewedCount} / {totalReviewableCount} reviewed</span>
-          </div>
-          <div className="identity-audit-stats">
-            <span className="identity-audit-stat"><span>1 Candidate</span><strong>{unifiedItems.length} queued</strong></span>
-            <span className="identity-audit-stat"><span>2 Review</span><strong>{focusedItem ? "active" : "complete"}</strong></span>
-            <span className="identity-audit-stat"><span>3 Decision</span><strong>{totalLocalDecisions} local</strong></span>
-            <span className="identity-audit-stat"><span>4 Validate</span><strong>{identityAuditPreviewValidationResult ? "validated" : "not validated"}</strong></span>
-            <span className="identity-audit-stat"><span>5 Save</span><strong>{identityAuditSubmissionSaveResult ? `#${identityAuditSubmissionSaveResult.submission_id}` : "not saved"}</strong></span>
-          </div>
-        </div>
-        <div className="identity-audit-ambiguous-filters">
-          <label>
-            Family
-            <select
-              onChange={(event) => setIdentityAuditAmbiguousFamilyFilter(event.target.value)}
-              value={identityAuditAmbiguousFamilyFilter}
-            >
-              <option value="all">All families</option>
-              {familyOptions.map((family) => (
-                <option key={`family-${family.family}`} value={family.family}>{family.family} ({family.count})</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Bucket
-            <select
-              onChange={(event) => setIdentityAuditAmbiguousBucketFilter(event.target.value as "all" | "grouped" | "ungrouped")}
-              value={identityAuditAmbiguousBucketFilter}
-            >
-              <option value="all">All</option>
-              <option value="grouped">Grouped</option>
-              <option value="ungrouped">Ungrouped</option>
-            </select>
-          </label>
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Candidate Summary</h3>
-            <span>{summaryEntries.length} buckets</span>
-          </div>
-          {visibleSummaryEntries.length > 0 ? (
-            <div className="identity-audit-stats">
-              {visibleSummaryEntries.map(([label, counts]) => (
-                <span className="identity-audit-stat" key={`summary-${label}`}>
-                  <span>{label}</span>
-                  <strong>
-                    {counts.total} total | {counts.approved} approved | {counts.rejected} rejected | {counts.skipped} skipped | {counts.unreviewed} unreviewed
-                  </strong>
-                </span>
-              ))}
-              {remainingSummaryCount > 0 ? (
-                <span className="identity-audit-stat"><span>More buckets</span><strong>+{remainingSummaryCount} more</strong></span>
-              ) : null}
-            </div>
-          ) : (
-            <p className="empty-copy">No review buckets available yet.</p>
-          )}
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Review Active Candidate</h3>
-            <span>{findNextUnreviewedDecisionKey(unifiedItems) ? "Ready" : "Complete"}</span>
-          </div>
-          {focusedItem ? (
-            <article className="identity-audit-example">
-              <div className="identity-audit-example-header">
-                <div>
-                  <h4>{focusedItem.title}</h4>
-                  <p>{focusedItem.subtitle}</p>
-                </div>
-                <span className="identity-audit-type-badge">{focusedItem.item_type === "group" ? "Suggested match" : "Needs review"}</span>
-              </div>
-              <div className="identity-audit-stats">
-                <span className="identity-audit-stat"><span>Issue group</span><strong>{focusedItem.bucket_label}</strong></span>
-                <span className="identity-audit-stat"><span>Reason</span><strong>{focusedItem.family_label}</strong></span>
-                <span className="identity-audit-stat"><span>Decision</span><strong>{focusedDecision?.verdict ?? "unreviewed"}</strong></span>
-              </div>
-              <div className="identity-audit-ambiguous-summary">
-                <button className="secondary-button" onClick={() => applyFocusedAction("good_to_group")} type="button">Approve</button>
-                <button className="secondary-button" onClick={() => applyFocusedAction("not_good")} type="button">Reject</button>
-                <button className="secondary-button" onClick={() => applyFocusedAction("skipped")} type="button">Skip</button>
-                <button
-                  className="secondary-button"
-                  onClick={() => setIdentityAuditFocusedReviewKey(findNextUnreviewedDecisionKey(unifiedItems, focusedItem.decision_key))}
-                  type="button"
-                >
-                  Next unreviewed
-                </button>
-              </div>
-            </article>
-          ) : (
-            <p className="empty-copy">All items reviewed locally.</p>
-          )}
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Validate and Save Decisions</h3>
-            <span>{totalLocalDecisions} decisions</span>
-          </div>
-          <div className="identity-audit-ambiguous-summary">
-            <span className="identity-audit-pill">Groups: {groupApproved.length} approved, {groupRejected.length} rejected, {groupSkipped.length} skipped</span>
-            <span className="identity-audit-pill">Tracks: {trackApproved.length} approved, {trackRejected.length} rejected, {trackSkipped.length} skipped</span>
-            <button className="secondary-button" onClick={() => void copyPreviewJson()} type="button">Copy JSON</button>
-            <button className="secondary-button" onClick={downloadPreviewJson} type="button">Download JSON</button>
-            <button
-              className="secondary-button"
-              disabled={identityAuditPreviewValidationLoading}
-              onClick={() => void validatePreviewJson()}
-              type="button"
-            >
-              {identityAuditPreviewValidationLoading
-                ? "Validating..."
-                : identityAuditPreviewValidationResult
-                  ? "Revalidate Preview"
-                  : "Validate Preview"}
-            </button>
-            <button
-              className="secondary-button"
-              disabled={!canSaveSubmission || identityAuditSubmissionSaveLoading}
-              onClick={() => void saveSubmissionPreview()}
-              type="button"
-            >
-              {identityAuditSubmissionSaveLoading ? "Saving..." : "Save Submission"}
-            </button>
-            {identityAuditPreviewCopyStatus ? <span className="identity-audit-pill">{identityAuditPreviewCopyStatus}</span> : null}
-          </div>
-          <p className="empty-copy">Saved only. No changes applied.</p>
-          {identityAuditPreviewValidationResult
-            && (identityAuditPreviewValidationResult.summary.warnings > 0
-              || identityAuditPreviewValidationResult.summary.unknown_groups > 0
-              || identityAuditPreviewValidationResult.summary.unknown_tracks > 0) ? (
-            <p className="empty-copy">Validation has warnings; saved record will include them.</p>
-            ) : null}
-          {identityAuditPreviewValidationError ? <p className="empty-copy">{identityAuditPreviewValidationError}</p> : null}
-          {identityAuditSubmissionSaveError ? <p className="empty-copy">{identityAuditSubmissionSaveError}</p> : null}
-          {identityAuditSubmissionSaveResult ? (
-            <div className="identity-audit-group">
-              <div className="tracks-formula-heading">
-                <h3>Saved Submission</h3>
-                <span>#{identityAuditSubmissionSaveResult.submission_id}</span>
-              </div>
-              <p className="empty-copy">
-                Saved submission #{identityAuditSubmissionSaveResult.submission_id}
-                {" "}
-                ({identityAuditSubmissionSaveResult.status}) at {new Date(identityAuditSubmissionSaveResult.created_at).toLocaleString()}.
-              </p>
-              <div className="identity-audit-stats">
-                <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditSubmissionSaveResult.warnings.length}</strong></span>
-                <span className="identity-audit-stat"><span>Unknown groups</span><strong>{identityAuditSubmissionSaveResult.unknown_items.groups.length}</strong></span>
-                <span className="identity-audit-stat"><span>Unknown tracks</span><strong>{identityAuditSubmissionSaveResult.unknown_items.tracks.length}</strong></span>
-              </div>
-            </div>
-          ) : null}
-          {identityAuditPreviewValidationResult ? (
-            <div className="identity-audit-group">
-              <div className="tracks-formula-heading">
-                <h3>Validation Result</h3>
-                <span>{identityAuditPreviewValidationResult.ok ? "ok" : "failed"}</span>
-              </div>
-              {identityAuditPreviewValidatedAt ? (
-                <p className="empty-copy">Validated at {new Date(identityAuditPreviewValidatedAt).toLocaleTimeString()}</p>
-              ) : null}
-              <div className="identity-audit-stats">
-                <span className="identity-audit-stat"><span>Total</span><strong>{identityAuditPreviewValidationResult.summary.total_decisions}</strong></span>
-                <span className="identity-audit-stat"><span>Groups</span><strong>{identityAuditPreviewValidationResult.summary.group_decisions}</strong></span>
-                <span className="identity-audit-stat"><span>Tracks</span><strong>{identityAuditPreviewValidationResult.summary.track_decisions}</strong></span>
-                <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditPreviewValidationResult.summary.warnings}</strong></span>
-                <span className="identity-audit-stat"><span>Unknown groups</span><strong>{identityAuditPreviewValidationResult.summary.unknown_groups}</strong></span>
-                <span className="identity-audit-stat"><span>Unknown tracks</span><strong>{identityAuditPreviewValidationResult.summary.unknown_tracks}</strong></span>
-              </div>
-              {identityAuditPreviewValidationResult.summary.total_decisions === 0 ? (
-                <p className="empty-copy">No decisions to validate.</p>
-              ) : null}
-              {identityAuditPreviewValidationResult.warnings.length > 0 ? (
-                <div className="identity-audit-variant-list">
-                  {identityAuditPreviewValidationResult.warnings.map((warning, index) => (
-                    <div className="identity-audit-variant" key={`validation-warning-${index}`}>
-                      <div className="identity-audit-variant-main">
-                        <strong>Warning</strong>
-                        <span>{warning}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="empty-copy">No validation warnings.</p>
-              )}
-              <div className="identity-audit-group">
-                <div className="tracks-formula-heading">
-                  <h3>Unknown Groups</h3>
-                  <span>{identityAuditPreviewValidationResult.unknown_items.groups.length}</span>
-                </div>
-                {identityAuditPreviewValidationResult.unknown_items.groups.length > 0 ? (
-                  <div className="identity-audit-variant-list">
-                    {identityAuditPreviewValidationResult.unknown_items.groups.map((item, index) => (
-                      <div className="identity-audit-variant" key={`unknown-group-${index}`}>
-                        <div className="identity-audit-variant-main">
-                          <strong>{String(item.label ?? item.id ?? "Unknown group")}</strong>
-                          <code>{String(item.decision_key ?? "")}</code>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="empty-copy">None.</p>
-                )}
-              </div>
-              <div className="identity-audit-group">
-                <div className="tracks-formula-heading">
-                  <h3>Unknown Tracks</h3>
-                  <span>{identityAuditPreviewValidationResult.unknown_items.tracks.length}</span>
-                </div>
-                {identityAuditPreviewValidationResult.unknown_items.tracks.length > 0 ? (
-                  <div className="identity-audit-variant-list">
-                    {identityAuditPreviewValidationResult.unknown_items.tracks.map((item, index) => (
-                      <div className="identity-audit-variant" key={`unknown-track-${index}`}>
-                        <div className="identity-audit-variant-main">
-                          <strong>{String(item.label ?? item.id ?? "Unknown track")}</strong>
-                          <code>{String(item.decision_key ?? "")}</code>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="empty-copy">None.</p>
-                )}
-              </div>
-            </div>
-          ) : null}
-          {totalLocalDecisions === 0 ? (
-            <p className="empty-copy">No local decisions yet.</p>
-          ) : (
-            <div className="identity-audit-grid">
-              <div className="identity-audit-group">
-                <div className="tracks-formula-heading">
-                  <h3>Group Decisions</h3>
-                  <span>{groupApproved.length + groupRejected.length + groupSkipped.length}</span>
-                </div>
-                {renderPreviewBucket("Approved", groupApproved)}
-                {renderPreviewBucket("Rejected", groupRejected)}
-                {renderPreviewBucket("Skipped", groupSkipped)}
-              </div>
-              <div className="identity-audit-group">
-                <div className="tracks-formula-heading">
-                  <h3>Track Decisions</h3>
-                  <span>{trackApproved.length + trackRejected.length + trackSkipped.length}</span>
-                </div>
-                {renderPreviewBucket("Approved", trackApproved)}
-                {renderPreviewBucket("Rejected", trackRejected)}
-                {renderPreviewBucket("Skipped", trackSkipped)}
-              </div>
-            </div>
-          )}
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Saved Decision Sets</h3>
-            <span>{identityAuditSavedSubmissions?.total ?? 0}</span>
-          </div>
-          <div className="identity-audit-ambiguous-summary">
-            <button
-              className="secondary-button"
-              disabled={identityAuditSavedSubmissionsLoading}
-              onClick={() => void loadIdentityAuditSavedSubmissions(true)}
-              type="button"
-            >
-              {identityAuditSavedSubmissionsLoading ? "Refreshing..." : "Refresh saved submissions"}
-            </button>
-          </div>
-          {identityAuditSavedSubmissionsError ? <p className="empty-copy">{identityAuditSavedSubmissionsError}</p> : null}
-          {!identityAuditSavedSubmissions && !identityAuditSavedSubmissionsError ? (
-            <p className="empty-copy">{identityAuditSavedSubmissionsLoading ? "Loading saved submissions..." : "Saved submissions are not loaded yet."}</p>
-          ) : null}
-          {identityAuditSavedSubmissions && identityAuditSavedSubmissions.items.length === 0 ? (
-            <p className="empty-copy">No saved submissions yet.</p>
-          ) : null}
-          {identityAuditSavedSubmissions && identityAuditSavedSubmissions.items.length > 0 ? (
-            <div className="identity-audit-variant-list">
-              {identityAuditSavedSubmissions.items.map((item) => (
-                <div className="identity-audit-variant" key={`saved-submission-${item.id}`}>
-                  <div className="identity-audit-variant-main">
-                    <strong>#{item.id} • {item.status}</strong>
-                    <span>{new Date(item.created_at).toLocaleString()}</span>
-                    <span>
-                      {Number(item.summary.total_decisions ?? 0)} decisions • {item.warnings_count} warnings • {item.unknown_groups} unknown groups • {item.unknown_tracks} unknown tracks
-                    </span>
-                  </div>
-                  <div className="identity-audit-variant-stats">
-                    <button className="secondary-button" onClick={() => void viewIdentityAuditSavedSubmission(item.id)} type="button">View</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {identityAuditSavedSubmissionDetailError ? <p className="empty-copy">{identityAuditSavedSubmissionDetailError}</p> : null}
-          {identityAuditSavedSubmissionDetailLoading ? <p className="empty-copy">Loading saved submission...</p> : null}
-          {identityAuditSavedSubmissionDetail ? (
-            <div>
-              <div className="tracks-formula-heading">
-                <h3>Saved Submission Detail</h3>
-                <span>#{identityAuditSavedSubmissionDetail.item.id}</span>
-              </div>
-              <div className="identity-audit-ambiguous-summary">
-                <button
-                  className="secondary-button"
-                  disabled={identityAuditSavedSubmissionDryRunLoading}
-                  onClick={() => void dryRunIdentityAuditSavedSubmission(identityAuditSavedSubmissionDetail.item.id)}
-                  type="button"
-                >
-                  {identityAuditSavedSubmissionDryRunLoading
-                    ? "Running dry run..."
-                    : identityAuditSavedSubmissionDryRun
-                      ? "Re-run Dry Run"
-                      : "Dry Run"}
-                </button>
-              </div>
-              <p className="empty-copy">Dry run only. No changes applied.</p>
-              <div className="identity-audit-stats">
-                <span className="identity-audit-stat"><span>Status</span><strong>{identityAuditSavedSubmissionDetail.item.status}</strong></span>
-                <span className="identity-audit-stat"><span>Created</span><strong>{new Date(identityAuditSavedSubmissionDetail.item.created_at).toLocaleString()}</strong></span>
-                <span className="identity-audit-stat"><span>Total</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.total_decisions}</strong></span>
-                <span className="identity-audit-stat"><span>Groups</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.group_decisions}</strong></span>
-                <span className="identity-audit-stat"><span>Tracks</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.track_decisions}</strong></span>
-              </div>
-              <div className="identity-audit-stats">
-                <span className="identity-audit-stat"><span>Approved</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.approved}</strong></span>
-                <span className="identity-audit-stat"><span>Rejected</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.rejected}</strong></span>
-                <span className="identity-audit-stat"><span>Skipped</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.skipped}</strong></span>
-                <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditSavedSubmissionDetail.item.validation.summary.warnings}</strong></span>
-              </div>
-              {identityAuditSavedSubmissionDryRunError ? <p className="empty-copy">{identityAuditSavedSubmissionDryRunError}</p> : null}
-              {identityAuditSavedSubmissionDryRun ? (
-                <div className="identity-audit-group">
-                  <div className="tracks-formula-heading">
-                    <h3>Dry Run Result</h3>
-                    <span>#{identityAuditSavedSubmissionDryRun.submission_id} • {identityAuditSavedSubmissionDryRun.status}</span>
-                  </div>
-                  {identityAuditSavedSubmissionDryRunAt ? (
-                    <p className="empty-copy">Dry run at {new Date(identityAuditSavedSubmissionDryRunAt).toLocaleTimeString()}</p>
-                  ) : null}
-                  <div className="identity-audit-stats">
-                    <span className="identity-audit-stat"><span>Would apply</span><strong>{identityAuditSavedSubmissionDryRun.summary.would_apply}</strong></span>
-                    <span className="identity-audit-stat"><span>Approved groups</span><strong>{identityAuditSavedSubmissionDryRun.summary.approved_groups}</strong></span>
-                    <span className="identity-audit-stat"><span>Approved tracks</span><strong>{identityAuditSavedSubmissionDryRun.summary.approved_tracks}</strong></span>
-                    <span className="identity-audit-stat"><span>Rejected no-ops</span><strong>{identityAuditSavedSubmissionDryRun.summary.rejected}</strong></span>
-                    <span className="identity-audit-stat"><span>Skipped no-ops</span><strong>{identityAuditSavedSubmissionDryRun.summary.skipped}</strong></span>
-                  </div>
-                  <div className="identity-audit-stats">
-                    <span className="identity-audit-stat"><span>Warnings</span><strong>{identityAuditSavedSubmissionDryRun.summary.warnings}</strong></span>
-                    <span className="identity-audit-stat"><span>Unknown groups</span><strong>{identityAuditSavedSubmissionDryRun.summary.unknown_groups}</strong></span>
-                    <span className="identity-audit-stat"><span>Unknown tracks</span><strong>{identityAuditSavedSubmissionDryRun.summary.unknown_tracks}</strong></span>
-                  </div>
-                  {identityAuditSavedSubmissionDryRun.warnings.length > 0 ? (
-                    <div className="identity-audit-variant-list">
-                      {identityAuditSavedSubmissionDryRun.warnings.map((warning, index) => (
-                        <div className="identity-audit-variant" key={`dry-run-warning-${index}`}>
-                          <div className="identity-audit-variant-main">
-                            <strong>Warning</strong>
-                            <span>{warning}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                  <div className="identity-audit-group">
-                    <div className="tracks-formula-heading">
-                      <h3>Plan</h3>
-                      <span>{identityAuditSavedSubmissionDryRun.plan.groups.length + identityAuditSavedSubmissionDryRun.plan.tracks.length} items</span>
-                    </div>
-                    {identityAuditSavedSubmissionDryRun.plan.groups.length === 0 && identityAuditSavedSubmissionDryRun.plan.tracks.length === 0 ? (
-                      <p className="empty-copy">No plan items.</p>
-                    ) : (
-                      <div className="identity-audit-variant-list">
-                        {identityAuditSavedSubmissionDryRun.plan.groups.map((item, index) => (
-                          <div className="identity-audit-variant" key={`dry-run-group-${index}`}>
-                            <div className="identity-audit-variant-main">
-                              <strong>{String(item.label ?? item.id ?? "Group item")}</strong>
-                              <span>{String(item.action ?? "would_accept_group")}</span>
-                              <code>{String(item.decision_key ?? "")}</code>
-                            </div>
-                          </div>
-                        ))}
-                        {identityAuditSavedSubmissionDryRun.plan.tracks.map((item, index) => (
-                          <div className="identity-audit-variant" key={`dry-run-track-${index}`}>
-                            <div className="identity-audit-variant-main">
-                              <strong>{String(item.label ?? item.id ?? "Track item")}</strong>
-                              <span>{String(item.action ?? "would_accept_track_mapping")}</span>
-                              <code>{String(item.decision_key ?? "")}</code>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Candidate Source: Suggested Matches</h3>
-            <span>{suggestedItems.length} groups</span>
-          </div>
-          {identityAuditSuggestedError ? <p className="empty-copy">{identityAuditSuggestedError}</p> : null}
-          {!identityAuditSuggestedGroups && !identityAuditSuggestedError ? (
-            <p className="empty-copy">{identityAuditSuggestedLoading ? "Loading suggested groups..." : "Suggested groups are not loaded yet."}</p>
-          ) : null}
-          {suggestedItems.length > 0 ? (
-            <div className="identity-audit-examples">
-              {suggestedItems.map((group) => {
-                const decisionKey = groupDecisionKey(group);
-                const decision = identityAuditLocalDecisions[decisionKey] ?? {
-                  verdict: "unsure" as LocalReviewVerdict,
-                  grouping_target: null,
-                  note: "",
-                  updated_at_ms: 0,
-                };
-                return (
-                  <article className="identity-audit-example" key={`suggested-${group.analysis_track_id}`}>
-                    <div className="identity-audit-example-header">
-                      <div>
-                        <h4>{group.analysis_track_name || `Track Family ${group.analysis_track_id}`}</h4>
-                        <p>{group.match_method || "suggested"} | {Math.round(group.confidence * 100)}% confidence</p>
-                      </div>
-                      <span className="identity-audit-type-badge">Suggested match</span>
-                    </div>
-                    <div className="identity-audit-stats">
-                      <span className="identity-audit-stat"><span>Release tracks</span><strong>{group.release_track_count}</strong></span>
-                      {group.song_family_key ? <span className="identity-audit-stat"><span>Family key</span><strong>{group.song_family_key}</strong></span> : null}
-                    </div>
-                    <div className="identity-audit-review-controls">
-                      <label>
-                        Decision
-                        <select
-                          onChange={(event) => {
-                            const nextVerdict = event.target.value as LocalReviewVerdict;
-                            updateLocalReviewDecision(decisionKey, {
-                              verdict: nextVerdict,
-                              grouping_target: nextVerdict === "good_to_group" ? (decision.grouping_target ?? "same_composition") : null,
-                            });
-                          }}
-                          value={decision.verdict}
-                        >
-                          <option value="unsure">Unreviewed</option>
-                          <option value="good_to_group">Good to group</option>
-                          <option value="not_good">Not good</option>
-                          <option value="skipped">Skipped</option>
-                        </select>
-                      </label>
-                      <label>
-                        Grouping target
-                        <select
-                          disabled={decision.verdict !== "good_to_group"}
-                          onChange={(event) =>
-                            updateLocalReviewDecision(decisionKey, {
-                              grouping_target: event.target.value as Exclude<LocalGroupingTarget, null>,
-                            })}
-                          value={decision.grouping_target ?? "same_composition"}
-                        >
-                          <option value="same_composition">Group as same work</option>
-                          <option value="same_release_track_only">Keep as release-only match</option>
-                        </select>
-                      </label>
-                    </div>
-                    <label className="identity-audit-review-note">
-                      Note
-                      <textarea
-                        onChange={(event) => updateLocalReviewDecision(decisionKey, { note: event.target.value })}
-                        placeholder="Optional review context"
-                        rows={2}
-                        value={decision.note}
-                      />
-                    </label>
-                    <div className="identity-audit-variant-list">
-                      {group.release_tracks.map((releaseTrack) => (
-                        <div className="identity-audit-variant" key={`group-${group.analysis_track_id}-${releaseTrack.release_track_id}`}>
-                          <div className="identity-audit-variant-main">
-                            <strong>{releaseTrack.release_track_name}</strong>
-                            <span>{releaseTrack.primary_artists || "Unknown artists"}</span>
-                            <code>release {releaseTrack.release_track_id}</code>
-                          </div>
-                          <div className="identity-audit-variant-stats">
-                            {releaseTrack.album_names ? <span>{releaseTrack.album_names}</span> : null}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : identityAuditSuggestedGroups ? (
-            <p className="empty-copy">No suggested groups returned.</p>
-          ) : null}
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Candidate Source: Needs Review</h3>
-            <span>{filteredItems.length} rows</span>
-          </div>
-          {identityAuditAmbiguousError ? <p className="empty-copy">{identityAuditAmbiguousError}</p> : null}
-          {!identityAuditAmbiguous && !identityAuditAmbiguousError ? (
-            <p className="empty-copy">{identityAuditAmbiguousLoading ? "Loading ambiguous queue..." : "Ambiguous queue is not loaded yet."}</p>
-          ) : null}
-          {identityAuditAmbiguous?.parse_warning ? (
-            <p className="empty-copy">Parser warning: {identityAuditAmbiguous.parse_warning}</p>
-          ) : null}
-          {visibleItems.length > 0 ? (
-            <div className="identity-audit-examples">
-              {visibleItems.map((item) => {
-                const decision = identityAuditLocalDecisions[trackDecisionKey(item)] ?? {
-                  verdict: "unsure" as LocalReviewVerdict,
-                  grouping_target: null,
-                  note: "",
-                  updated_at_ms: 0,
-                };
-                return (
-                  <article className="identity-audit-example" key={`ambiguous-${item.entry_id}`}>
-                  <div className="identity-audit-example-header">
-                    <div>
-                      <h4>{item.release_track_name}</h4>
-                      <p>{item.artist_name} | {item.bucket} | {item.analysis_name ?? "no analysis mapping"}</p>
-                    </div>
-                    <span className="identity-audit-type-badge">{item.dominant_family ?? "ambiguous"}</span>
-                  </div>
-                  <div className="identity-audit-stats">
-                    <span className="identity-audit-stat"><span>release</span><strong>{item.release_track_id}</strong></span>
-                    {item.confidence != null ? <span className="identity-audit-stat"><span>confidence</span><strong>{Math.round(item.confidence * 100)}%</strong></span> : null}
-                    {item.song_family_key ? <span className="identity-audit-stat"><span>family key</span><strong>{item.song_family_key}</strong></span> : null}
-                    {item.review_families.map((family) => (
-                      <span className="identity-audit-stat" key={`${item.entry_id}-${family}`}><span>rule</span><strong>{family}</strong></span>
-                    ))}
-                  </div>
-                  <div className="identity-audit-review-controls">
-                    <label>
-                      Decision
-                      <select
-                        onChange={(event) => {
-                          const nextVerdict = event.target.value as LocalReviewVerdict;
-                          updateLocalReviewDecision(trackDecisionKey(item), {
-                            verdict: nextVerdict,
-                            grouping_target: nextVerdict === "good_to_group" ? (decision.grouping_target ?? "same_composition") : null,
-                          });
-                        }}
-                        value={decision.verdict}
-                      >
-                        <option value="unsure">Unreviewed</option>
-                        <option value="good_to_group">Good to group</option>
-                        <option value="not_good">Not good</option>
-                        <option value="skipped">Skipped</option>
-                      </select>
-                    </label>
-                    <label>
-                      Grouping target
-                      <select
-                        disabled={decision.verdict !== "good_to_group"}
-                        onChange={(event) =>
-                          updateLocalReviewDecision(trackDecisionKey(item), {
-                            grouping_target: event.target.value as Exclude<LocalGroupingTarget, null>,
-                          })}
-                        value={decision.grouping_target ?? "same_composition"}
-                      >
-                        <option value="same_composition">Group as same work</option>
-                        <option value="same_release_track_only">Keep as release-only match</option>
-                      </select>
-                    </label>
-                  </div>
-                  <label className="identity-audit-review-note">
-                    Note
-                    <textarea
-                      onChange={(event) => updateLocalReviewDecision(trackDecisionKey(item), { note: event.target.value })}
-                      placeholder="Optional review context"
-                      rows={2}
-                      value={decision.note}
-                    />
-                  </label>
-                </article>
-                );
-              })}
-            </div>
-          ) : identityAuditAmbiguous ? (
-            <p className="empty-copy">No ambiguous rows match the current filters.</p>
-          ) : null}
-          {filteredItems.length > visibleItems.length ? (
-            <div className="identity-audit-load-more-row">
-              <button
-                className="secondary-button"
-                onClick={() => setIdentityAuditAmbiguousVisibleCount((current) => current + IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP)}
-                type="button"
-              >
-                Show more ({filteredItems.length - visibleItems.length} remaining)
-              </button>
-            </div>
-          ) : null}
-        </div>
-      </div>
+      <TrackIdentityAuditAmbiguousTab
+        computeAmbiguousTrackItems={computeAmbiguousTrackItems}
+        computeUnifiedReviewItems={computeUnifiedReviewItems}
+        dryRunIdentityAuditSavedSubmission={dryRunIdentityAuditSavedSubmission}
+        findNextUnreviewedDecisionKey={findNextUnreviewedDecisionKey}
+        groupDecisionKey={groupDecisionKey}
+        identityAuditAmbiguous={identityAuditAmbiguous}
+        identityAuditAmbiguousBucketFilter={identityAuditAmbiguousBucketFilter}
+        identityAuditAmbiguousError={identityAuditAmbiguousError}
+        identityAuditAmbiguousFamilyFilter={identityAuditAmbiguousFamilyFilter}
+        identityAuditAmbiguousLoading={identityAuditAmbiguousLoading}
+        identityAuditAmbiguousVisibleCount={identityAuditAmbiguousVisibleCount}
+        identityAuditFocusedReviewKey={identityAuditFocusedReviewKey}
+        identityAuditLocalDecisions={identityAuditLocalDecisions}
+        identityAuditPreviewCopyStatus={identityAuditPreviewCopyStatus}
+        identityAuditPreviewValidatedAt={identityAuditPreviewValidatedAt}
+        identityAuditPreviewValidationError={identityAuditPreviewValidationError}
+        identityAuditPreviewValidationLoading={identityAuditPreviewValidationLoading}
+        identityAuditPreviewValidationResult={identityAuditPreviewValidationResult}
+        identityAuditSavedSubmissionDetail={identityAuditSavedSubmissionDetail}
+        identityAuditSavedSubmissionDetailError={identityAuditSavedSubmissionDetailError}
+        identityAuditSavedSubmissionDetailLoading={identityAuditSavedSubmissionDetailLoading}
+        identityAuditSavedSubmissionDryRun={identityAuditSavedSubmissionDryRun}
+        identityAuditSavedSubmissionDryRunAt={identityAuditSavedSubmissionDryRunAt}
+        identityAuditSavedSubmissionDryRunError={identityAuditSavedSubmissionDryRunError}
+        identityAuditSavedSubmissionDryRunLoading={identityAuditSavedSubmissionDryRunLoading}
+        identityAuditSavedSubmissions={identityAuditSavedSubmissions}
+        identityAuditSavedSubmissionsError={identityAuditSavedSubmissionsError}
+        identityAuditSavedSubmissionsLoading={identityAuditSavedSubmissionsLoading}
+        identityAuditSubmissionSaveError={identityAuditSubmissionSaveError}
+        identityAuditSubmissionSaveLoading={identityAuditSubmissionSaveLoading}
+        identityAuditSubmissionSaveResult={identityAuditSubmissionSaveResult}
+        identityAuditSuggestedError={identityAuditSuggestedError}
+        identityAuditSuggestedGroups={identityAuditSuggestedGroups}
+        identityAuditSuggestedLoading={identityAuditSuggestedLoading}
+        isReviewedDecision={isReviewedDecision}
+        loadIdentityAuditSavedSubmissions={loadIdentityAuditSavedSubmissions}
+        setIdentityAuditAmbiguousBucketFilter={setIdentityAuditAmbiguousBucketFilter}
+        setIdentityAuditAmbiguousFamilyFilter={setIdentityAuditAmbiguousFamilyFilter}
+        setIdentityAuditAmbiguousVisibleCount={setIdentityAuditAmbiguousVisibleCount}
+        setIdentityAuditFocusedReviewKey={setIdentityAuditFocusedReviewKey}
+        setIdentityAuditLocalDecisions={setIdentityAuditLocalDecisions}
+        setIdentityAuditPreviewCopyStatus={setIdentityAuditPreviewCopyStatus}
+        setIdentityAuditPreviewValidatedAt={setIdentityAuditPreviewValidatedAt}
+        setIdentityAuditPreviewValidationError={setIdentityAuditPreviewValidationError}
+        setIdentityAuditPreviewValidationLoading={setIdentityAuditPreviewValidationLoading}
+        setIdentityAuditPreviewValidationResult={setIdentityAuditPreviewValidationResult}
+        setIdentityAuditSubmissionSaveError={setIdentityAuditSubmissionSaveError}
+        setIdentityAuditSubmissionSaveLoading={setIdentityAuditSubmissionSaveLoading}
+        setIdentityAuditSubmissionSaveResult={setIdentityAuditSubmissionSaveResult}
+        trackDecisionKey={trackDecisionKey}
+        updateLocalReviewDecision={updateLocalReviewDecision}
+        viewIdentityAuditSavedSubmission={viewIdentityAuditSavedSubmission}
+      />
     );
   }
 
@@ -8811,77 +7713,19 @@ export function App() {
   }
 
   function renderAlbumIdentityAuditCatalogTab() {
-    const coveragePercent = typeof catalogBackfillCoverage?.track_duration_coverage_percent === "number"
-      ? `${catalogBackfillCoverage.track_duration_coverage_percent.toFixed(2)}%`
-      : "0.00%";
     return (
-      <div className="identity-audit-grid">
-        <p className="identity-audit-tab-copy">
-          Album catalog is operational state: Spotify metadata, tracklist completeness, queue/enrichment status, and catalog lookup.
-        </p>
-        <div className="identity-audit-overview-grid">
-          <article className="identity-audit-overview-card">
-            <h3>Known Albums</h3>
-            <p>Release albums known locally.</p>
-            <strong>{catalogBackfillCoverage?.known_release_albums ?? 0}</strong>
-          </article>
-          <article className="identity-audit-overview-card">
-            <h3>Catalog Rows</h3>
-            <p>Spotify album metadata rows.</p>
-            <strong>{catalogBackfillCoverage?.album_catalog_rows ?? 0}</strong>
-          </article>
-          <article className="identity-audit-overview-card">
-            <h3>Tracklists</h3>
-            <p>Stored album-track rows.</p>
-            <strong>{catalogBackfillCoverage?.album_track_rows ?? 0}</strong>
-          </article>
-          <article className="identity-audit-overview-card">
-            <h3>Track Coverage</h3>
-            <p>Release tracks with duration metadata.</p>
-            <strong>{coveragePercent}</strong>
-          </article>
-        </div>
-        <div className="identity-audit-group">
-          <div className="tracks-formula-heading">
-            <h3>Catalog Operations</h3>
-            <span>lookup and queue</span>
-          </div>
-          <p className="identity-audit-tab-copy">
-            Search Lookup remains the shared operational lookup tool. Opening it from here defaults the tool to albums.
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
-            <button
-              className="primary-button"
-              onClick={() => {
-                setSearchLookupEntityType("albums");
-                setAppPage("searchLookup");
-              }}
-              type="button"
-            >
-              Open Album Lookup
-            </button>
-            <button
-              className="secondary-button"
-              onClick={() => setAppPage("catalogBackfill")}
-              type="button"
-            >
-              Open Catalog Backfill
-            </button>
-            <button
-              className="secondary-button"
-              disabled={catalogBackfillCoverageLoading}
-              onClick={() => void loadCatalogBackfillCoverage(true)}
-              type="button"
-            >
-              {catalogBackfillCoverageLoading ? "Refreshing..." : "Refresh catalog summary"}
-            </button>
-          </div>
-          {catalogBackfillCoverageError ? <p className="empty-copy">{catalogBackfillCoverageError}</p> : null}
-          {catalogBackfillCoverageLastLoadedAt ? (
-            <p className="empty-copy">Catalog summary loaded {new Date(catalogBackfillCoverageLastLoadedAt).toLocaleTimeString()}</p>
-          ) : null}
-        </div>
-      </div>
+      <AlbumIdentityAuditCatalogTab
+        catalogBackfillCoverage={catalogBackfillCoverage}
+        catalogBackfillCoverageLoading={catalogBackfillCoverageLoading}
+        catalogBackfillCoverageError={catalogBackfillCoverageError}
+        catalogBackfillCoverageLastLoadedAt={catalogBackfillCoverageLastLoadedAt}
+        onOpenAlbumLookup={() => {
+          setSearchLookupEntityType("albums");
+          setAppPage("searchLookup");
+        }}
+        onOpenCatalogBackfill={() => setAppPage("catalogBackfill")}
+        onRefreshCatalogSummary={() => void loadCatalogBackfillCoverage(true)}
+      />
     );
   }
 
@@ -8889,119 +7733,44 @@ export function App() {
     if (!profile) {
       return null;
     }
-    const trackTabs: Array<{ value: TrackIdentityAuditTab; label: string }> = [
-      { value: "problems", label: "Problems" },
-      { value: "mapping", label: "Mapping" },
-      { value: "review_queue", label: "Review Queue" },
-      { value: "recording_tracks", label: "Recording Tracks" },
-      { value: "duration_conflicts", label: "Duration Conflicts" },
-    ];
-    const albumTabs: Array<{ value: AlbumIdentityAuditTab; label: string }> = [
-      { value: "problems", label: "Problems" },
-      { value: "merge_review", label: "Merge Review" },
-      { value: "catalog", label: "Catalog" },
-    ];
-    const identityEntityTabs: Array<{ value: IdentityAuditEntityTab; label: string }> = [
-      { value: "tracks", label: "Tracks" },
-      { value: "albums", label: "Albums" },
-      { value: "artists", label: "Artists" },
-    ];
 
     return (
-      <section className="info-card info-card-wide tracks-only-card" id="identity-audit-page">
-        <div className="tracks-only-header">
-          <div>
-            <h2>Identity Audit</h2>
-            <p className="tracks-only-subtitle">
-              Find identity problems, inspect mappings and evidence, then review decisions before any grouping behavior is promoted.
-            </p>
-          </div>
-          <div className="section-column-header-actions">
-            <button
-              className="secondary-button tracks-page-link-button"
-              disabled={identityAuditLoading || identityAuditSuggestedLoading || identityAuditAmbiguousLoading}
-              onClick={() => {
-                void loadIdentityAudit(true);
-                void loadIdentityAuditSuggestedGroups(true);
-                void loadIdentityAuditAmbiguousReview(true);
-              }}
-              type="button"
-            >
-              {(identityAuditLoading || identityAuditSuggestedLoading || identityAuditAmbiguousLoading) ? "Reloading..." : "Reload all"}
-            </button>
-            <button
-              className="secondary-button tracks-only-back-button"
-              onClick={() => setAppPage("dashboard")}
-              type="button"
-            >
-              Back to dashboard
-            </button>
-          </div>
-        </div>
-        <div className="tracks-only-summary">
-          <span>Identity samples: {identityAudit ? `${identityAudit.limit} per group` : "not loaded"}</span>
-          <span>Suggested groups: {identityAuditSuggestedGroups?.summary.total_groups ?? 0}</span>
-          <span>Ambiguous queue: {identityAuditAmbiguous?.summary.total_review_entries ?? 0}</span>
-          <span>Album duplicate Spotify ID groups: {albumDuplicateLookupLoaded ? (albumDuplicateLookupResult?.total ?? 0) : "not loaded"}</span>
-          <span>Album duplicate name groups: {albumNameDuplicateLookupLoaded ? (albumNameDuplicateLookupResult?.total ?? 0) : "not loaded"}</span>
-          {identityAuditLastLoadedAt ? <span>Identity loaded {new Date(identityAuditLastLoadedAt).toLocaleTimeString()}</span> : null}
-          {identityAuditSuggestedLastLoadedAt ? <span>Suggested loaded {new Date(identityAuditSuggestedLastLoadedAt).toLocaleTimeString()}</span> : null}
-          {identityAuditAmbiguousLastLoadedAt ? <span>Ambiguous loaded {new Date(identityAuditAmbiguousLastLoadedAt).toLocaleTimeString()}</span> : null}
-          {albumDuplicateLookupLastLoadedAt ? <span>Album duplicates loaded {new Date(albumDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
-          {albumNameDuplicateLookupLastLoadedAt ? <span>Album names loaded {new Date(albumNameDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
-        </div>
-        <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit entity type">
-          {identityEntityTabs.map((tab) => (
-            <button
-              className={`track-ranking-chip${identityAuditEntityTab === tab.value ? " track-ranking-chip-active" : ""}`}
-              key={`identity-entity-tab-${tab.value}`}
-              onClick={() => setIdentityAuditEntityTab(tab.value)}
-              type="button"
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-        {identityAuditEntityTab !== "artists" ? (
-          <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit sections">
-            {identityAuditEntityTab === "tracks"
-              ? trackTabs.map((tab) => (
-                <button
-                  className={`track-ranking-chip${trackIdentityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
-                  key={`track-identity-tab-${tab.value}`}
-                  onClick={() => setTrackIdentityAuditTab(tab.value)}
-                  type="button"
-                >
-                  {tab.label}
-                </button>
-              ))
-              : null}
-            {identityAuditEntityTab === "albums"
-              ? albumTabs.map((tab) => (
-                <button
-                  className={`track-ranking-chip${albumIdentityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
-                  key={`album-identity-tab-${tab.value}`}
-                  onClick={() => setAlbumIdentityAuditTab(tab.value)}
-                  type="button"
-                >
-                  {tab.label}
-                </button>
-              ))
-              : null}
-          </div>
-        ) : null}
-        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "problems" ? renderTrackIdentityAuditProblemsTab() : null}
-        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "mapping" ? renderTrackIdentityAuditMappingTab() : null}
-        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "review_queue" ? renderTrackIdentityAuditAmbiguousTab() : null}
-        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "recording_tracks" ? (
-          <RecordingTrackCandidatesTab onOpenReleaseTrack={openRecordingCandidateReleaseTrack} />
-        ) : null}
-        {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "duration_conflicts" ? <ReleaseTrackDurationConflictsTab /> : null}
-        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "problems" ? renderAlbumIdentityAuditProblemsTab() : null}
-        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "merge_review" ? renderAlbumIdentityAuditMergeReviewTab() : null}
-        {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "catalog" ? renderAlbumIdentityAuditCatalogTab() : null}
-        {identityAuditEntityTab === "artists" ? <ArtistDuplicateAuditTab /> : null}
-      </section>
+      <IdentityAuditPage
+        identityAuditLoading={identityAuditLoading}
+        identityAuditSuggestedLoading={identityAuditSuggestedLoading}
+        identityAuditAmbiguousLoading={identityAuditAmbiguousLoading}
+        identityAuditLimit={identityAudit?.limit ?? null}
+        suggestedGroupTotal={identityAuditSuggestedGroups?.summary.total_groups ?? 0}
+        ambiguousReviewTotal={identityAuditAmbiguous?.summary.total_review_entries ?? 0}
+        albumDuplicateLookupLoaded={albumDuplicateLookupLoaded}
+        albumDuplicateTotal={albumDuplicateLookupResult?.total ?? 0}
+        albumNameDuplicateLookupLoaded={albumNameDuplicateLookupLoaded}
+        albumNameDuplicateTotal={albumNameDuplicateLookupResult?.total ?? 0}
+        identityAuditLastLoadedAt={identityAuditLastLoadedAt}
+        identityAuditSuggestedLastLoadedAt={identityAuditSuggestedLastLoadedAt}
+        identityAuditAmbiguousLastLoadedAt={identityAuditAmbiguousLastLoadedAt}
+        albumDuplicateLookupLastLoadedAt={albumDuplicateLookupLastLoadedAt}
+        albumNameDuplicateLookupLastLoadedAt={albumNameDuplicateLookupLastLoadedAt}
+        identityAuditEntityTab={identityAuditEntityTab}
+        trackIdentityAuditTab={trackIdentityAuditTab}
+        albumIdentityAuditTab={albumIdentityAuditTab}
+        onReloadAll={() => {
+          void loadIdentityAudit(true);
+          void loadIdentityAuditSuggestedGroups(true);
+          void loadIdentityAuditAmbiguousReview(true);
+        }}
+        onBackToDashboard={() => setAppPage("dashboard")}
+        setIdentityAuditEntityTab={setIdentityAuditEntityTab}
+        setTrackIdentityAuditTab={setTrackIdentityAuditTab}
+        setAlbumIdentityAuditTab={setAlbumIdentityAuditTab}
+        onOpenRecordingCandidateReleaseTrack={openRecordingCandidateReleaseTrack}
+        renderTrackProblemsTab={renderTrackIdentityAuditProblemsTab}
+        renderTrackMappingTab={renderTrackIdentityAuditMappingTab}
+        renderTrackReviewQueueTab={renderTrackIdentityAuditAmbiguousTab}
+        renderAlbumProblemsTab={renderAlbumIdentityAuditProblemsTab}
+        renderAlbumMergeReviewTab={renderAlbumIdentityAuditMergeReviewTab}
+        renderAlbumCatalogTab={renderAlbumIdentityAuditCatalogTab}
+      />
     );
   }
 
@@ -11011,56 +9780,19 @@ export function App() {
       <main className="app-shell">
         <section className="hero-card">
         {!profile ? (
-          <div className="top-bar">
-            <div className="top-copy">
-              <p className="eyebrow">ListenLab</p>
-              <h1>{heroTitle}</h1>
-              <p className="lede three-line-clamp">{heroCopy}</p>
-            </div>
-
-            <div className="top-side">
-              {renderExperienceModeToggle()}
-              <button className="primary-button top-login-button" onClick={handleAuthAction} type="button">
-                {experienceMode === "local" ? "Open restricted local mode" : "Log in with Spotify"}
-              </button>
-              {experienceMode === "full" ? (
-                <button className="secondary-button top-login-button" onClick={startRecentIngestLogin} type="button">
-                  Connect Spotify and ingest recent plays
-                </button>
-              ) : null}
-              {experienceMode === "full" ? (
-                <button className="secondary-button top-login-button" onClick={() => void runRecentBeforeProbe()} type="button">
-                  Probe recent API before 90 days
-                </button>
-              ) : null}
-              {experienceMode === "full" ? (
-                <button className="secondary-button top-login-button" onClick={() => void runRecentBackfillProbe()} type="button">
-                  Probe recent API paging (50 x up to 10)
-                </button>
-              ) : null}
-              {recentIngestResult ? (
-                <p className="empty-copy">
-                  {recentIngestResult.auth_succeeded && recentIngestResult.ingest_succeeded
-                    ? `Recent ingest succeeded: ${recentIngestResult.row_count ?? 0} rows (${recentIngestResult.earliest_api_played_at ?? "n/a"} to ${recentIngestResult.latest_api_played_at ?? "n/a"}).`
-                    : `Recent ingest failed: ${recentIngestResult.error ?? "unknown error"}`}
-                </p>
-              ) : null}
-              {recentBeforeProbeResult ? (
-                <p className="empty-copy">
-                  {recentBeforeProbeResult.ok
-                    ? `Before-90d probe: ${recentBeforeProbeResult.returned_items ?? 0} rows (${recentBeforeProbeResult.earliest_played_at ?? "n/a"} to ${recentBeforeProbeResult.latest_played_at ?? "n/a"}).`
-                    : `Before-90d probe failed: ${recentBeforeProbeResult.detail ?? "unknown error"}`}
-                </p>
-              ) : null}
-              {recentBackfillProbeResult ? (
-                <p className="empty-copy">
-                  {recentBackfillProbeResult.ok
-                    ? `Backfill probe: ${recentBackfillProbeResult.total_items ?? 0} items across ${recentBackfillProbeResult.pages_fetched ?? 0} pages (${recentBackfillProbeResult.earliest_played_at ?? "n/a"} to ${recentBackfillProbeResult.latest_played_at ?? "n/a"}).`
-                    : `Backfill probe failed: ${recentBackfillProbeResult.detail ?? "unknown error"}`}
-                </p>
-              ) : null}
-            </div>
-          </div>
+          <LoginHeroPanel
+            heroTitle={heroTitle}
+            heroCopy={heroCopy}
+            experienceMode={experienceMode}
+            recentIngestResult={recentIngestResult}
+            recentBeforeProbeResult={recentBeforeProbeResult}
+            recentBackfillProbeResult={recentBackfillProbeResult}
+            renderExperienceModeToggle={renderExperienceModeToggle}
+            handleAuthAction={handleAuthAction}
+            startRecentIngestLogin={startRecentIngestLogin}
+            runRecentBeforeProbe={() => void runRecentBeforeProbe()}
+            runRecentBackfillProbe={() => void runRecentBackfillProbe()}
+          />
         ) : null}
 
         {!profile ? null : (
@@ -11915,1316 +10647,267 @@ export function App() {
                 </div>
               </div>
             </nav>
-            {appPage === "formulaLab" ? (
-              <div className="dashboard-grid">
-                <FormulaLabPage
-                  hasProfile={Boolean(profile)}
-                  mergedTracks={mergedTracks}
-                  mergedTracksLoaded={mergedTracksLoaded}
-                  mergedTracksLoading={mergedTracksLoading}
-                  mergedTracksError={mergedTracksError}
-                  mergedTracksLastLoadedAt={mergedTracksLastLoadedAt}
-                  mergedTrackSourceFilter={mergedTrackSourceFilter}
-                  rankMovementFilter={rankMovementFilter}
-                  trackRankingMode={trackRankingMode}
-                  renderMergedTrackSourceFilterToggle={renderMergedTrackSourceFilterToggle}
-                  renderTrackRankingToggle={renderTrackRankingToggle}
-                  renderRankMovementFilterToggle={renderRankMovementFilterToggle}
-                  renderTrackColumn={renderTrackColumn}
-                  reloadTrackRankings={reloadTrackRankings}
-                  onBack={() => setAppPage("dashboard")}
-                />
-              </div>
-            ) : appPage === "identityAudit" ? (
-              <div className="dashboard-grid">
-                {renderIdentityAuditPage()}
-              </div>
-            ) : appPage === "recentDebug" ? (
-              <div className="dashboard-grid">
-                <RecentDebugPage
-                  hasProfile={Boolean(profile)}
-                  listeningLogTracks={listeningLogTracks}
-                  listeningLogLoading={listeningLogLoading}
-                  listeningLogError={listeningLogError}
-                  listeningLogOffset={listeningLogOffset}
-                  listeningLogHasMore={listeningLogHasMore}
-                  listeningLogLastLoadedAt={listeningLogLastLoadedAt}
-                  recentDebugSourceFilter={recentDebugSourceFilter}
-                  setRecentDebugSourceFilter={setRecentDebugSourceFilter}
-                  setListeningLogTracks={setListeningLogTracks}
-                  setListeningLogHasMore={setListeningLogHasMore}
-                  setListeningLogOffset={setListeningLogOffset}
-                  setListeningLogLoaded={setListeningLogLoaded}
-                  setListeningLogLastLoadedAt={setListeningLogLastLoadedAt}
-                  setListeningLogError={setListeningLogError}
-                  showDebugLinkFields={showDebugLinkFields}
-                  setShowDebugLinkFields={setShowDebugLinkFields}
-                  openDebugSessions={openDebugSessions}
-                  setOpenDebugSessions={setOpenDebugSessions}
-                  openDebugTracks={openDebugTracks}
-                  setOpenDebugTracks={setOpenDebugTracks}
-                  loadListeningLogBatch={loadListeningLogBatch}
-                  onBack={() => setAppPage("dashboard")}
-                  onSelectPreview={setSelectedPreview}
-                />
-              </div>
-            ) : appPage === "catalogBackfill" ? (
-              <div className="dashboard-grid">
-                <CatalogBackfillPage
-                  hasProfile={Boolean(profile)}
-                  catalogBackfillTab={catalogBackfillTab}
-                  setCatalogBackfillTab={setCatalogBackfillTab}
-                  catalogBackfillCoverage={catalogBackfillCoverage}
-                  catalogBackfillCoverageLoading={catalogBackfillCoverageLoading}
-                  catalogBackfillCoverageError={catalogBackfillCoverageError}
-                  catalogBackfillCoverageLastLoadedAt={catalogBackfillCoverageLastLoadedAt}
-                  catalogBackfillRuns={catalogBackfillRuns}
-                  catalogBackfillRunsLoading={catalogBackfillRunsLoading}
-                  catalogBackfillRunsError={catalogBackfillRunsError}
-                  catalogBackfillRunsLastLoadedAt={catalogBackfillRunsLastLoadedAt}
-                  catalogBackfillQueue={catalogBackfillQueue}
-                  catalogBackfillQueueLoading={catalogBackfillQueueLoading}
-                  catalogBackfillQueueError={catalogBackfillQueueError}
-                  catalogBackfillQueueLastLoadedAt={catalogBackfillQueueLastLoadedAt}
-                  catalogBackfillQueueStatusFilter={catalogBackfillQueueStatusFilter}
-                  catalogBackfillQueueReasonFilter={catalogBackfillQueueReasonFilter}
-                  catalogBackfillQueueRepairLoading={catalogBackfillQueueRepairLoading}
-                  catalogBackfillQueueRepairMessage={catalogBackfillQueueRepairMessage}
-                  catalogBackfillLatestResult={catalogBackfillLatestResult}
-                  catalogBackfillRunLoading={catalogBackfillRunLoading}
-                  catalogBackfillRunError={catalogBackfillRunError}
-                  catalogBackfillLimit={catalogBackfillLimit}
-                  setCatalogBackfillLimit={setCatalogBackfillLimit}
-                  catalogBackfillOffset={catalogBackfillOffset}
-                  setCatalogBackfillOffset={setCatalogBackfillOffset}
-                  catalogBackfillMarket={catalogBackfillMarket}
-                  setCatalogBackfillMarket={setCatalogBackfillMarket}
-                  catalogBackfillForceRefresh={catalogBackfillForceRefresh}
-                  setCatalogBackfillForceRefresh={setCatalogBackfillForceRefresh}
-                  catalogBackfillMaxRequests={catalogBackfillMaxRequests}
-                  setCatalogBackfillMaxRequests={setCatalogBackfillMaxRequests}
-                  catalogBackfillMaxRuntimeSeconds={catalogBackfillMaxRuntimeSeconds}
-                  setCatalogBackfillMaxRuntimeSeconds={setCatalogBackfillMaxRuntimeSeconds}
-                  catalogBackfillFullRunMode={catalogBackfillFullRunMode}
-                  setCatalogBackfillFullRunMode={setCatalogBackfillFullRunMode}
-                  catalogBackfillAlbumTracklistPolicy={catalogBackfillAlbumTracklistPolicy}
-                  setCatalogBackfillAlbumTracklistPolicy={setCatalogBackfillAlbumTracklistPolicy}
-                  catalogBackfillMaxAlbumTracksPagesPerAlbum={catalogBackfillMaxAlbumTracksPagesPerAlbum}
-                  setCatalogBackfillMaxAlbumTracksPagesPerAlbum={setCatalogBackfillMaxAlbumTracksPagesPerAlbum}
-                  catalogBackfillIncludeAlbums={catalogBackfillIncludeAlbums}
-                  setCatalogBackfillIncludeAlbums={setCatalogBackfillIncludeAlbums}
-                  loadCatalogBackfillCoverage={loadCatalogBackfillCoverage}
-                  loadCatalogBackfillRuns={loadCatalogBackfillRuns}
-                  loadCatalogBackfillQueue={loadCatalogBackfillQueue}
-                  repairCatalogBackfillQueueStatuses={repairCatalogBackfillQueueStatuses}
-                  runCatalogBackfill={runCatalogBackfill}
-                  onBack={() => setAppPage("dashboard")}
-                />
-              </div>
-            ) : appPage === "searchLookup" ? (
-              <div className="dashboard-grid">
-                <SearchLookupPage
-                  hasProfile={Boolean(profile)}
-                  searchLookupEntityType={searchLookupEntityType}
-                  setSearchLookupEntityType={setSearchLookupEntityType}
-                  albumCatalogLookupQ={albumCatalogLookupQ}
-                  setAlbumCatalogLookupQ={setAlbumCatalogLookupQ}
-                  albumCatalogLookupStatus={albumCatalogLookupStatus}
-                  setAlbumCatalogLookupStatus={setAlbumCatalogLookupStatus}
-                  trackCatalogLookupStatus={trackCatalogLookupStatus}
-                  setTrackCatalogLookupStatus={setTrackCatalogLookupStatus}
-                  searchLookupQueueStatus={searchLookupQueueStatus}
-                  setSearchLookupQueueStatus={setSearchLookupQueueStatus}
-                  searchLookupSort={searchLookupSort}
-                  setSearchLookupSort={setSearchLookupSort}
-                  albumCatalogLookupResult={albumCatalogLookupResult}
-                  albumCatalogLookupLoading={albumCatalogLookupLoading}
-                  albumCatalogLookupError={albumCatalogLookupError}
-                  albumCatalogLookupLastLoadedAt={albumCatalogLookupLastLoadedAt}
-                  trackCatalogLookupResult={trackCatalogLookupResult}
-                  trackCatalogLookupLoading={trackCatalogLookupLoading}
-                  trackCatalogLookupError={trackCatalogLookupError}
-                  trackCatalogLookupLastLoadedAt={trackCatalogLookupLastLoadedAt}
-                  albumCatalogLookupEnqueueLoading={albumCatalogLookupEnqueueLoading}
-                  albumCatalogLookupEnqueueError={albumCatalogLookupEnqueueError}
-                  setAlbumCatalogLookupEnqueueError={setAlbumCatalogLookupEnqueueError}
-                  albumCatalogLookupEnqueueResult={albumCatalogLookupEnqueueResult}
-                  setAlbumCatalogLookupEnqueueResult={setAlbumCatalogLookupEnqueueResult}
-                  loadActiveSearchLookup={loadActiveSearchLookup}
-                  enqueueVisibleIncompleteLookupAlbums={enqueueVisibleIncompleteLookupAlbums}
-                  enqueueVisibleIncompleteLookupTracks={enqueueVisibleIncompleteLookupTracks}
-                  openAlbumLookupPreview={openAlbumLookupPreview}
-                  openTrackLookupPreview={openTrackLookupPreview}
-                  onBack={() => setAppPage("dashboard")}
-                />
-              </div>
-            ) : (
-            <div className="dashboard-grid">
-              {renderHomePlayerPanel()}
-              <DualSectionCard
-                title={renderSectionTitle("Activity", "recent_likes")}
-                section="recent"
-                anchorId="activity"
-                leftTitle={(
-                  <div className="section-column-header activity-liked-header">
-                    <span className="activity-column-heading">Listened</span>
-                    <div className="section-column-header-actions">
-                      <div className="track-ranking-toggle recent-play-filter-toggle" role="group" aria-label="Recently played filter">
-                        {[
-                          ["listened", "Completed"],
-                          ["liked", "Liked"],
-                          ["all", "All"],
-                        ].map(([value, label]) => (
-                          <button
-                            className={`track-ranking-chip${recentPlayFilter === value ? " track-ranking-chip-active" : ""}`}
-                            key={value}
-                            onClick={() => setRecentPlayFilter(value as RecentPlayFilter)}
-                            type="button"
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <button className="secondary-button inline-reload-button listen-log-button" onClick={openListeningLogPage} type="button">
-                      Listen Log
-                    </button>
-                  </div>
-                )}
-                rightTitle={(
-                  <div className="section-column-header activity-liked-header">
-                    <span className="activity-column-heading">Liked</span>
-                    <div className="track-ranking-toggle liked-tracks-display-toggle" aria-label="Liked tracks display">
-                      {[
-                        ["100", String(LIKED_TRACKS_RECENT_DISPLAY_LIMIT)],
-                        ["all", likedTracksTotalLabel],
-                      ].map(([value, label]) => (
-                        <button
-                          className={`track-ranking-chip${likedTracksCountMode === value ? " track-ranking-chip-active" : ""}`}
-                          key={value}
-                          onClick={() => setLikedTracksCountMode(value as "100" | "all")}
-                          type="button"
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="track-ranking-toggle liked-tracks-sort-toggle" aria-label="Liked tracks sort">
-                      {[
-                        ["recent", "Recent"],
-                        ["older", "Older"],
-                      ].map(([value, label]) => (
-                        <button
-                          className={`track-ranking-chip${likedTracksSortMode === value ? " track-ranking-chip-active" : ""}`}
-                          key={value}
-                          onClick={() => setLikedTracksSortMode(value as "recent" | "older")}
-                          type="button"
-                        >
-                          {label}
-                        </button>
-                        ))}
-                    </div>
-                    <div className="track-ranking-toggle liked-tracks-shuffle-toggle" aria-label="Liked tracks order">
-                      <button
-                        aria-label="Show liked tracks in order"
-                        aria-pressed={!likedTracksShuffleEnabled}
-                        className={`track-ranking-chip liked-tracks-icon-chip${!likedTracksShuffleEnabled ? " track-ranking-chip-active" : ""}`}
-                        disabled={likedTracksForActivitySource.length === 0}
-                        onClick={() => setLikedTracksShuffleEnabled(false)}
-                        title="In order"
-                        type="button"
-                      >
-                        <svg aria-hidden="true" viewBox="0 0 24 24">
-                          <path d="M4 7h12.6l-2.4-2.4L15.6 3 21 8.4l-5.4 5.4-1.4-1.6 2.4-2.2H4V7Zm0 8h12.6l-2.4-2.4 1.4-1.6 5.4 5.4-5.4 5.4-1.4-1.6 2.4-2.2H4v-3Z" fill="currentColor" />
-                        </svg>
-                      </button>
-                      <button
-                        aria-label="Shuffle liked tracks"
-                        aria-pressed={likedTracksShuffleEnabled}
-                        className={`track-ranking-chip liked-tracks-icon-chip${likedTracksShuffleEnabled ? " track-ranking-chip-active" : ""}`}
-                        disabled={likedTracksForActivitySource.length === 0}
-                        onClick={() => {
-                          setLikedTracksShuffleEnabled(true);
-                          setLikedTracksShuffleNonce((current) => current + 1);
-                        }}
-                        title="Shuffle"
-                        type="button"
-                      >
-                        <svg aria-hidden="true" viewBox="0 0 24 24">
-                          <path d="M16.5 3.8 21 8.3l-4.5 4.5-1.4-1.4 2.1-2.1h-1.5c-2.3 0-3.6.9-5.1 3.4-1.8 3.1-3.8 4.5-7.1 4.5H2v-2h1.5c2.4 0 3.7-.9 5.3-3.5 1.8-3 3.7-4.4 6.9-4.4h1.5l-2.1-2.1 1.4-1.4ZM2 6.3h1.5c2.3 0 4 .7 5.4 2.3l-1.3 1.6C6.5 8.9 5.3 8.3 3.5 8.3H2v-2Zm12.8 7.4 1.4-1.4 4.8 4.8-4.8 4.8-1.4-1.4 2.1-2.1h-1.2c-2 0-3.6-.6-4.9-1.9l1.2-1.7c1.1 1.1 2.2 1.6 3.7 1.6h1.2l-2.1-2.1Z" fill="currentColor" />
-                        </svg>
-                      </button>
-                    </div>
-                    {experienceMode === "full" ? (
-                      <button
-                        className="secondary-button inline-reload-button"
-                        disabled={likedTracksSyncing || spotifyCooldownActive}
-                        onClick={() => void syncLikedTracks()}
-                        type="button"
-                      >
-                        {likedTracksSyncing ? "Refreshing..." : "Refresh"}
-                      </button>
-                    ) : null}
-                  </div>
-                )}
-                leftContent={renderTrackColumn(
-                  "recent",
-                  profile.recent_tracks,
-                  profile.recent_tracks_available,
-                  "Spotify returned no recent listening history.",
-                  recentUnavailableCopy(
-                    "Recent listening is not available for this session yet. Log out and log back in to grant the updated Spotify permissions.",
-                  ),
-                  analysisMode === "quick" && experienceMode === "full" ? (
-                    <button
-                      className="secondary-button inline-reload-button"
-                      disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection(recentRange)}
-                      type="button"
-                    >
-                      {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                    </button>
-                  ) : null,
-                )}
-                rightContent={(
-                  <>
-                    {usingLikedTracksFallback ? (
-                      <p className="empty-copy liked-tracks-cache-note">
-                        Latest from Spotify. Refresh to populate the local cache.
-                      </p>
-                    ) : null}
-                    {!usingLikedTracksFallback && cachedLikedTracks.length === 0 && !likedTracksLoading ? (
-                      <p className="empty-copy liked-tracks-cache-note">
-                        Liked tracks cache is empty. Refresh to load saved songs.
-                      </p>
-                    ) : null}
-                    {likedTracksLoading ? <p className="empty-copy liked-tracks-cache-note">Loading liked tracks cache...</p> : null}
-                    {likedTracksCacheStatus ? <p className="liked-tracks-cache-status">{likedTracksCacheStatus}</p> : null}
-                    {likedTracksError ? <p className="empty-copy liked-tracks-cache-note">{likedTracksError}</p> : null}
-                    {renderTrackColumn(
-                      "likes",
-                      likedTracksForActivity,
-                      likedTracksAvailableForActivity,
-                      "No liked tracks are available in the cache yet.",
-                      recentUnavailableCopy(
-                        "Liked tracks are not available for this session yet. Log out and log back in to grant library access.",
-                      ),
-                      analysisMode === "quick" && experienceMode === "full" ? (
-                        <button
-                          className="secondary-button inline-reload-button"
-                          disabled={loadingRecentSection}
-                          onClick={() => void refreshRecentSection(recentRange)}
-                          type="button"
-                        >
-                          {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                        </button>
-                      ) : null,
-                      false,
-                      true,
-                    )}
-                  </>
-                )}
-                previewItemsLeft={previewItems(profile.recent_tracks)}
-                previewItemsRight={previewItems(likedTracksForActivity)}
-                collapsedPreviewItems={previewItems(collapseRecentPreviewTracks(profile.recent_tracks))}
-                isOpen={openSections.recent}
-                toggleSection={toggleSection}
-                onSelectPreview={setSelectedPreview}
-              />
-
-              <DualSectionCard
-                title={renderSectionTitle("Tracks")}
-                section="tracks"
-                anchorId="tracks"
-                leftTitle={(
-                  <div className="section-column-header">
-                    <h3>All time</h3>
-                    <span className="liked-match-diagnostic">
-                      {allTimeLikedMatchCount} / {allTimeTrackIdCount} liked matches
-                    </span>
-                    <div className="section-column-header-actions">
-                      {renderTrackRankingToggle()}
-                    </div>
-                  </div>
-                )}
-                rightTitle={renderRecentRangeHeader()}
-                leftContent={renderTrackColumn(
-                  "tracksAllTime",
-                  profile.top_tracks,
-                  profile.top_tracks_available,
-                  "Spotify returned no top tracks for this account.",
-                  quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
-                )}
-                rightContent={renderTrackColumn(
-                  "tracksRecent",
-                  profile.recent_top_tracks,
-                  profile.recent_top_tracks_available,
-                  "Spotify returned no recent top tracks for this account.",
-                  recentUnavailableCopy(
-                    experienceMode === "local"
-                      ? "Recent top tracks are unavailable in restricted local mode."
-                      : "Recent top tracks are not available for this session yet. Log out and log back in to grant access.",
-                  ),
-                  analysisMode === "quick" && experienceMode === "full" ? (
-                    <button
-                      className="secondary-button inline-reload-button"
-                      disabled={loadingRecentSection}
-                      onClick={() => void refreshRecentSection(recentRange)}
-                      type="button"
-                    >
-                      {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                    </button>
-                  ) : null,
-                )}
-                previewItemsLeft={previewItems(profile.top_tracks)}
-                previewItemsRight={previewItems(profile.recent_top_tracks)}
-                collapsedPreviewItems={previewItems(
-                  collapseTrackPreviewAlbums([
-                    ...profile.top_tracks,
-                    ...profile.recent_top_tracks,
-                  ]),
-                )}
-                isOpen={openSections.tracks}
-                toggleSection={toggleSection}
-                onSelectPreview={setSelectedPreview}
-              />
-
-              <DualSectionCard
-                title={renderSectionTitle("Artists")}
-                section="artists"
-                anchorId="artists"
-                leftTitle="All time"
-                rightTitle={renderRecentRangeHeader()}
-                leftContent={(
-                  <DashboardArtistColumn
-                    section="artistsAllTime"
-                    items={profile.followed_artists}
-                    available={profile.followed_artists_list_available}
-                    emptyCopy="Spotify returned no top artists for this account."
-                    unavailableCopy={quickUnavailableCopy("Top artists are not available for this session yet. Log out and log back in to grant access.")}
-                    sectionPage={sectionPages.artistsAllTime}
-                    moveSectionPage={moveSectionPage}
-                    onSelectPreview={setSelectedPreview}
-                  />
-                )}
-                rightContent={(
-                  <DashboardArtistColumn
-                    section="artistsRecent"
-                    items={profile.recent_top_artists}
-                    available={profile.recent_top_artists_available}
-                    emptyCopy="Spotify returned no recent top artists for this account."
-                    unavailableCopy={recentUnavailableCopy(
-                      experienceMode === "local"
-                        ? "Recent top artists are unavailable in restricted local mode."
-                        : "Recent top artists are not available for this session yet. Log out and log back in to grant access.",
-                    )}
-                    unavailableAction={analysisMode === "quick" && experienceMode === "full" ? (
-                      <button
-                        className="secondary-button inline-reload-button"
-                        disabled={loadingRecentSection}
-                        onClick={() => void refreshRecentSection(recentRange)}
-                        type="button"
-                      >
-                        {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                      </button>
-                    ) : null}
-                    sectionPage={sectionPages.artistsRecent}
-                    moveSectionPage={moveSectionPage}
-                    onSelectPreview={setSelectedPreview}
-                  />
-                )}
-                previewItemsLeft={previewItems(profile.followed_artists)}
-                previewItemsRight={previewItems(profile.recent_top_artists)}
-                isOpen={openSections.artists}
-                toggleSection={toggleSection}
-                onSelectPreview={setSelectedPreview}
-              />
-
-              <DualSectionCard
-                title={renderSectionTitle("Albums")}
-                section="albums"
-                anchorId="albums"
-                leftTitle="All time"
-                rightTitle={renderRecentRangeHeader()}
-                leftContent={(
-                  <DashboardAlbumColumn
-                    section="albumsAllTime"
-                    items={profile.top_albums}
-                    available={profile.top_albums_available}
-                    emptyCopy="Spotify returned no top albums for this account."
-                    unavailableCopy={quickUnavailableCopy("Top albums are not available for this session yet. Log out and log back in to grant access.")}
-                    sectionPage={sectionPages.albumsAllTime}
-                    moveSectionPage={moveSectionPage}
-                    onSelectPreview={setSelectedPreview}
-                  />
-                )}
-                rightContent={(
-                  <DashboardAlbumColumn
-                    section="albumsRecent"
-                    items={profile.recent_top_albums}
-                    available={profile.recent_top_albums_available}
-                    emptyCopy="Spotify returned no recent top albums for this account."
-                    unavailableCopy={recentUnavailableCopy(
-                      experienceMode === "local"
-                        ? "Recent top albums are unavailable in restricted local mode."
-                        : "Recent top albums are not available for this session yet. Log out and log back in to grant access.",
-                    )}
-                    unavailableAction={analysisMode === "quick" && experienceMode === "full" ? (
-                      <button
-                        className="secondary-button inline-reload-button"
-                        disabled={loadingRecentSection}
-                        onClick={() => void refreshRecentSection(recentRange)}
-                        type="button"
-                      >
-                        {loadingRecentSection ? "Refreshing..." : "Reload this section"}
-                      </button>
-                    ) : null}
-                    sectionPage={sectionPages.albumsRecent}
-                    moveSectionPage={moveSectionPage}
-                    onSelectPreview={setSelectedPreview}
-                  />
-                )}
-                previewItemsLeft={previewItems(profile.top_albums)}
-                previewItemsRight={previewItems(profile.recent_top_albums)}
-                isOpen={openSections.albums}
-                toggleSection={toggleSection}
-                onSelectPreview={setSelectedPreview}
-              />
-
-              {profile ? (
-                <DashboardPlaylistsSection
-                  ownedPlaylists={profile.owned_playlists}
-                  ownedPlaylistsAvailable={profile.owned_playlists_available}
-                  playlistsOpen={openSections.playlists}
-                  toggleSection={toggleSection}
-                  sectionPage={sectionPages.playlists}
-                  moveSectionPage={moveSectionPage}
-                  onSelectPreview={setSelectedPreview}
-                  visibleItemsWithPageSize={visibleItemsWithPageSize}
-                  renderSectionTitle={renderSectionTitle}
-                  quickUnavailableCopy={quickUnavailableCopy}
-                />
-              ) : null}
-            </div>
-            )}
+            <DashboardSections
+              albumCatalogLookupEnqueueError={albumCatalogLookupEnqueueError}
+              albumCatalogLookupEnqueueLoading={albumCatalogLookupEnqueueLoading}
+              albumCatalogLookupEnqueueResult={albumCatalogLookupEnqueueResult}
+              albumCatalogLookupError={albumCatalogLookupError}
+              albumCatalogLookupLastLoadedAt={albumCatalogLookupLastLoadedAt}
+              albumCatalogLookupLoading={albumCatalogLookupLoading}
+              albumCatalogLookupQ={albumCatalogLookupQ}
+              albumCatalogLookupResult={albumCatalogLookupResult}
+              albumCatalogLookupStatus={albumCatalogLookupStatus}
+              allTimeLikedMatchCount={allTimeLikedMatchCount}
+              allTimeTrackIdCount={allTimeTrackIdCount}
+              analysisMode={analysisMode}
+              appPage={appPage}
+              cachedLikedTracks={cachedLikedTracks}
+              catalogBackfillAlbumTracklistPolicy={catalogBackfillAlbumTracklistPolicy}
+              catalogBackfillCoverage={catalogBackfillCoverage}
+              catalogBackfillCoverageError={catalogBackfillCoverageError}
+              catalogBackfillCoverageLastLoadedAt={catalogBackfillCoverageLastLoadedAt}
+              catalogBackfillCoverageLoading={catalogBackfillCoverageLoading}
+              catalogBackfillForceRefresh={catalogBackfillForceRefresh}
+              catalogBackfillFullRunMode={catalogBackfillFullRunMode}
+              catalogBackfillIncludeAlbums={catalogBackfillIncludeAlbums}
+              catalogBackfillLatestResult={catalogBackfillLatestResult}
+              catalogBackfillLimit={catalogBackfillLimit}
+              catalogBackfillMarket={catalogBackfillMarket}
+              catalogBackfillMaxAlbumTracksPagesPerAlbum={catalogBackfillMaxAlbumTracksPagesPerAlbum}
+              catalogBackfillMaxRequests={catalogBackfillMaxRequests}
+              catalogBackfillMaxRuntimeSeconds={catalogBackfillMaxRuntimeSeconds}
+              catalogBackfillOffset={catalogBackfillOffset}
+              catalogBackfillQueue={catalogBackfillQueue}
+              catalogBackfillQueueError={catalogBackfillQueueError}
+              catalogBackfillQueueLastLoadedAt={catalogBackfillQueueLastLoadedAt}
+              catalogBackfillQueueLoading={catalogBackfillQueueLoading}
+              catalogBackfillQueueReasonFilter={catalogBackfillQueueReasonFilter}
+              catalogBackfillQueueRepairLoading={catalogBackfillQueueRepairLoading}
+              catalogBackfillQueueRepairMessage={catalogBackfillQueueRepairMessage}
+              catalogBackfillQueueStatusFilter={catalogBackfillQueueStatusFilter}
+              catalogBackfillRunError={catalogBackfillRunError}
+              catalogBackfillRunLoading={catalogBackfillRunLoading}
+              catalogBackfillRuns={catalogBackfillRuns}
+              catalogBackfillRunsError={catalogBackfillRunsError}
+              catalogBackfillRunsLastLoadedAt={catalogBackfillRunsLastLoadedAt}
+              catalogBackfillRunsLoading={catalogBackfillRunsLoading}
+              catalogBackfillTab={catalogBackfillTab}
+              collapseRecentPreviewTracks={collapseRecentPreviewTracks}
+              collapseTrackPreviewAlbums={collapseTrackPreviewAlbums}
+              enqueueVisibleIncompleteLookupAlbums={enqueueVisibleIncompleteLookupAlbums}
+              enqueueVisibleIncompleteLookupTracks={enqueueVisibleIncompleteLookupTracks}
+              experienceMode={experienceMode}
+              likedTracksAvailableForActivity={likedTracksAvailableForActivity}
+              likedTracksCacheStatus={likedTracksCacheStatus}
+              likedTracksCountMode={likedTracksCountMode}
+              likedTracksError={likedTracksError}
+              likedTracksForActivity={likedTracksForActivity}
+              likedTracksForActivitySource={likedTracksForActivitySource}
+              likedTracksLoading={likedTracksLoading}
+              likedTracksShuffleEnabled={likedTracksShuffleEnabled}
+              likedTracksSortMode={likedTracksSortMode}
+              likedTracksSyncing={likedTracksSyncing}
+              likedTracksTotalLabel={likedTracksTotalLabel}
+              listeningLogError={listeningLogError}
+              listeningLogHasMore={listeningLogHasMore}
+              listeningLogLastLoadedAt={listeningLogLastLoadedAt}
+              listeningLogLoading={listeningLogLoading}
+              listeningLogOffset={listeningLogOffset}
+              listeningLogTracks={listeningLogTracks}
+              loadActiveSearchLookup={loadActiveSearchLookup}
+              loadCatalogBackfillCoverage={loadCatalogBackfillCoverage}
+              loadCatalogBackfillQueue={loadCatalogBackfillQueue}
+              loadCatalogBackfillRuns={loadCatalogBackfillRuns}
+              loadListeningLogBatch={loadListeningLogBatch}
+              loadingRecentSection={loadingRecentSection}
+              mergedTrackSourceFilter={mergedTrackSourceFilter}
+              mergedTracks={mergedTracks}
+              mergedTracksError={mergedTracksError}
+              mergedTracksLastLoadedAt={mergedTracksLastLoadedAt}
+              mergedTracksLoaded={mergedTracksLoaded}
+              mergedTracksLoading={mergedTracksLoading}
+              moveSectionPage={moveSectionPage}
+              openAlbumLookupPreview={openAlbumLookupPreview}
+              openDebugSessions={openDebugSessions}
+              openDebugTracks={openDebugTracks}
+              openListeningLogPage={openListeningLogPage}
+              openSections={openSections}
+              openTrackLookupPreview={openTrackLookupPreview}
+              previewItems={previewItems}
+              profile={profile}
+              quickUnavailableCopy={quickUnavailableCopy}
+              rankMovementFilter={rankMovementFilter}
+              recentDebugSourceFilter={recentDebugSourceFilter}
+              recentPlayFilter={recentPlayFilter}
+              recentRange={recentRange}
+              recentUnavailableCopy={recentUnavailableCopy}
+              refreshRecentSection={refreshRecentSection}
+              reloadTrackRankings={reloadTrackRankings}
+              renderHomePlayerPanel={renderHomePlayerPanel}
+              renderIdentityAuditPage={renderIdentityAuditPage}
+              renderMergedTrackSourceFilterToggle={renderMergedTrackSourceFilterToggle}
+              renderRankMovementFilterToggle={renderRankMovementFilterToggle}
+              renderRecentRangeHeader={renderRecentRangeHeader}
+              renderSectionTitle={renderSectionTitle}
+              renderTrackColumn={renderTrackColumn}
+              renderTrackRankingToggle={renderTrackRankingToggle}
+              repairCatalogBackfillQueueStatuses={repairCatalogBackfillQueueStatuses}
+              runCatalogBackfill={runCatalogBackfill}
+              searchLookupEntityType={searchLookupEntityType}
+              searchLookupQueueStatus={searchLookupQueueStatus}
+              searchLookupSort={searchLookupSort}
+              sectionPages={sectionPages}
+              setAlbumCatalogLookupEnqueueError={setAlbumCatalogLookupEnqueueError}
+              setAlbumCatalogLookupEnqueueResult={setAlbumCatalogLookupEnqueueResult}
+              setAlbumCatalogLookupQ={setAlbumCatalogLookupQ}
+              setAlbumCatalogLookupStatus={setAlbumCatalogLookupStatus}
+              setAppPage={setAppPage}
+              setCatalogBackfillAlbumTracklistPolicy={setCatalogBackfillAlbumTracklistPolicy}
+              setCatalogBackfillForceRefresh={setCatalogBackfillForceRefresh}
+              setCatalogBackfillFullRunMode={setCatalogBackfillFullRunMode}
+              setCatalogBackfillIncludeAlbums={setCatalogBackfillIncludeAlbums}
+              setCatalogBackfillLimit={setCatalogBackfillLimit}
+              setCatalogBackfillMarket={setCatalogBackfillMarket}
+              setCatalogBackfillMaxAlbumTracksPagesPerAlbum={setCatalogBackfillMaxAlbumTracksPagesPerAlbum}
+              setCatalogBackfillMaxRequests={setCatalogBackfillMaxRequests}
+              setCatalogBackfillMaxRuntimeSeconds={setCatalogBackfillMaxRuntimeSeconds}
+              setCatalogBackfillOffset={setCatalogBackfillOffset}
+              setCatalogBackfillTab={setCatalogBackfillTab}
+              setLikedTracksCountMode={setLikedTracksCountMode}
+              setLikedTracksShuffleEnabled={setLikedTracksShuffleEnabled}
+              setLikedTracksShuffleNonce={setLikedTracksShuffleNonce}
+              setLikedTracksSortMode={setLikedTracksSortMode}
+              setListeningLogError={setListeningLogError}
+              setListeningLogHasMore={setListeningLogHasMore}
+              setListeningLogLastLoadedAt={setListeningLogLastLoadedAt}
+              setListeningLogLoaded={setListeningLogLoaded}
+              setListeningLogOffset={setListeningLogOffset}
+              setListeningLogTracks={setListeningLogTracks}
+              setOpenDebugSessions={setOpenDebugSessions}
+              setOpenDebugTracks={setOpenDebugTracks}
+              setRecentDebugSourceFilter={setRecentDebugSourceFilter}
+              setRecentPlayFilter={setRecentPlayFilter}
+              setSearchLookupEntityType={setSearchLookupEntityType}
+              setSearchLookupQueueStatus={setSearchLookupQueueStatus}
+              setSearchLookupSort={setSearchLookupSort}
+              setSelectedPreview={setSelectedPreview}
+              setShowDebugLinkFields={setShowDebugLinkFields}
+              setTrackCatalogLookupStatus={setTrackCatalogLookupStatus}
+              showDebugLinkFields={showDebugLinkFields}
+              spotifyCooldownActive={spotifyCooldownActive}
+              syncLikedTracks={syncLikedTracks}
+              toggleSection={toggleSection}
+              trackCatalogLookupError={trackCatalogLookupError}
+              trackCatalogLookupLastLoadedAt={trackCatalogLookupLastLoadedAt}
+              trackCatalogLookupLoading={trackCatalogLookupLoading}
+              trackCatalogLookupResult={trackCatalogLookupResult}
+              trackCatalogLookupStatus={trackCatalogLookupStatus}
+              trackRankingMode={trackRankingMode}
+              usingLikedTracksFallback={usingLikedTracksFallback}
+              visibleItemsWithPageSize={visibleItemsWithPageSize}
+            />
           </>
         )}
         </section>
       </main>
-      {selectedPreview ? (
-        <div
-          aria-modal="true"
-          className="detail-modal-backdrop"
-          onClick={() => setSelectedPreview(null)}
-          role="dialog"
-        >
-          <section className="detail-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="detail-modal-options">
-              <button
-                aria-expanded={detailOptionsOpen}
-                aria-label="Track options"
-                className="detail-modal-options-button"
-                onClick={() => setDetailOptionsOpen((current) => !current)}
-                type="button"
-              >
-                <span aria-hidden="true">⚙</span>
-              </button>
-              {detailOptionsOpen ? (
-                <div className="detail-modal-options-menu">
-                  {selectedPreview.url ? (
-                    <a
-                      className="detail-modal-options-item"
-                      href={selectedPreview.url}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      Open in Spotify
-                    </a>
-                  ) : null}
-                  {selectedPreview.kind === "track" ? (
-                    <button
-                      className="detail-modal-options-item"
-                      onClick={() => {
-                        setSelectedPreviewDetailView((current) => current === "release" ? "recording" : "release");
-                        setDetailOptionsOpen(false);
-                      }}
-                      type="button"
-                    >
-                      {selectedPreviewDetailView === "release" ? "View recording track" : "View release track"}
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <div className="detail-modal-left">
-              {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" ? (
-                <button
-                  aria-label="Open album view"
-                  className="detail-modal-image-button"
-                  onClick={openSelectedTrackAlbumPreview}
-                  type="button"
-                >
-                  {selectedPreview.image ? (
-                    <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
-                  ) : (
-                    <span className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
-                      {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
-                    </span>
-                  )}
-                </button>
-              ) : selectedPreview.image ? (
-                <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
-              ) : (
-                <div className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
-                  {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
-                </div>
-              )}
-              {selectedPreview.kind === "track" && selectedPreviewCanOpenAlbum ? (
-                <button
-                  className="detail-modal-inline-link detail-modal-cover-album-title"
-                  onClick={openSelectedTrackAlbumPreview}
-                  type="button"
-                >
-                  {previewAlbumHeading(selectedPreview)}
-                </button>
-              ) : selectedPreview.kind === "track" || selectedPreview.kind === "album" ? (
-                <p className="detail-modal-cover-album-title">{previewAlbumHeading(selectedPreview)}</p>
-              ) : null}
-            </div>
-            <div className="detail-modal-copy">
-              <h2 className={selectedPreview.kind === "track" ? "detail-modal-track-title" : undefined}>
-                {selectedPreview.kind !== "track" && selectedPreviewIsKnownLiked ? <LikedBadge className="detail-liked-badge" /> : null}
-                {selectedPreview.kind !== "track" && selectedPreviewHasReleaseSibling ? (
-                  <ReleaseSiblingBadge className="detail-release-sibling-badge" sourceCount={selectedPreviewReleaseSiblingSourceCount} />
-                ) : null}
-                {selectedPreviewIsSharedArtistPage ? (
-                  <span className="detail-modal-artist-links">
-                    {selectedPreviewArtists.map((artist, index) => {
-                      const artistName = artist.name?.trim();
-                      if (!artistName) {
-                        return null;
-                      }
-                      return (
-                        <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                          {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                          <button
-                            className="detail-modal-inline-link"
-                            onClick={() => openSelectedArtistMemberPreview(artist)}
-                            type="button"
-                          >
-                            {artistName}
-                          </button>
-                        </span>
-                      );
-                    })}
-                  </span>
-                ) : selectedPreview.kind === "track" && selectedPreviewCanonicalTrackTitle
-                  ? selectedPreviewCanonicalTrackTitle
-                  : selectedPreview.kind === "album" && selectedPreview.detail ? `${selectedPreview.label} (${selectedPreview.detail})` : selectedPreview.label}
-              </h2>
-              {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewPlaybackTrackUri ? (
-                <div className="detail-track-action-row" aria-label="Track playback actions">
-                  {[
-                    ["play_now", isTrackPlaying(selectedPreviewPlaybackTrackUri) ? "Resume" : "Play now"],
-                    ["play_next", "Play next"],
-                    ["add_to_queue", "Add to queue"],
-                  ].map(([action, label]) => (
-                    <button
-                      className={`secondary-button detail-track-action-button detail-track-action-button-${action}${action === "play_now" && isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-track-action-button-playing" : ""}`}
-                      key={action}
-                      onClick={() => {
-                        const albumQueue = buildAlbumPlaybackQueue(selectedPreviewPlaybackTrackUri);
-                        void handlePlaybackAction(action as PlaybackAction, {
-                          trackUri: selectedPreviewPlaybackTrackUri,
-                          optimisticTrack: selectedPreviewTrackOptimisticSummary,
-                          queueCursor: albumQueue?.queueCursor,
-                          queueContext: albumQueue?.queueContext,
-                          queuePlaylistUris: albumQueue?.playlistUris,
-                          queueTracks: albumQueue?.queueTracks,
-                          sourceTrack: selectedPreview?.sourceTrack ?? null,
-                        });
-                      }}
-                      type="button"
-                    >
-                      {action === "play_now" ? (
-                        <span className={`detail-top-play-glyph${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-top-play-glyph-active" : ""}`} aria-hidden="true">
-                          {isTrackPlaying(selectedPreviewPlaybackTrackUri) ? (
-                            <span className="detail-pause-bars"><span /><span /></span>
-                          ) : (
-                            <span className="detail-play-icon">{"\u25B6"}</span>
-                          )}
-                        </span>
-                      ) : null}
-                      <span>{label}</span>
-                    </button>
-                  ))}
-                  <button
-                    aria-label={selectedPreviewIsBookmarked ? "Remove bookmark" : "Bookmark"}
-                    aria-pressed={selectedPreviewIsBookmarked}
-                    className={`secondary-button detail-track-action-button detail-track-bookmark-button${selectedPreviewIsBookmarked ? " detail-track-action-button-active" : ""}`}
-                    onClick={() => {
-                      if (!selectedPreviewStarTrackId) {
-                        return;
-                      }
-                      setLocalBookmarkedTrackById((current) => ({
-                        ...current,
-                        [selectedPreviewStarTrackId]: !selectedPreviewIsBookmarked,
-                      }));
-                    }}
-                    title={selectedPreviewIsBookmarked ? "Saved for later locally. Click to remove bookmark." : "Save for later locally."}
-                    type="button"
-                  >
-                    <svg aria-hidden="true" viewBox="0 0 20 20">
-                      <path d="M5 3.5h10v13l-5-3.2-5 3.2v-13Z" />
-                    </svg>
-                  </button>
-                  <button
-                    aria-label={selectedPreviewIsKnownLiked ? "Liked song" : "Not liked"}
-                    aria-pressed={selectedPreviewIsKnownLiked}
-                    className={`secondary-button detail-track-action-button detail-track-star-button${selectedPreviewIsKnownLiked ? " detail-track-action-button-active" : ""}`}
-                    onClick={() => {
-                      if (!selectedPreviewStarTrackId) {
-                        return;
-                      }
-                      setLocalStarredTrackById((current) => ({
-                        ...current,
-                        [selectedPreviewStarTrackId]: !selectedPreviewIsKnownLiked,
-                      }));
-                    }}
-                    title={selectedPreviewIsKnownLiked ? "Liked locally. Click to unstar." : "Not liked locally. Click to star."}
-                    type="button"
-                  >
-                    <span aria-hidden="true">{selectedPreviewIsKnownLiked ? "★" : "☆"}</span>
-                  </button>
-                </div>
-              ) : null}
-              {selectedPreview.kind === "track"
-                && (selectedPreviewListenCountLabel || selectedPreviewTrackDurationLabel || selectedPreviewLastListenedLabel) ? (
-                <div className="detail-track-action-meta" aria-label="Track summary">
-                  {selectedPreviewTrackDurationLabel ? <span>{selectedPreviewTrackDurationLabel}</span> : null}
-                  {selectedPreviewLastListenedLabel ? <span>Last {selectedPreviewLastListenedLabel}</span> : null}
-                  {selectedPreviewListenCountLabel ? <span className="detail-track-action-meta-listens">{selectedPreviewListenCountLabel}</span> : null}
-                </div>
-              ) : null}
-              {selectedPreview.kind === "track" && selectedPreviewCanOpenArtist ? (
-                <div className="detail-modal-track-artist-heading detail-modal-meta-with-image">
-                  {(selectedPreviewTrackMainArtists[0]?.image_url ?? selectedPreviewArtistImageUrl) ? (
-                    <img
-                      alt=""
-                      className="detail-modal-artist-image detail-modal-track-artist-image"
-                      src={selectedPreviewTrackMainArtists[0]?.image_url ?? selectedPreviewArtistImageUrl ?? undefined}
-                    />
-                  ) : null}
-                  <span className="detail-modal-artist-links">
-                    {selectedPreviewTrackMainArtists.map((artist, index) => {
-                      const artistName = artist.name?.trim();
-                      if (!artistName) {
-                        return null;
-                      }
-                      return (
-                        <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                          {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                          <button
-                            className="detail-modal-inline-link"
-                            onClick={() => openSelectedTrackArtistPreview(artist)}
-                            type="button"
-                          >
-                            {artistName}
-                          </button>
-                        </span>
-                      );
-                    })}
-                  </span>
-                </div>
-              ) : null}
-              {selectedPreview.kind === "album" ? (
-                <div className="detail-modal-album-meta-block">
-                  {selectedPreviewAlbumSummary ? (
-                    <span className="detail-modal-meta-text detail-modal-album-summary">{selectedPreviewAlbumSummary}</span>
-                  ) : null}
-                  {selectedPreviewAlbumMainArtists.length > 0 ? (
-                    <div className="detail-modal-meta detail-modal-meta-with-image">
-                      {selectedPreviewArtistImageUrl ? (
-                        <img
-                          alt=""
-                          className="detail-modal-artist-image"
-                          src={selectedPreviewArtistImageUrl}
-                        />
-                      ) : null}
-                      <span className="detail-modal-artist-links detail-modal-meta-text">
-                        {selectedPreviewAlbumMainArtists.map((artist, index) => {
-                          const artistName = artist.name?.trim();
-                          if (!artistName) {
-                            return null;
-                          }
-                          return (
-                            <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                              {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                              <button
-                                className="detail-modal-inline-link"
-                                onClick={() => openSelectedAlbumArtistPreview(artist)}
-                                type="button"
-                              >
-                                {artistName}
-                              </button>
-                            </span>
-                          );
-                        })}
-                      </span>
-                    </div>
-                  ) : null}
-                  {selectedPreviewAlbumGuestArtists.length > 0 ? (
-                    <p className="detail-modal-with-artists">
-                      <span>with </span>
-                      <span className="detail-modal-artist-links">
-                        {selectedPreviewAlbumGuestArtists.map((artist, index) => {
-                          const artistName = artist.name?.trim();
-                          if (!artistName) {
-                            return null;
-                          }
-                          return (
-                            <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                              {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                              <button
-                                className="detail-modal-inline-link"
-                                onClick={() => openSelectedAlbumArtistPreview(artist)}
-                                onMouseEnter={() => scheduleAlbumWithArtistHighlight(artistName)}
-                                onMouseLeave={clearAlbumWithArtistHighlight}
-                                onFocus={() => scheduleAlbumWithArtistHighlight(artistName)}
-                                onBlur={clearAlbumWithArtistHighlight}
-                                type="button"
-                              >
-                                {artistName}
-                              </button>
-                            </span>
-                          );
-                        })}
-                      </span>
-                    </p>
-                  ) : null}
-                </div>
-              ) : selectedPreview.kind === "track" && selectedPreviewCanOpenArtist && selectedPreviewTrackGuestArtists.length > 0 ? (
-                <div className="detail-modal-album-meta-block">
-                  <p className="detail-modal-with-artists">
-                    <span>with </span>
-                    <span className="detail-modal-artist-links">
-                      {selectedPreviewTrackGuestArtists.map((artist, index) => {
-                        const artistName = artist.name?.trim();
-                        if (!artistName) {
-                          return null;
-                        }
-                        return (
-                          <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                            {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                            <button
-                              className="detail-modal-inline-link"
-                              onClick={() => openSelectedTrackArtistPreview(artist)}
-                              type="button"
-                            >
-                              {artistName}
-                            </button>
-                          </span>
-                        );
-                      })}
-                    </span>
-                  </p>
-                </div>
-              ) : selectedPreview.meta && !(selectedPreview.kind === "track" && selectedPreviewCanOpenArtist) ? (
-                <div className="detail-modal-meta detail-modal-meta-with-image">
-                  {selectedPreviewCanOpenArtist ? (
-                    <span className="detail-modal-artist-links detail-modal-meta-text">
-                      {selectedPreviewArtists.map((artist, index) => {
-                        const artistName = artist.name?.trim();
-                        if (!artistName) {
-                          return null;
-                        }
-                        return (
-                          <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                            {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                            <button
-                              className="detail-modal-inline-link"
-                              onClick={() => {
-                                if (selectedPreview.kind === "album") {
-                                  openSelectedAlbumArtistPreview(artist);
-                                  return;
-                                }
-                                openSelectedTrackArtistPreview(artist);
-                              }}
-                              type="button"
-                            >
-                              {artistName}
-                            </button>
-                          </span>
-                        );
-                      })}
-                    </span>
-                  ) : (
-                    <span className="detail-modal-meta-text">{selectedPreview.meta}</span>
-                  )}
-                </div>
-              ) : null}
-              {selectedPreview.kind === "track" && !selectedPreviewReleaseTrackDetailReady && selectedPreviewReleaseTrackDetailError ? (
-                <p className="detail-modal-release-note">{selectedPreviewReleaseTrackDetailError}</p>
-              ) : null}
-              {selectedPreview.kind === "track" && selectedPreviewRecordingCandidateError ? (
-                <p className="detail-modal-release-note">{selectedPreviewRecordingCandidateError}</p>
-              ) : null}
-              {selectedPreview.detail && selectedPreview.kind !== "track" && selectedPreview.kind !== "album" ? <p className="detail-modal-detail">{selectedPreview.detail}</p> : null}
-              {selectedPreview.kind === "track" && !selectedPreviewPlaybackTrackUri ? (
-                <p className="detail-modal-preview-missing">This track does not have a playable Spotify URI.</p>
-              ) : null}
-              {selectedPreview.kind === "artist" ? (
-                <>
-                  {selectedPreviewIsSharedArtistPage || !backendSelectedPreviewArtistAlbums ? (
-                    renderSelectedPreviewArtistAlbumSection(
-                      "Albums",
-                      selectedPreviewArtistAlbumsForDisplay,
-                    )
-                  ) : (
-                    <>
-                      {renderSelectedPreviewArtistAlbumSection(
-                        "Albums",
-                        selectedPreviewPrimaryArtistAlbums,
-                      )}
-                      {renderSelectedPreviewArtistAlbumSection(
-                        "Appears on",
-                        selectedPreviewAppearsOnAlbums,
-                      )}
-                    </>
-                  )}
-                </>
-              ) : null}
-            </div>
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.recording.length > 0 ? (
-              <div className="detail-modal-recording-variations">
-                <div className="detail-modal-recording-variations-header">
-                  <span>Recording variations</span>
-                </div>
-                <div className="detail-modal-recording-variation-strip">
-                  {selectedPreviewDisplayRelationRows.recording.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`recording-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">R</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.contextStyle.length > 0 ? (
-              <div className="detail-modal-recording-variations">
-                <div className="detail-modal-recording-variations-header">
-                  <span>Variations</span>
-                </div>
-                <div className="detail-modal-recording-variation-strip">
-                  {selectedPreviewDisplayRelationRows.contextStyle.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`family-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">V</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.coverRemix.length > 0 ? (
-              <div className="detail-modal-recording-variations">
-                <div className="detail-modal-recording-variations-header">
-                  <span>Covers / remixes</span>
-                </div>
-                <div className="detail-modal-recording-variation-strip">
-                  {selectedPreviewDisplayRelationRows.coverRemix.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`cover-remix-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">C</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-            {selectedPreview.kind === "track" || selectedPreview.kind === "album" ? (
-              <div className={`detail-modal-album-tracks detail-modal-album-tracks-full${selectedPreview.kind === "track" ? " detail-modal-album-tracks-track detail-modal-album-tracks-no-with" : ""}${selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? "" : " detail-modal-album-tracks-no-with"}`}>
-                <div className="detail-modal-album-header">
-                  {hasPremiumPlayback ? (
-                    <PlaybackActionMenu
-                      ariaLabel="Album playback options"
-                      buttonClassName="detail-album-play-all-button"
-                      placement={selectedPreview.kind === "track" ? "overlay-trigger" : "adjacent"}
-                      onAction={(action) => handleAlbumPlayAll(action)}
-                    >
-                      Play all
-                    </PlaybackActionMenu>
-                  ) : (
-                    <span aria-hidden="true" />
-                  )}
-                  <span className="detail-modal-album-title-header">{albumTracklistSummaryLabel(albumTrackEntries)}</span>
-                  {selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? <span className="detail-modal-album-with-header">With</span> : null}
-                  <span className="detail-modal-album-liked-header">Tags</span>
-                  {selectedPreview.kind !== "track" ? <span className="detail-modal-album-preview-header">Preview</span> : null}
-                  <button
-                    className={`detail-modal-album-last-played-header detail-modal-album-sort-header${albumTrackLastSortMode ? " detail-modal-album-sort-header-active" : ""}`}
-                    onClick={() => setAlbumTrackLastSortMode((current) => nextLastPlayedSortMode(current))}
-                    type="button"
-                  >
-                    Last
-                    {albumTrackLastSortMode ? (
-                      <span aria-hidden="true">{albumTrackLastSortMode === "recent" ? "↓" : "↑"}</span>
-                    ) : null}
-                  </button>
-                </div>
-                {albumTrackEntriesLoading && albumTrackEntries.length === 0 ? (
-                  <p className="detail-modal-preview-missing">Loading album songs...</p>
-                ) : null}
-                {!albumTrackEntriesLoading && albumTrackEntriesError ? (
-                  <p className="detail-modal-preview-missing">{albumTrackEntriesError}</p>
-                ) : null}
-                {!albumTrackEntriesError && albumTrackEntries.length > 0 ? (
-                  <div className="detail-album-track-list-wrap">
-                    {selectedAlbumTrackMarkerTop(displayAlbumTrackEntries) ? (
-                      <span
-                        className="detail-album-track-scroll-marker"
-                        style={{ "--detail-album-track-marker-top": selectedAlbumTrackMarkerTop(displayAlbumTrackEntries) } as CSSProperties}
-                        aria-hidden="true"
-                      />
-                    ) : null}
-                    <ul className={`detail-album-track-list${albumTrackEntriesLoading ? " detail-album-track-list-updating" : ""}`} ref={albumTrackListRef}>
-                      {displayAlbumTrackEntries.map((track) => {
-                      const rowTrackUri = track.uri ?? (track.id ? `spotify:track:${track.id}` : null);
-                      const rowIsCurrentTrack = Boolean(rowTrackUri && currentTrack?.uri === rowTrackUri);
-                      const rowPlaying = isTrackPlaying(rowTrackUri);
-                      const rowPreviewPlaying = Boolean(rowTrackUri && previewingTrackUri === rowTrackUri);
-                      const rowPreviewActive = Boolean(rowPreviewPlaying && rowPlaying);
-                      const rowPreviewKey = albumTrackPreviewKey(track, rowTrackUri);
-                      const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
-                      const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
-                      const rowLastPlayed = formatCompactRelativeAge(track.lastPlayedAt);
-                      const rowIsUnlistened = !track.lastPlayedAt && track.playCount <= 0;
-                      const rowHasDuplicateSources = track.releaseTrackDuplicateSourceCount > 1;
-                      const rowIsRecordingGroup = track.releaseTrackClusterCandidateType === "recording_track_candidate";
-                      const rowIsCoverRemixFamily = track.releaseTrackClusterCandidateType === "track_family_candidate"
-                        && familyCoverRemixRelationshipKinds.has(track.releaseTrackClusterRelationshipKind ?? "");
-                      const rowIsVariationFamily = track.releaseTrackClusterCandidateType === "track_family_candidate"
-                        && !rowIsCoverRemixFamily;
-                      const rowRelationTagEntries = [
-                        rowHasDuplicateSources ? { code: "D", label: "duplicate source grouping" } : null,
-                        rowIsRecordingGroup ? { code: "R", label: "recording group" } : null,
-                        rowIsVariationFamily ? { code: "V", label: "variation" } : null,
-                        rowIsCoverRemixFamily ? { code: "C", label: "cover/remix/rework" } : null,
-                      ].filter((entry): entry is { code: string; label: string } => Boolean(entry));
-                      const rowRelationTags = rowRelationTagEntries.map((entry) => entry.code).join("");
-                      const rowRelationTagsTitle = rowRelationTagEntries.length > 0
-                        ? `Track relation: ${rowRelationTagEntries.map((entry) => entry.label).join(", ")}`
-                        : "";
-                      const rowStarTrackId = track.id ?? spotifyTrackIdFromUri(rowTrackUri);
-                      const rowMatchesSelectedReleaseTrack = Boolean(
-                        selectedPreview.kind === "track"
-                        && (
-                          (track.releaseTrackId != null && track.releaseTrackId === selectedPreview.releaseTrackId)
-                          || (rowStarTrackId && selectedPreviewReleaseTrackDetailReady?.source_versions.some((version) => version.spotify_track_id === rowStarTrackId))
-                        ),
-                      );
-                      const rowIsLiked = rowStarTrackId && rowStarTrackId in localStarredTrackById
-                        ? localStarredTrackById[rowStarTrackId]
-                        : (rowMatchesSelectedReleaseTrack && selectedPreviewIsKnownLiked) || albumTrackIsKnownLiked(track);
-                      const mainArtistNames = new Set(
-                        selectedPreview.kind === "album" || selectedPreview.kind === "track"
-                          ? selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean)
-                          : [],
-                      );
-                      const rowWithArtists = selectedPreview.kind === "album" || selectedPreview.kind === "track"
-                        ? artistEntriesForAlbumTrack(track).filter((artist) => {
-                          const artistName = artist.name?.trim().toLocaleLowerCase();
-                          return Boolean(artistName && !mainArtistNames.has(artistName));
-                        })
-                        : [];
-                      const rowMatchesHighlightedArtist = Boolean(
-                        selectedPreview.kind === "album"
-                        && selectedPreview.albumHighlightArtistNames?.some((artistName) => artistNameMatches(track.artistName, artistName)),
-                      );
-                      const rowMatchesHoveredWithArtist = Boolean(
-                        hoveredAlbumWithArtistName && artistNameMatches(track.artistName, hoveredAlbumWithArtistName),
-                      );
-                      const rowBaseDurationMs = (
-                        track.durationMs
-                        ?? (rowIsCurrentTrack
-                          ? (playbackDurationMs > 0 ? playbackDurationMs : currentTrack?.durationMs ?? null)
-                          : null)
-                      );
-                      const rowElapsedMs = rowIsCurrentTrack
-                        ? (
-                          rowBaseDurationMs != null
-                            ? Math.min(Math.max(0, playbackPositionMs), rowBaseDurationMs)
-                            : Math.max(0, playbackPositionMs)
-                        )
-                        : null;
-                      const rowButtonTimeMs = rowIsCurrentTrack
-                        ? (
-                          rowPlaying
-                            ? rowElapsedMs
-                            : (rowPausedCurrent ? (pausedTimeFlashOn ? rowElapsedMs : rowBaseDurationMs) : rowBaseDurationMs)
-                        )
-                        : rowBaseDurationMs;
-                      return (
-	                        <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}${rowMatchesHighlightedArtist || rowMatchesHoveredWithArtist ? " detail-album-track-row-artist-highlighted" : ""}`} key={track.id ?? track.name}>
-	                          {hasPremiumPlayback ? (
-	                            <PlaybackActionMenu
-                              ariaLabel={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
-                              buttonClassName={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
-                              disabled={!rowTrackUri}
-                              isPlaying={rowPlaying}
-                              placement="overlay-trigger"
-                              onAction={(action) => {
-                                const albumQueue = buildAlbumPlaybackQueue(rowTrackUri);
-                                return handlePlaybackAction(action, {
-                                  trackUri: rowTrackUri,
-                                  optimisticTrack: playerSummaryFromAlbumTrack(track),
-                                  queueCursor: albumQueue?.queueCursor,
-                                  queueContext: albumQueue?.queueContext,
-                                  queuePlaylistUris: albumQueue?.playlistUris,
-                                  queueTracks: albumQueue?.queueTracks,
-                                  sourceTrack: track.sourceTrack,
-                                }).then(() => {
-                                  if (action === "play_now") {
-                                    openAlbumTrackPreview(track);
-                                  }
-                                });
-                              }}
-                            >
-                              {rowPlaying ? (
-                                <span className="detail-wave-icon" aria-hidden="true">
-                                  <span />
-                                  <span />
-                                  <span />
-                                </span>
-                              ) : (
-                                <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
-                              )}
-                              <span className={`detail-album-track-play-time${rowPausedCurrent ? " detail-album-track-play-time-flash" : ""}`}>
-                                {rowButtonTimeMs != null ? formatPlaybackClock(rowButtonTimeMs) : "?:??"}
-	                              </span>
-	                            </PlaybackActionMenu>
-	                          ) : <span aria-hidden="true" />}
-                          <button
-                            className="detail-album-track-name-button single-line-ellipsis"
-                            onClick={() => openAlbumTrackPreview(track)}
-                            type="button"
-                          >
-                            <span className="single-line-ellipsis">{track.name}</span>
-                          </button>
-                          {selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? (
-                            <span className="detail-album-track-with single-line-ellipsis">
-                              {rowWithArtists.map((artist, index) => {
-                                const artistName = artist.name?.trim();
-                                if (!artistName) {
-                                  return null;
-                                }
-                                return (
-                                  <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                                    {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                                    <button
-                                      className="detail-modal-inline-link"
-                                      onClick={() => openAlbumWithArtistPreview(artist)}
-                                      type="button"
-                                    >
-                                      {artistName}
-                                    </button>
-                                  </span>
-                                );
-                              })}
-                            </span>
-                          ) : null}
-                          <span className="detail-album-track-liked-cell">
-                            <span className="detail-album-track-badges">
-                              {rowIsLiked ? <LikedBadge className="detail-album-track-liked-badge" /> : null}
-                              {rowRelationTags ? (
-                                <span
-                                  className="relation-tags-badge detail-album-track-relation-badge"
-                                  title={rowRelationTagsTitle}
-                                  aria-label={rowRelationTagsTitle}
-                                >
-                                  {rowRelationTags}
-                                </span>
-                              ) : null}
-                            </span>
-                          </span>
-                          <div className="detail-album-track-actions">
-                            {selectedPreview.kind !== "track" && hasPremiumPlayback ? (
-                              <button
-                                aria-label={rowPreviewPlaying ? `Stop preview for ${track.name}` : `Preview ${track.name}`}
-                                className={`detail-album-track-preview-button${rowPreviewActive ? " detail-album-track-preview-button-active" : ""}${rowPreviewPlayed ? " detail-album-track-preview-button-played" : ""}`}
-                                disabled={!rowTrackUri}
-                                onClick={() => {
-                                  void toggleAlbumTrackPreview(track, rowTrackUri);
-                                }}
-                                type="button"
-                              />
-                            ) : selectedPreview.kind !== "track" ? (
-                              <span className="detail-album-track-preview-placeholder" aria-hidden="true" />
-                            ) : null}
-                            {rowLastPlayed ? (
-                              <span className="detail-album-track-last-played">{rowLastPlayed}</span>
-                            ) : rowIsUnlistened ? (
-                              <span className="detail-album-track-last-played">
-                                <NewTrackBadge className="detail-album-track-played-new-badge" />
-                              </span>
-                            ) : (
-                              <span className="detail-album-track-last-played">-</span>
-                            )}
-                          </div>
-                        </li>
-                      );
-                      })}
-                    </ul>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "release" && selectedPreviewReleaseAlbumVariationCount > 1 ? (
-              <div className="detail-modal-recording-variations detail-modal-release-source-albums">
-                <div className="detail-modal-recording-variations-header">
-                  <span>Release albums</span>
-                  {selectedPreviewReleaseSourceVersionNeedsArrows ? (
-                    <span className="detail-modal-recording-variation-controls">
-                      <button aria-label="Previous source album covers" onClick={() => scrollRecordingVariationStrip(-1)} type="button">{"<"}</button>
-                      <button aria-label="Next source album covers" onClick={() => scrollRecordingVariationStrip(1)} type="button">{">"}</button>
-                    </span>
-                  ) : null}
-                </div>
-                <div className="detail-modal-recording-variation-strip" ref={recordingVariationStripRef}>
-                  {selectedPreviewReleaseSourceVersions.map((version) => {
-                    const isSelectedSourceVersion = version.spotify_track_id === selectedPreviewCurrentSpotifyTrackId;
-                    const albumImageUrl = releaseSourceVersionAlbumImageUrl(version);
-                    const subtitle = variationSubtitleFromTitle(version.name);
-                    const title = [
-                      version.album_release_year,
-                      version.album_name || "Unknown album",
-                      releaseSourceVersionPlayCountLabel(version),
-                    ].filter(Boolean).join(" · ");
-                    return (
-                      <button
-                        className={`detail-modal-recording-variation-cover${isSelectedSourceVersion ? " detail-modal-recording-variation-cover-selected" : ""}`}
-                        key={`release-source-cover-${version.source_track_id}`}
-                        onClick={() => openReleaseSourceVersion(version, "release")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">Source</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(version.album_name || version.name || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                          {version.is_playback_choice ? (
-                            <span className="detail-modal-recording-variation-badge">Rep</span>
-                          ) : null}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{version.album_name || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{version.album_release_year || releaseSourceVersionPlayCountLabel(version)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                  {selectedPreviewOtherRecordingMembers.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`release-member-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "release")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">Recording</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-          </section>
-        </div>
-      ) : null}
+      <DetailPreviewModal
+        albumTrackEntries={albumTrackEntries}
+        albumTrackEntriesError={albumTrackEntriesError}
+        albumTrackEntriesLoading={albumTrackEntriesLoading}
+        albumTrackIsKnownLiked={albumTrackIsKnownLiked}
+        albumTrackLastSortMode={albumTrackLastSortMode}
+        albumTrackListRef={albumTrackListRef}
+        albumTrackPreviewKey={albumTrackPreviewKey}
+        albumTracklistSummaryLabel={albumTracklistSummaryLabel}
+        artistEntriesForAlbumTrack={artistEntriesForAlbumTrack}
+        artistNameMatches={artistNameMatches}
+        backendSelectedPreviewArtistAlbums={backendSelectedPreviewArtistAlbums}
+        buildAlbumPlaybackQueue={buildAlbumPlaybackQueue}
+        clearAlbumWithArtistHighlight={clearAlbumWithArtistHighlight}
+        currentTrack={currentTrack}
+        detailOptionsOpen={detailOptionsOpen}
+        displayAlbumTrackEntries={displayAlbumTrackEntries}
+        familyCoverRemixRelationshipKinds={familyCoverRemixRelationshipKinds}
+        formatCompactRelativeAge={formatCompactRelativeAge}
+        formatPlaybackClock={formatPlaybackClock}
+        handleAlbumPlayAll={handleAlbumPlayAll}
+        handlePlaybackAction={handlePlaybackAction}
+        hasPremiumPlayback={hasPremiumPlayback}
+        hoveredAlbumWithArtistName={hoveredAlbumWithArtistName}
+        isTrackPlaying={isTrackPlaying}
+        localStarredTrackById={localStarredTrackById}
+        nextLastPlayedSortMode={nextLastPlayedSortMode}
+        openAlbumTrackPreview={openAlbumTrackPreview}
+        openAlbumWithArtistPreview={openAlbumWithArtistPreview}
+        openRecordingCandidateReleaseTrack={openRecordingCandidateReleaseTrack}
+        openReleaseSourceVersion={openReleaseSourceVersion}
+        openSelectedAlbumArtistPreview={openSelectedAlbumArtistPreview}
+        openSelectedArtistMemberPreview={openSelectedArtistMemberPreview}
+        openSelectedTrackAlbumPreview={openSelectedTrackAlbumPreview}
+        openSelectedTrackArtistPreview={openSelectedTrackArtistPreview}
+        pausedTimeFlashOn={pausedTimeFlashOn}
+        playbackDurationMs={playbackDurationMs}
+        playbackPaused={playbackPaused}
+        playbackPositionMs={playbackPositionMs}
+        playerSummaryFromAlbumTrack={playerSummaryFromAlbumTrack}
+        previewAlbumHeading={previewAlbumHeading}
+        previewPlayedTrackKeys={previewPlayedTrackKeys}
+        previewingTrackUri={previewingTrackUri}
+        recordingMemberAlbumImageUrl={recordingMemberAlbumImageUrl}
+        recordingMemberReleaseYear={recordingMemberReleaseYear}
+        recordingVariationStripRef={recordingVariationStripRef}
+        releaseSourceVersionAlbumImageUrl={releaseSourceVersionAlbumImageUrl}
+        releaseSourceVersionPlayCountLabel={releaseSourceVersionPlayCountLabel}
+        renderSelectedPreviewArtistAlbumSection={renderSelectedPreviewArtistAlbumSection}
+        scheduleAlbumWithArtistHighlight={scheduleAlbumWithArtistHighlight}
+        scrollRecordingVariationStrip={scrollRecordingVariationStrip}
+        selectedAlbumTrackMarkerTop={selectedAlbumTrackMarkerTop}
+        selectedPreview={selectedPreview}
+        selectedPreviewAlbumGuestArtists={selectedPreviewAlbumGuestArtists}
+        selectedPreviewAlbumHasGuestArtists={selectedPreviewAlbumHasGuestArtists}
+        selectedPreviewAlbumMainArtists={selectedPreviewAlbumMainArtists}
+        selectedPreviewAlbumSummary={selectedPreviewAlbumSummary}
+        selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbums}
+        selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForDisplay}
+        selectedPreviewArtistImageUrl={selectedPreviewArtistImageUrl}
+        selectedPreviewArtists={selectedPreviewArtists}
+        selectedPreviewCanOpenAlbum={selectedPreviewCanOpenAlbum}
+        selectedPreviewCanOpenArtist={selectedPreviewCanOpenArtist}
+        selectedPreviewCanonicalTrackTitle={selectedPreviewCanonicalTrackTitle}
+        selectedPreviewCurrentSpotifyTrackId={selectedPreviewCurrentSpotifyTrackId}
+        selectedPreviewDetailView={selectedPreviewDetailView}
+        selectedPreviewDisplayRelationRows={selectedPreviewDisplayRelationRows}
+        selectedPreviewHasReleaseSibling={selectedPreviewHasReleaseSibling}
+        selectedPreviewIsBookmarked={selectedPreviewIsBookmarked}
+        selectedPreviewIsKnownLiked={selectedPreviewIsKnownLiked}
+        selectedPreviewIsSharedArtistPage={selectedPreviewIsSharedArtistPage}
+        selectedPreviewLastListenedLabel={selectedPreviewLastListenedLabel}
+        selectedPreviewListenCountLabel={selectedPreviewListenCountLabel}
+        selectedPreviewOtherRecordingMembers={selectedPreviewOtherRecordingMembers}
+        selectedPreviewPlaybackTrackUri={selectedPreviewPlaybackTrackUri}
+        selectedPreviewPrimaryArtistAlbums={selectedPreviewPrimaryArtistAlbums}
+        selectedPreviewRecordingCandidateError={selectedPreviewRecordingCandidateError}
+        selectedPreviewReleaseAlbumVariationCount={selectedPreviewReleaseAlbumVariationCount}
+        selectedPreviewReleaseSiblingSourceCount={selectedPreviewReleaseSiblingSourceCount}
+        selectedPreviewReleaseSourceVersionNeedsArrows={selectedPreviewReleaseSourceVersionNeedsArrows}
+        selectedPreviewReleaseSourceVersions={selectedPreviewReleaseSourceVersions}
+        selectedPreviewReleaseTrackDetailError={selectedPreviewReleaseTrackDetailError}
+        selectedPreviewReleaseTrackDetailReady={selectedPreviewReleaseTrackDetailReady}
+        selectedPreviewStarTrackId={selectedPreviewStarTrackId}
+        selectedPreviewTrackDurationLabel={selectedPreviewTrackDurationLabel}
+        selectedPreviewTrackGuestArtists={selectedPreviewTrackGuestArtists}
+        selectedPreviewTrackMainArtists={selectedPreviewTrackMainArtists}
+        selectedPreviewTrackOptimisticSummary={selectedPreviewTrackOptimisticSummary}
+        setAlbumTrackLastSortMode={setAlbumTrackLastSortMode}
+        setDetailOptionsOpen={setDetailOptionsOpen}
+        setLocalBookmarkedTrackById={setLocalBookmarkedTrackById}
+        setLocalStarredTrackById={setLocalStarredTrackById}
+        setSelectedPreview={setSelectedPreview}
+        setSelectedPreviewDetailView={setSelectedPreviewDetailView}
+        spotifyTrackIdFromUri={spotifyTrackIdFromUri}
+        toggleAlbumTrackPreview={toggleAlbumTrackPreview}
+        variationSubtitleFromTitle={variationSubtitleFromTitle}
+      />
     </>
   );
 }

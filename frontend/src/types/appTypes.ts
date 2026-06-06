@@ -99,6 +99,22 @@ export type RecentTrack = {
   formula_rank_delta?: number | null;
 };
 
+export type TrackArtistEntry = NonNullable<RecentTrack["artists"]>[number];
+
+export type ArtistAlbumEntry = {
+  albumId: string | null;
+  name: string;
+  artistName: string | null;
+  imageUrl: string | null;
+  url: string;
+  releaseYear: string | null;
+  trackCount: number | null;
+  source: "album" | "track";
+  isHighlighted: boolean;
+  relationship?: "album" | "appears_on" | "unknown";
+  evidence?: string | null;
+};
+
 export type LikedTracksSyncMetadata = {
   sync_key: string;
   last_quick_sync_at: string | null;
@@ -1767,4 +1783,15 @@ export type PopupTrackPlaybackOptions = {
   queuePlaylistUris?: string[] | null;
   queueTracks?: PlayerQueueTrack[] | null;
   sourceTrack?: RecentTrack | null;
+};
+
+export type PlaybackActionRequest = PopupTrackPlaybackOptions & {
+  insertTracks?: PlayerQueueTrack[] | null;
+  trackUri: string | null;
+};
+
+export type RecordingRelationRows = {
+  recording: RecordingTrackCandidateMember[];
+  contextStyle: RecordingTrackCandidateMember[];
+  coverRemix: RecordingTrackCandidateMember[];
 };
