@@ -30,6 +30,14 @@ The raw ingest layer is not yet responsible for:
 - fuzzy matching
 - canonical song clustering
 
+Downstream entity backfill boundary:
+- history/recent projection may create source/release/artist rows conservatively after canonical music facts are projected
+- history text artist backfill must not split durable comma-bearing group names such as `Crosby, Stills, Nash & Young`
+- evidenced composite history credits such as `Brian Eno, David Byrne` should be skipped as fake single artist identities when structured/provider context proves the parts are separate credited artists
+- Spotify artist IDs can promote an existing text-only artist row only when exact-name and album/track evidence gates are satisfied
+- artist name alone is not enough to promote or repair identity
+- broad album and track source/text reconciliation remains outside raw ingest and should use explicit audit/repair flows
+
 Important boundary:
 - `raw_spotify_history` is source-faithful and may include Spotify podcast episode rows or otherwise unidentifiable export rows.
 - `fact_play_event` is the current music fact table.

@@ -88,9 +88,14 @@ Current note:
   - Spotify track catalog writes now propagate missing `release_track.duration_ms` through accepted source mappings and record duration provenance/confidence; accepted mappings with conflicting catalog durations are marked `uncertain_catalog_conflict`
   - a local track metadata worker can run bounded one-shot or looped batches with cooldown, JSONL logging, and rolling request-budget protection
   - catalog enrichment remains evidence-only and must not create, merge, promote, or apply identity decisions
+- artist identity repair now has a backend-owned audit and safe repair flow for text-only history artists vs Spotify/provider-backed artists:
+  - automatic repair requires exact normalized artist name, exactly one provider-backed artist, text-only duplicates, and album/track or strict shared-album-title evidence
+  - same-name-only, stylization, similar-name same-album, orphan placeholder, and multiple-provider groups remain review-only
+  - raw composite history credits such as `Dave Harrington, Tim Mislock` are classified separately and must not be treated as similar-name same-album duplicates
+  - legitimate comma-bearing group names such as `Crosby, Stills, Nash & Young` remain valid artist identities and should not be split by UI display fallback logic
 - current implementation note:
   - `backend/app/main.py` is being reduced through behavior-preserving helper extraction
-  - extracted backend helper modules and the uncommitted frontend `App.tsx` extraction are tracked in `docs/reference/refactor-notes.md`
+  - extracted backend helper modules and frontend `App.tsx` extraction context are tracked in `docs/reference/refactor-notes.md`
   - frontend Identity Audit refactors should preserve the current workflow and persisted local review state unless a UX redesign is explicitly requested
 
 ## Domain Vocabulary

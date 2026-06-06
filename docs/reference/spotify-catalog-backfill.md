@@ -5,6 +5,8 @@ Spotify catalog backfill enriches existing local identities with Spotify catalog
 
 It is enrichment-only. It must not create, merge, promote, or repair ListenLab identity rows.
 
+Artist identity promotion is separate from catalog backfill. When a Spotify artist ID arrives through ingest/catalog promotion code, it may attach the provider source map to one existing text-only artist only under exact-name plus album/track evidence gates. Catalog backfill itself remains evidence-only and must not perform duplicate repair.
+
 ## Tables
 - `spotify_track_catalog`
 - `spotify_album_catalog`
@@ -62,6 +64,17 @@ Behavior:
 - preserve album queue context when a track is started from an album row
 
 This fallback is catalog enrichment only. It must not merge, promote, or repair identity rows.
+
+## Artist Album Evidence Fallback
+The artist album evidence route `/auth/artist-albums` primarily uses Spotify catalog album and album-track metadata, but it now falls back to internal `album_artist` links when catalog album rows are missing or incomplete.
+
+Behavior:
+- return catalog-derived album/appears-on evidence when available
+- append missing albums from internal `album_artist` links
+- prefer a Spotify source album ID when an internal release album has one
+- collapse duplicate same-title history/provider album rows for the same selected artist
+
+This fallback reads identity links that already exist. It must not create catalog rows, repair albums, or merge identities.
 
 ## Request Controls
 - `limit`
@@ -181,6 +194,7 @@ Search / Lookup includes:
 - No `analysis_track_map` rows are mutated.
 - No merge/apply behavior belongs in catalog backfill.
 - Catalog rows are metadata evidence, not identity decisions by themselves.
+- Artist album evidence fallback can read `album_artist`, but it must remain read-only.
 
 ## Verification
 Common checks:

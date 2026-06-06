@@ -61,10 +61,19 @@ Extracted route modules:
 - `backend/app/routes/playback_routes.py`
 - `backend/app/routes/auth_routes.py`
 
+Current audit-route additions:
+- `GET /debug/artists/duplicate-audit`
+  - implemented through `backend/app/artist_identity_repair.py`
+  - read-only duplicate/composite/stylization artist audit
+- `POST /debug/artists/duplicate-repair`
+  - dry-run by default; write repair is transaction-scoped and evidence-gated
+- `POST /debug/artists/composite-credit-cleanup`
+  - dry-run by default; write cleanup only removes ready composite links/rows
+
 Current playback-route addition:
 - `GET /auth/artist-albums`
   - implemented with `backend/app/artist_album_evidence.py`
-  - read-only cache query for artist overlay album evidence
+  - read-only cache/internal-link query for artist overlay album evidence
   - accepts repeated `artist_names` plus optional `source_album_id` / `source_album_name`
   - returns album metadata, matching track counts, all-target presence, tracklist completeness, relationship, and evidence text
 
@@ -89,9 +98,10 @@ Current `backend/app/main.py` role:
 - remaining dashboard orchestration helpers
 - liked-track cache routes remain inline for now and should move with the future dashboard route extraction, not as a broad standalone refactor during unrelated work
 
-Frontend `App.tsx` current uncommitted scope:
+Frontend `App.tsx` current branch scope:
 - Recent Likes cache integration prefers `GET /me/liked-tracks`, keeps direct Spotify latest-likes rows as a labeled fallback, and exposes `Sync Likes` quick sync.
 - Playback/queue work includes queue organizer controls, queue played-state markers, preview playback resume, album play-all, playback-action choice menus, and dropdown outside-click handling.
+- Artist duplicate audit UI is extracted to `frontend/src/components/identityAudit/ArtistDuplicateAuditTab.tsx`, while modal artist-display wiring still lives in `App.tsx`.
 - Further frontend extraction should preserve these behaviors and avoid mixing feature work with component moves.
 
 Backend verification pattern:
@@ -193,7 +203,7 @@ No inline `@app.get`, `@app.post`, `@app.delete`, `@app.put`, or `@app.patch` ro
 ## Frontend App Extraction
 Goal: reduce `frontend/src/App.tsx` without changing Identity Audit UX or backend API contracts.
 
-Current uncommitted frontend extraction:
+Current frontend extraction:
 - `frontend/src/api/appApi.ts`
   - API fetch/post wrappers that were previously in `App.tsx`
 - `frontend/src/components/identityAudit/IssueFeed.tsx`
@@ -226,7 +236,7 @@ Recommended next frontend step:
 - If extracting more first, take one large Identity Audit view at a time, starting with Track Mapping or Review Queue.
 
 ## Playback/Homepage UI State
-Current uncommitted playback UI behavior:
+Current playback UI behavior:
 - Homepage playback is the full-control surface above Activity.
 - The compact popup remains intentionally smaller and omits queue loop/settings.
 - Homepage song title opens the track popup in recording view.
@@ -273,7 +283,7 @@ Current uncommitted playback UI behavior:
 Manual QA still required with an active Spotify device/Web Playback SDK session.
 
 ## Recording Candidate Cache State
-Current uncommitted backend behavior:
+Current backend behavior:
 - SQLite schema versions `32` and `33` add generated recording/track-family cluster tables plus a dirty release-track table.
 - Startup creates the generated candidate cache if it is empty.
 - Source-track map upserts, album-track inserts, and release-track merge repoints mark affected release tracks dirty.
@@ -282,7 +292,7 @@ Current uncommitted backend behavior:
 - The generated tables remain evidence caches only; they do not promote, apply, or mutate canonical identity.
 
 ## Activity and Listen Log UI State
-Current uncommitted recent-listening behavior:
+Current recent-listening behavior:
 - Activity recent list scrolls instead of paginating.
 - Activity shows progress bars for listened amount.
 - Activity filter options are `Listened` and `All`; default is `Listened`.

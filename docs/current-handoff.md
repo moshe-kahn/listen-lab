@@ -4,21 +4,56 @@
 Start in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`, then read `AGENTS.md` and this file.
 
 Recommended topic docs:
-- `docs/reference/source-track-resolution-policy.md` for source/release/recording/track-family identity policy.
-- `docs/reference/drafts/entity-model-draft.md` for the proposed long-term identity model and source/text identity reconciliation notes.
+- `docs/reference/drafts/entity-model-draft.md` for current source/text identity reconciliation rules and long-term model notes.
+- `docs/reference/raw-ingest.md` for recent/history ingest, canonical play-event projection, and entity backfill behavior.
 - `docs/reference/spotify-catalog-backfill.md` for cached Spotify catalog and album tracklist behavior.
+- `docs/reference/source-track-resolution-policy.md` for source/release/recording/track-family identity policy.
 - `docs/reference/refactor-notes.md` for frontend/playback refactor and route extraction notes.
-- `docs/reference/raw-ingest.md` for raw recent/history ingest and canonical play-event projection.
 
 Avoid reading every doc by default.
 
 ## Current State
 Active branch: `frontend-app-refactor`.
 
-This handoff covers the pending track-view, album-tracklist, playback-action menu, and source/catalog identity promotion work. The worktree is ready to commit after final verification.
+Latest commit:
+- `f4c256d Tighten artist identity audit and repair`
+
+Worktree at handoff:
+- docs were updated after the commit above; commit these doc changes separately if desired
 
 Important local instruction:
-- `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`; this branch still has a large `App.tsx` integration diff from iterative UI work. Future work should extract focused components instead of growing `App.tsx` further.
+- `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
+
+## Recent Artist Identity Work
+The latest committed work adds backend-focused artist duplicate audit/repair and ingest prevention for text-only history artists vs provider-backed Spotify artists.
+
+Implemented backend behavior:
+- read-only duplicate artist audit at `GET /debug/artists/duplicate-audit`
+- dry-run/write repair at `POST /debug/artists/duplicate-repair?dry_run=true|false`
+- repair writes run inside a transaction
+- automatic repair only mutates exact-name groups with exactly one provider-backed artist and evidence-backed text-only duplicates
+- repair supports identity evidence and strict shared-normalized-album-title evidence
+- same-name-only groups, stylization variants, similar-name same-album groups, orphan placeholders, and ambiguous provider-backed groups remain review-only
+- source maps, album artist links, and track artist links are repointed only for safe groups, with duplicate semantic links removed before orphan artist deletion
+- source/text Spotify ingest promotion now first checks exact Spotify source maps, then promotes a safe text-only artist only with album/track or strict album-title evidence
+- source-name-only promotion is blocked and logged
+
+Composite credit handling:
+- raw history composite artist values such as `Dave Harrington, Tim Mislock` are classified as `composite_credit_review_only`
+- evidenced composite history credits are skipped during history text artist mapping instead of creating a fake single artist when structured/provider evidence proves the parts are separate credited artists
+- repeated duplicate text such as `Telekinesis, Telekinesis` is normalized for fallback identity
+- legitimate comma-bearing artist names such as `Peter, Paul & Mary`, `Earth, Wind & Fire`, or `Crosby, Stills, Nash & Young` are preserved as valid credited artist identities
+- composite cleanup endpoint exists at `POST /debug/artists/composite-credit-cleanup?dry_run=true|false`; write cleanup deletes only ready composite album/track links and deletes a composite artist row only when references are gone
+
+Frontend/debug UI:
+- Identity Audit includes an artist duplicate audit tab with safe repair categories, review-only categories, evidence labels, row details, and composite cleanup controls
+- album/track modal artist display now preserves comma-bearing display names when there is no stable structured artist identity, preventing UI-only fake splits such as `Crosby`, `Stills`, `Nash & Young`
+- artist album pages opened from tracks include the source album as a highlighted fallback row when backend evidence is sparse
+
+Artist album evidence:
+- `/auth/artist-albums` now falls back to internal `album_artist` links when Spotify catalog album metadata is incomplete
+- fallback prefers a Spotify source album ID when available and collapses duplicate same-title history/provider album rows for the same selected artist
+- local CSNY check returned `Looking Forward` with Spotify album ID plus `Deja Vu` from internal links
 
 ## Recording And Track-Family Identity
 Hierarchy direction remains:
@@ -27,139 +62,52 @@ Hierarchy direction remains:
 
 No durable canonical `recording_track` table, promotion/apply endpoint, or default aggregation change exists yet. Generated recording/track-family cluster tables are SQLite evidence caches only.
 
-Relevant rules now encoded/used:
-- Generated candidate metadata exposes cluster type and relationship kind to frontend rows.
-- Backend candidate lookup prioritizes recording-level candidates over broader family candidates when both exist.
-- Candidate row tags use `D/R/V/C` order:
+Relevant current rules:
+- generated candidate metadata exposes cluster type and relationship kind to frontend rows
+- backend candidate lookup prioritizes recording-level candidates over broader family candidates when both exist
+- candidate row tags use `D/R/V/C` order:
   - `D`: duplicate source-track grouping for same release track
   - `R`: recording group
   - `V`: variation/context/style family
   - `C`: cover/remix/rework family
-- Frontend album tracklist combines those letters into one compact badge, e.g. `D`, `DV`, `C`.
-- Track relation rows in the overlay are separated into:
-  - `Recording variations`
-  - `Variations`
-  - `Covers / remixes`
+- track relation rows in overlays are separated into `Recording variations`, `Variations`, and `Covers / remixes`
 
-Local data note:
-- `backend/scripts/promote_catalog_album_tracks.py` promotes selected cached `spotify_album_track` rows into source/release identity rows. It defaults to dry-run; use `--apply` only for targeted albums.
-- Applied locally for Spotify album `1vdQ5t7iO2gC3OX7j2GFCt` (`I Might Be Wrong`): created `7` new `release_track`/`source_track` mappings, added `8` album-track links, refreshed generated clusters, and linked live versions as Track Family candidates against Kid A-era base tracks.
-- Local SQLite DB changes are not part of git.
+## Source/Text Identity Status
+Artist reconciliation now has audit, safe repair, composite cleanup, and ingest prevention.
 
-## Source/Text Identity Split
-Found a broader source identity problem:
-- History/raw import can create text-only identities from artist/album/track text.
-- Spotify API/catalog paths later create provider-backed identities using Spotify IDs.
-- Current ingest does not generally reconcile text-only rows to provider-backed rows.
+Remaining broader source/text identity work:
+- album duplicate repair still needs stricter source/text reconciliation beyond existing release-album preview/dry-run tooling
+- track duplicate repair still needs evidence rules by title + artist + album + duration/ISRC/context
+- frontend de-duping remains a defensive display fallback only; backend identity remains the source of truth
 
-Confirmed local example:
-- `Radiohead` has two `artist` rows:
-  - Spotify-backed row mapped to Spotify artist `4Z8W4fKeB5YxbusRsdQVPb`
-  - history-text row mapped to `history_raw:a4a5c3...`
-- No duplicate-name group with multiple distinct Spotify artist IDs was found in the quick local check. The issue is provider-backed vs text-only split, not conflicting Spotify artist IDs.
+Do not broaden automatic repair to similar names, stylization variants, or multiple provider-backed rows without an explicit review/apply design.
 
-Same class applies to albums/tracks:
-- `Amnesiac` and `Kid A` currently appear as `history_raw` release-album rows in local DB, which can explain missing year/artwork when UI opens the history-text album instead of a Spotify-backed source.
-- Tracks have Spotify ID vs Spotify URI reconciliation, but no broad safe `history_raw_track` -> Spotify track merge by title/artist/album/duration/ISRC.
-
-Recommended future fix:
-- Add read-only audit for text/provider duplicate candidates across artist, album, and track.
-- Add safe merge/repoint tools:
-  - artist: prefer provider-backed artist, repoint `source_artist_map`, `album_artist`, `track_artist`, dedupe links
-  - album: require normalized album + primary artist + year/catalog evidence, repoint `source_album_map`, `album_artist`, `album_track`
-  - track: require title + artist + album + duration/ISRC/context evidence, repoint `source_track_map`, `track_artist`, `album_track`
-- Update ingest/promotion paths to attach safe text-only sources to provider-backed identities when Spotify IDs arrive.
-
-## Track View And Album Tracklist UI
-Track view:
-- Track opens show album artist below title and top action buttons above metadata.
-- Play button opens a menu with `Play now`, `Play next`, `Add to queue`, and bookmark placeholder.
-- Bookmark/star buttons are independent local UI placeholders; durable bookmark behavior is not implemented.
-- Top metadata tags show duration, last listened, and listen count. Last-listened uses `M/D`, adding `/YY` only for previous years.
-- Listen count was moved to the right side of the top metadata row to reduce visual jump.
-- Overlay top is anchored so relation rows extend downward rather than recentering the modal.
-
-Album tracklist in track view:
-- Always visible beside album art on track view.
-- Album art opens album view.
-- Album tracklist hides the `With` column on track view and keeps preview buttons only on album view.
-- Current row highlight extends full row width.
-- Switching tracks in the same album keeps the current tracklist scroll position; it no longer recenters each row click.
-- `Last` column shows compact relative time (`4h`, `1d`, `3w`, `4m`, `7y`) and is clickable:
-  - click once: newest first with down arrow
-  - click again: oldest/no-history first with up arrow
-  - click third time: original album order
-- `Last` sort state is independent between homepage album list and overlay/detail list.
-- New/unlistened marker is a subdued monochrome `✦` in the `Last` column, not the Tags column.
-- Star/liked state is release-track-aware and can inherit selected track detail source-version liked state when album row Spotify ID differs.
-
-Backend album-track history:
-- `/auth/playback/album-tracks` enrichment now adds `play_count` and `last_played_at` from persisted play facts.
-- `release_track_detail.source_versions` now includes `last_played_at` as well as `play_count`.
-- Frontend patches visible album rows from selected release detail so the tracklist agrees with top track-view listen counts.
-
-## Playback Action Menu
-- Overlay track play buttons, album track row play buttons, homepage album row play buttons, and album `Play all` buttons open a playback-action menu instead of immediately starting playback.
-- `Play now` preserves existing playback and queue seeding.
-- `Play next` inserts the selected track or album block after the active ListenLab queue item.
-- `Add to queue` appends the selected track or album block.
-- The menu is rendered through a portal and can overlay the pressed button so selecting `Play now` feels like a double-click.
-- The menu has compact row heights to match tracklist rows.
-
-## Files Changed In Pending Commit
-Backend:
-- `backend/app/catalog_identity_promotion.py`
-- `backend/app/recording_track_candidates.py`
-- `backend/app/release_track_detail.py`
-- `backend/app/release_track_metadata.py`
-- `backend/scripts/promote_catalog_album_tracks.py`
-
-Frontend:
-- `frontend/src/App.tsx`
-- `frontend/src/components/common/CoverRemixBadge.tsx`
-- `frontend/src/components/common/DuplicateBadge.tsx`
-- `frontend/src/components/common/FamilyBadge.tsx`
-- `frontend/src/components/common/NewTrackBadge.tsx`
-- `frontend/src/components/common/ReleaseSiblingBadge.tsx`
-- `frontend/src/components/playback/PlaybackActionMenu.tsx`
-- `frontend/src/styles.css`
-- `frontend/src/types/appTypes.ts`
-- `frontend/src/utils/dashboardUtils.ts`
-
-Docs:
-- `docs/current-handoff.md`
-- `docs/reference/drafts/entity-model-draft.md`
-
-## Verification
-Checks run and passed during the session:
-- `python3 -m py_compile backend/app/recording_track_candidates.py backend/app/release_track_detail.py backend/app/release_track_metadata.py`
+## Tests And Verification
+Checks run and passed before the latest commit:
+- `python3 -m unittest backend.tests.test_artist_identity_repair backend.tests.test_entity_backfill backend.tests.test_artist_album_evidence`
+  - `Ran 62 tests ... OK`
 - `npm run build` from `frontend/`
 - `git diff --check`
 
 Vite still reports the existing large chunk warning after frontend builds.
 
-Manual/browser QA is still limited. Backend server reload is required for new backend fields (`last_played_at`, album-track play history) to be visible in the app.
+Manual QA completed by user:
+- `Crosby, Stills, Nash & Young` album/track modal display looked correct after the comma-display fix.
 
 ## Known Limitations
 - Frontend bookmark/star behavior is local placeholder UI; bookmark persistence is not implemented.
-- Source/text identity reconciliation is not implemented; only analysis and docs were added.
+- Source/text album and track reconciliation are not broadly implemented.
 - Catalog album-track promotion exists as a targeted script, not as automatic catalog backfill behavior.
 - Generated recording/track-family clusters are caches only; no durable `recording_track` promotion exists.
-- Frontend still lacks focused tests for these overlay/tracklist workflows.
-- Manual QA should verify real cases after backend restart.
+- Frontend still lacks focused tests for overlay/tracklist workflows.
+- Artist group/member modeling remains intentionally out of scope. Future musician/member graph work is tracked as low-priority future work in `docs/overview/roadmap.md`.
 
 ## Recommended Next Task
-After commit, next best task is source/text identity reconciliation:
-1. Add read-only duplicate audit for artists, albums, and tracks.
-2. Start with safe artist merge/repoint from text-only duplicates to provider-backed artists.
-3. Then design album and track merge criteria separately; names alone are not enough.
+Best next task depends on the user's priority:
 
-Manual QA examples:
-- Kid A / Amnesiac metadata and artist linkage.
-- Idioteque liked/star and listened state across track view and album tracklist.
-- I Might Be Wrong live tracks and Kid A family/variation rows.
-- `Last` sort cycle in both homepage and detail album tracklists.
-- Playback action menu for row play buttons and `Play all`.
+1. Continue source/text identity reconciliation for albums and tracks.
+2. Extract the artist duplicate audit UI out of the growing frontend integration surface if more UI work is planned.
+3. Add targeted frontend tests or browser smoke checks for the CSNY/comma-name modal behavior.
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.
@@ -168,7 +116,7 @@ Manual QA examples:
 - Backend owns source/release/recording/family identity evidence and future promotion semantics.
 - Keep Spotify track id / URI as concrete playback identity.
 - Do not make `recording_track` the default aggregation layer without explicit scope.
-- Do not let catalog backfill mutate identity rows automatically; use targeted promotion/repair flows with dry-run/apply separation.
+- Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Recent work added track-view album tracklist UI, combined relation tags (`D/R/V/C`), compact `Last` sorting, backend album-track play-history enrichment, release-detail `last_played_at`, playback-action menus, and targeted Spotify catalog album-track identity promotion. Verification passed with py_compile, `npm run build`, and `git diff --check`; Vite still reports the existing large chunk warning. Next task: build source/text identity reconciliation audit and safe merge/repoint flow, starting with artist duplicates such as text-only `Radiohead` vs Spotify-backed `Radiohead`.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`, latest commit is `f4c256d Tighten artist identity audit and repair`, and the worktree was clean after commit. Recent work added artist duplicate audit/repair, evidence-gated Spotify/text artist promotion, composite credit classification/cleanup, artist album evidence fallback to internal `album_artist` links, and frontend comma-name display preservation for durable group names such as `Crosby, Stills, Nash & Young`. Verification passed with backend identity tests, `npm run build`, and `git diff --check`. Next likely work: source/text reconciliation for albums/tracks or frontend extraction/tests for the new artist audit UI.

@@ -263,7 +263,8 @@ These are active issues discovered during current dashboard work and should be t
 - Full Backfill remains secondary and owns slower catalog-expansion work such as album tracklists.
 - Queue rows retain `entity_type=track|album`; `reason` now distinguishes identity metadata, manual priority, tracklist completion, and full backfill.
 - Coverage distinguishes identity-critical gaps from catalog-expansion backlog.
-- Identity Audit duplicate diagnostics remain read-only.
+- Track/release Identity Audit duplicate diagnostics remain read-only unless a specific preview/dry-run tool exists.
+- Artist Identity Audit now includes evidence-gated duplicate artist repair and composite-credit cleanup with dry-run/apply separation.
 - Release-album merge preview and dry-run tooling exist; no apply/merge endpoint exists.
 - Catalog backfill must not mutate identity tables, `analysis_track_map`, or merge state.
 

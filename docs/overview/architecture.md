@@ -38,7 +38,7 @@ This document is the implementation-oriented technical source of truth for the L
 - Catalog Backfill now separates identity-critical metadata from catalog-expansion work, with explicit target modes for tracks, albums, album tracklists, and all targets.
 - A local Spotify track metadata worker exists for bounded identity metadata enrichment. It supports one-shot CLI runs by default, optional loop mode, JSONL event logging, condensed terminal output, local cooldowns, and a rolling request-budget guard.
 - Generated recording/track-family candidate clusters are cached in SQLite for fast local lookup. Startup builds the generated cache if empty, and source/release mapping changes mark affected release tracks dirty so later refreshes can be scoped instead of rebuilding all candidates.
-- Read-only Identity Audit diagnostics and release-album merge preview/dry-run tooling exist, but no merge/apply endpoint exists.
+- Identity Audit includes read-only track/release diagnostics, release-album merge preview/dry-run tooling, and evidence-gated artist duplicate repair with dry-run/write separation.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state
@@ -111,6 +111,9 @@ This document is the implementation-oriented technical source of truth for the L
   - `spotify_catalog_backfill_queue`
   - track metadata worker state, lock, and invocation tables
 - backend debug APIs for Catalog Backfill coverage, queue state, recent runs, lookup, duplicate diagnostics, release-album merge preview, and release-album merge dry-run
+- backend debug APIs for artist duplicate identity audit, evidence-gated dry-run/write artist repair, and composite-credit cleanup
+- backend artist ingest/promotion guards now avoid creating provider/text duplicate artist rows when a Spotify artist ID can be safely attached to an existing text-only artist with album/track evidence
+- `/auth/artist-albums` can fall back to internal `album_artist` links when Spotify catalog album metadata is incomplete, so artist pages can still show known linked albums
 - backend liked-track cache APIs:
   - `GET /me/liked-tracks`
   - `POST /me/liked-tracks/sync`
