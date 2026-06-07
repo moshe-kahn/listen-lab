@@ -15,18 +15,17 @@ Avoid reading every doc by default.
 ## Current State
 Active branch: `frontend-app-refactor`.
 
-Latest commit:
-- `f4c256d Tighten artist identity audit and repair`
+Latest feature commit:
+- `d0c9695 Improve dashboard startup loading order`
 
 Worktree at handoff:
-- uncommitted frontend/backend startup-load performance changes are present
-- no commit has been created for these changes yet
+- clean after committed startup-load performance and handoff updates
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
 
-## Current Uncommitted Startup-Load Work
-The current worktree changes initial dashboard loading behavior and bundle shape.
+## Current Startup-Load Work
+Committed startup-load work changed initial dashboard loading behavior and bundle shape.
 
 Backend:
 - `GET /me` now accepts `mode=shell`
@@ -48,7 +47,8 @@ Frontend:
 
 User QA during this session:
 - Earlier versions produced an empty page/layout jump and then a flash back/reload.
-- Latest patch should prevent the full-screen loading screen from returning after dashboard release, but it still needs live authenticated QA.
+- User confirmed the committed startup-load behavior works.
+- Full-screen loading no longer returns after dashboard release during authenticated QA.
 
 ## Recent Artist Identity Work
 The latest committed work adds backend-focused artist duplicate audit/repair and ingest prevention for text-only history artists vs provider-backed Spotify artists.
@@ -120,17 +120,14 @@ Vite still reports the existing large chunk warning after frontend builds.
 Manual QA completed by user:
 - `Crosby, Stills, Nash & Young` album/track modal display looked correct after the comma-display fix.
 
-Checks run for current uncommitted startup-load work:
+Checks run for committed startup-load work:
 - `npm run build` from `frontend/`
 - `python3 -m py_compile backend/app/main.py`
 - `git diff --check`
 
-Manual QA still needed:
-- run authenticated backend/frontend locally and confirm:
-  - loading screen stays up until playback + Activity are ready
-  - no `initial Loading your Spotify data (...)` text appears
-  - dashboard does not flash back to full-screen loading after release
-  - top/all-time sections fill after visible startup content
+Manual QA completed by user:
+- authenticated startup loading works after the committed changes
+- dashboard does not flash back to full-screen loading after release
 
 ## Known Limitations
 - Frontend bookmark/star behavior is local placeholder UI; bookmark persistence is not implemented.
@@ -143,10 +140,7 @@ Manual QA still needed:
 ## Recommended Next Task
 Best next task depends on the user's priority:
 
-1. Live authenticated QA for the current startup-load sequence.
-2. If QA passes, commit the startup-load performance/lazy-loading changes.
-3. If QA still flashes, instrument `startupReadyForDashboard`, `startupDashboardReleased`, `startupPlaybackReady`, and `startupRecentReady` transitions in the browser console.
-4. Continue source/text identity reconciliation for albums and tracks after the startup-load work is settled.
+1. Continue source/text identity reconciliation for albums and tracks after the startup-load work is settled.
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.
@@ -158,4 +152,4 @@ Best next task depends on the user's priority:
 - Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`, latest commit is `f4c256d Tighten artist identity audit and repair`. The current worktree has uncommitted startup-load changes: backend `/me?mode=shell`, frontend lazy route/modal chunks, visible-first startup ordering, deferred top/all-time section loading, and a latch to prevent the full-screen loading screen from returning after dashboard release. Verification passed with `npm run build`, `python3 -m py_compile backend/app/main.py`, and `git diff --check`. Next: live authenticated QA for startup loading, then commit if the loading screen no longer shows internal progress text and the dashboard no longer flashes back to loading.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`, latest commit is `d0c9695 Improve dashboard startup loading order`. Startup-load work is committed: backend `/me?mode=shell`, frontend lazy route/modal chunks, visible-first startup ordering, deferred top/all-time section loading, and a latch to prevent the full-screen loading screen from returning after dashboard release. Verification passed with `npm run build`, `python3 -m py_compile backend/app/main.py`, and `git diff --check`. User confirmed authenticated startup loading works and the dashboard no longer flashes back to loading. Next: push the branch if needed, then continue source/text identity reconciliation for albums and tracks.
