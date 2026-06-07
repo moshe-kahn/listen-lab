@@ -3214,7 +3214,10 @@ async def me(
 ) -> dict[str, Any]:
     token = _require_token(request)
     is_extended = mode == "extended"
+    is_shell = mode == "shell"
     is_full_analysis = analysis_mode == "full"
+    if mode not in {"initial", "extended", "shell"}:
+        raise HTTPException(status_code=400, detail="Unsupported profile mode.")
     if recent_range not in {"short_term", "medium_term"}:
         raise HTTPException(status_code=400, detail="Unsupported recent range.")
     if analysis_mode not in {"quick", "full"}:
@@ -3223,7 +3226,7 @@ async def me(
     item_limit = SECTION_PREVIEW_LIMIT if is_extended else INITIAL_DASHBOARD_LIMIT
     playlist_limit = None if is_extended else INITIAL_DASHBOARD_LIMIT
     playlist_cache_limit = playlist_limit if playlist_limit is not None else -1
-    _set_load_progress(request, "profile", mode="full")
+    _set_load_progress(request, "profile", mode="shell" if is_shell else "full")
     try:
         try:
             profile = await _fetch_spotify_profile(token)
@@ -3236,6 +3239,53 @@ async def me(
         images = profile.get("images") or []
         external_urls = profile.get("external_urls") or {}
         followers = profile.get("followers") or {}
+
+        if is_shell:
+            _set_load_progress(request, "finishing")
+            return {
+                "id": profile.get("id"),
+                "display_name": profile.get("display_name"),
+                "email": profile.get("email"),
+                "product": profile.get("product"),
+                "country": profile.get("country"),
+                "username": profile.get("id"),
+                "followers_total": followers.get("total"),
+                "followed_artists_total": None,
+                "followed_artists_available": False,
+                "followed_artists": [],
+                "followed_artists_list_available": False,
+                "recent_top_artists": [],
+                "recent_top_artists_available": False,
+                "top_tracks": [],
+                "top_tracks_available": False,
+                "recent_top_tracks": [],
+                "recent_top_tracks_available": False,
+                "top_albums": [],
+                "top_albums_available": False,
+                "recent_top_albums": [],
+                "recent_top_albums_available": False,
+                "analysis_mode": analysis_mode,
+                "experience_mode": "full",
+                "recent_range": recent_range,
+                "recent_window_days": recent_window_days,
+                "history_insights_available": False,
+                "history_first_played_at": None,
+                "history_last_played_at": None,
+                "history_total_listen_ms": None,
+                "history_total_play_count": None,
+                "extended_loaded": False,
+                "top_playlists_recent": [],
+                "top_playlists_all_time": [],
+                "top_playlists_available": False,
+                "profile_url": external_urls.get("spotify"),
+                "image_url": images[0].get("url") if images else None,
+                "recent_tracks": [],
+                "recent_tracks_available": False,
+                "owned_playlists": [],
+                "owned_playlists_available": False,
+                "recent_likes_tracks": [],
+                "recent_likes_available": False,
+            }
 
         if not is_full_analysis:
             quick_item_limit = SECTION_PREVIEW_LIMIT

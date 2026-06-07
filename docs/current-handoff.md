@@ -19,10 +19,36 @@ Latest commit:
 - `f4c256d Tighten artist identity audit and repair`
 
 Worktree at handoff:
-- docs were updated after the commit above; commit these doc changes separately if desired
+- uncommitted frontend/backend startup-load performance changes are present
+- no commit has been created for these changes yet
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
+
+## Current Uncommitted Startup-Load Work
+The current worktree changes initial dashboard loading behavior and bundle shape.
+
+Backend:
+- `GET /me` now accepts `mode=shell`
+- shell mode returns a fast authenticated profile shell after fetching Spotify profile identity only
+- shell payload preserves the existing `ProfileResponse` shape with empty section arrays/false availability flags
+- normal quick `/me` remains available for all-time/top/profile sections after first viewport data is ready
+
+Frontend:
+- initial quick load calls `/me?mode=shell`
+- route-level lazy chunks were added for Formula Lab, Recent Debug, Catalog Backfill, and Search Lookup
+- `DetailPreviewModal` is lazy-loaded only after a preview item is selected
+- startup loading now targets visible-screen readiness instead of earliest possible paint:
+  - profile shell must exist
+  - playback/current/queue/recent-player first attempts must complete
+  - Activity/recent sections must load, or a real recent-load error must occur
+- top/all-time sections load after visible startup data is ready
+- once the dashboard is released for a Spotify user, the full-screen loading screen is latched off until the user/session changes
+- loading copy no longer falls back to internal progress history such as `initial Loading your Spotify data (0.3s)`
+
+User QA during this session:
+- Earlier versions produced an empty page/layout jump and then a flash back/reload.
+- Latest patch should prevent the full-screen loading screen from returning after dashboard release, but it still needs live authenticated QA.
 
 ## Recent Artist Identity Work
 The latest committed work adds backend-focused artist duplicate audit/repair and ingest prevention for text-only history artists vs provider-backed Spotify artists.
@@ -94,6 +120,18 @@ Vite still reports the existing large chunk warning after frontend builds.
 Manual QA completed by user:
 - `Crosby, Stills, Nash & Young` album/track modal display looked correct after the comma-display fix.
 
+Checks run for current uncommitted startup-load work:
+- `npm run build` from `frontend/`
+- `python3 -m py_compile backend/app/main.py`
+- `git diff --check`
+
+Manual QA still needed:
+- run authenticated backend/frontend locally and confirm:
+  - loading screen stays up until playback + Activity are ready
+  - no `initial Loading your Spotify data (...)` text appears
+  - dashboard does not flash back to full-screen loading after release
+  - top/all-time sections fill after visible startup content
+
 ## Known Limitations
 - Frontend bookmark/star behavior is local placeholder UI; bookmark persistence is not implemented.
 - Source/text album and track reconciliation are not broadly implemented.
@@ -105,9 +143,10 @@ Manual QA completed by user:
 ## Recommended Next Task
 Best next task depends on the user's priority:
 
-1. Continue source/text identity reconciliation for albums and tracks.
-2. Extract the artist duplicate audit UI out of the growing frontend integration surface if more UI work is planned.
-3. Add targeted frontend tests or browser smoke checks for the CSNY/comma-name modal behavior.
+1. Live authenticated QA for the current startup-load sequence.
+2. If QA passes, commit the startup-load performance/lazy-loading changes.
+3. If QA still flashes, instrument `startupReadyForDashboard`, `startupDashboardReleased`, `startupPlaybackReady`, and `startupRecentReady` transitions in the browser console.
+4. Continue source/text identity reconciliation for albums and tracks after the startup-load work is settled.
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.
@@ -119,4 +158,4 @@ Best next task depends on the user's priority:
 - Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`, latest commit is `f4c256d Tighten artist identity audit and repair`, and the worktree was clean after commit. Recent work added artist duplicate audit/repair, evidence-gated Spotify/text artist promotion, composite credit classification/cleanup, artist album evidence fallback to internal `album_artist` links, and frontend comma-name display preservation for durable group names such as `Crosby, Stills, Nash & Young`. Verification passed with backend identity tests, `npm run build`, and `git diff --check`. Next likely work: source/text reconciliation for albums/tracks or frontend extraction/tests for the new artist audit UI.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`, latest commit is `f4c256d Tighten artist identity audit and repair`. The current worktree has uncommitted startup-load changes: backend `/me?mode=shell`, frontend lazy route/modal chunks, visible-first startup ordering, deferred top/all-time section loading, and a latch to prevent the full-screen loading screen from returning after dashboard release. Verification passed with `npm run build`, `python3 -m py_compile backend/app/main.py`, and `git diff --check`. Next: live authenticated QA for startup loading, then commit if the loading screen no longer shows internal progress text and the dashboard no longer flashes back to loading.

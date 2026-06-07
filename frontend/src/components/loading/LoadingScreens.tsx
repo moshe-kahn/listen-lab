@@ -17,12 +17,11 @@ type LoadingDisplayProps = CooldownRetryControlProps & {
   analysisMode: AnalysisMode;
 };
 
-function loadingDisplayCopy(statusHistory: string[], statusMessage: string, analysisMode: AnalysisMode) {
-  const latestHistory = statusHistory.length > 0 ? statusHistory[statusHistory.length - 1] : null;
+function loadingDisplayCopy(_statusHistory: string[], statusMessage: string, analysisMode: AnalysisMode) {
   const loadingLabel =
     statusMessage && !statusMessage.startsWith("Spotify login succeeded")
       ? statusMessage
-      : latestHistory ?? "Analyzing your music...";
+      : "Loading your Spotify data...";
   const analyzingStage = loadingLabel.toLowerCase().startsWith("analyzing");
   const quickLoadMode = analysisMode === "quick" && !analyzingStage;
 

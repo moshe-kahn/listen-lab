@@ -216,9 +216,21 @@ Current frontend extraction:
   - broad response/UI/player/profile/catalog/audit types
 - `frontend/src/utils/identityAuditPrefs.ts`
   - Identity Audit localStorage preference load/save helpers and persisted preference types
+- route/page chunks:
+  - Formula Lab, Recent Debug, Catalog Backfill, and Search Lookup are lazy-loaded from `DashboardSections`
+  - `DetailPreviewModal` is lazy-loaded from `App.tsx` only after a preview item is selected
+
+Current startup-load behavior:
+- quick full-mode initial load requests `/me?mode=shell` so the backend returns profile identity and empty section placeholders quickly
+- full-screen loading remains visible until the first visible dashboard area is ready:
+  - profile shell exists
+  - playback/current/queue/player-recent first attempts have completed
+  - Activity/recent sections have loaded, or a real recent-load error occurred
+- normal quick `/me` for top/all-time/profile sections runs after visible startup readiness
+- full-screen loading is latched off after dashboard release for the current Spotify user/session to avoid flashes during later refreshes
 
 Current frontend size:
-- `frontend/src/App.tsx`: `11,367` lines / `498,613` bytes.
+- `frontend/src/App.tsx`: `11,057` lines / `499,927` bytes.
 - Original pre-extraction size in this branch was `13,387` lines / `566,339` bytes.
 
 Frontend behavior constraints:
@@ -232,8 +244,8 @@ Frontend verification already passed earlier in this branch:
 - `git diff --check`
 
 Recommended next frontend step:
-- Review and commit the existing extraction if satisfied.
-- If extracting more first, take one large Identity Audit view at a time, starting with Track Mapping or Review Queue.
+- Live authenticated QA for startup load order and loading-screen latch behavior.
+- If extracting more after startup QA, take one large Identity Audit view at a time, starting with Track Mapping or Review Queue.
 
 ## Playback/Homepage UI State
 Current playback UI behavior:

@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, type CSSProperties, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type {
   SessionResponse,
   ProfileProgressResponse,
@@ -157,7 +157,6 @@ import { DashboardListCard } from "./components/dashboard/DashboardListCard";
 import { DashboardPlaylistsSection } from "./components/dashboard/DashboardPlaylistsSection";
 import { DashboardSections } from "./components/dashboard/DashboardSections";
 import { DashboardTrackColumn } from "./components/dashboard/DashboardTrackColumn";
-import { DetailPreviewModal } from "./components/dashboard/DetailPreviewModal";
 import { DualSectionCard } from "./components/dashboard/DualSectionCard";
 import { LoginHeroPanel } from "./components/dashboard/LoginHeroPanel";
 import {
@@ -239,6 +238,10 @@ import {
   recentRangeLabel,
   trackLookupRowCanBulkPrioritize,
 } from "./utils/dashboardUtils";
+
+const DetailPreviewModal = lazy(() => import("./components/dashboard/DetailPreviewModal").then((module) => ({
+  default: module.DetailPreviewModal,
+})));
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const ALBUM_TRACKS_FETCH_TIMEOUT_MS = 15_000;
@@ -343,6 +346,9 @@ export function App() {
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [loadingExtendedProfile, setLoadingExtendedProfile] = useState(false);
   const [loadingRecentSection, setLoadingRecentSection] = useState(false);
+  const [recentSectionLoadAttempted, setRecentSectionLoadAttempted] = useState(false);
+  const [recentSectionStartupError, setRecentSectionStartupError] = useState(false);
+  const [startupDashboardReleased, setStartupDashboardReleased] = useState(false);
   const [likedTracksCache, setLikedTracksCache] = useState<LikedTracksResponse | null>(null);
   const [likedTracksLoading, setLikedTracksLoading] = useState(false);
   const [likedTracksSyncing, setLikedTracksSyncing] = useState(false);
@@ -408,6 +414,7 @@ export function App() {
   const [playerRecentTracks, setPlayerRecentTracks] = useState<RecentTrack[]>([]);
   const [playerRecentTracksLoading, setPlayerRecentTracksLoading] = useState(false);
   const [playerRecentTracksError, setPlayerRecentTracksError] = useState<string | null>(null);
+  const [playerRecentTracksLoadAttempted, setPlayerRecentTracksLoadAttempted] = useState(false);
   const [playerQueueTracks, setPlayerQueueTracks] = useState<PlayerQueueTrack[]>([]);
   const [playerQueueCursor, setPlayerQueueCursor] = useState<number | null>(null);
   const [playerQueueSource, setPlayerQueueSource] = useState<"listenlab" | "spotify" | null>(null);
@@ -430,6 +437,7 @@ export function App() {
   const [queuePlaylistUri, setQueuePlaylistUri] = useState<string | null>(null);
   const [playerQueueLoading, setPlayerQueueLoading] = useState(false);
   const [playerQueueError, setPlayerQueueError] = useState<string | null>(null);
+  const [playerQueueLoadAttempted, setPlayerQueueLoadAttempted] = useState(false);
   const [activePlayerListenEventId, setActivePlayerListenEventId] = useState<number | null>(null);
   const [currentTrack, setCurrentTrack] = useState<PlayerTrackSummary | null>(null);
   const [playbackPaused, setPlaybackPaused] = useState(true);
@@ -658,6 +666,7 @@ export function App() {
   const liveEndRefreshRequestedRef = useRef(false);
   const profileLoadInFlightRef = useRef(false);
   const extendedLoadInFlightRef = useRef(false);
+  const quickProfileLoadInFlightRef = useRef(false);
   const quickRecentAutoAttemptRef = useRef<string | null>(null);
   const hasPremiumPlayback = profile?.product?.toLowerCase() === "premium";
   const usingLivePlaybackSnapshot = Boolean(livePlaybackSnapshot);
@@ -689,6 +698,34 @@ export function App() {
   );
   const liveSpotifyPlaybackShouldOwnQueue = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice;
   const liveReadOnlyMode = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice && !liveControlOverrideActive;
+  const startupPlaybackReady = experienceMode === "local"
+    || !hasPremiumPlayback
+    || (
+      livePlaybackProbeComplete
+      && (playerRecentTracksLoadAttempted || Boolean(currentTrack || livePlaybackSnapshot))
+      && playerQueueLoadAttempted
+      && !playerRecentTracksLoading
+      && !playerQueueLoading
+    );
+  const startupRecentReady = experienceMode === "local"
+    || analysisMode !== "quick"
+    || Boolean(
+      profile
+      && (
+        profile.recent_tracks_available
+        || profile.recent_likes_available
+        || profile.recent_top_tracks_available
+        || profile.recent_top_artists_available
+        || profile.recent_top_albums_available
+      ),
+    )
+    || (Boolean(profile) && recentSectionLoadAttempted && recentSectionStartupError && !loadingRecentSection);
+  const startupReadyForDashboard = Boolean(profile) && startupPlaybackReady && startupRecentReady;
+  useEffect(() => {
+    if (startupReadyForDashboard && !startupDashboardReleased) {
+      setStartupDashboardReleased(true);
+    }
+  }, [startupDashboardReleased, startupReadyForDashboard]);
   const liveSnapshotTrackUri = livePlaybackTrackSummary?.uri ?? null;
   const currentTrackUri = currentTrack?.uri ?? null;
   const liveSnapshotIsDifferentTrack = Boolean(
@@ -1448,7 +1485,7 @@ export function App() {
   const playerNextDisabled = playerQueueSource === "listenlab"
     ? (previewInProgress || !canMoveListenLabQueueNext)
     : (previewInProgress || !playerTransportControlsAvailable);
-  const playerPanelVisible = Boolean(profile && (playerMenuOpen || appPage === "dashboard"));
+  const playerPanelVisible = Boolean(profile && (playerMenuOpen || appPage === "dashboard" || !startupReadyForDashboard));
   const queueSleepTimerActive = queueSleepTimerUntilMs != null && queueSleepTimerUntilMs > Date.now();
   const queueDelayActive = queuePauseAfterCurrentEnabled || queueSleepTimerActive;
 
@@ -2151,6 +2188,7 @@ export function App() {
       || experienceMode === "local"
       || !profile
       || analysisMode !== "quick"
+      || !startupPlaybackReady
       || loadingProfile
       || loadingExtendedProfile
       || loadingRecentSection
@@ -2179,11 +2217,59 @@ export function App() {
     recentRange,
     session,
     spotifyCooldownActive,
+    startupPlaybackReady,
   ]);
 
   useEffect(() => {
     quickRecentAutoAttemptRef.current = null;
+    setPlayerRecentTracksLoadAttempted(false);
+    setPlayerQueueLoadAttempted(false);
+    setRecentSectionLoadAttempted(false);
+    setRecentSectionStartupError(false);
+    setStartupDashboardReleased(false);
   }, [session?.spotify_user_id]);
+
+  useEffect(() => {
+    if (
+      experienceMode !== "full"
+      || !session?.authenticated
+      || !profile
+      || analysisMode !== "quick"
+      || !startupPlaybackReady
+      || loadingProfile
+      || loadingExtendedProfile
+      || loadingRecentSection
+      || spotifyCooldownActive
+      || quickProfileLoadInFlightRef.current
+    ) {
+      return;
+    }
+    if (!startupRecentReady) {
+      return;
+    }
+    const hasTopDataLoaded = Boolean(
+      profile.top_tracks_available
+      || profile.followed_artists_list_available
+      || profile.top_albums_available
+      || profile.owned_playlists_available
+    );
+    if (hasTopDataLoaded) {
+      return;
+    }
+    void loadQuickProfileSections(profile.recent_range ?? recentRange);
+  }, [
+    analysisMode,
+    experienceMode,
+    loadingExtendedProfile,
+    loadingProfile,
+    loadingRecentSection,
+    profile,
+    recentRange,
+    session?.authenticated,
+    spotifyCooldownActive,
+    startupPlaybackReady,
+    startupRecentReady,
+  ]);
 
   useEffect(() => {
     if (!recentRangeRefreshPending) {
@@ -3411,7 +3497,10 @@ export function App() {
   useEffect(() => {
     setPlayerRecentTracks(dedupeRecentTracksForPlayer(profile?.recent_tracks ?? []));
     setPlayerRecentTracksError(null);
-  }, [profile?.recent_tracks]);
+    if (profile?.recent_tracks_available) {
+      setPlayerRecentTracksLoadAttempted(true);
+    }
+  }, [profile?.recent_tracks, profile?.recent_tracks_available]);
 
   useEffect(() => {
     if (!playerPanelVisible || !profile || playerRecentTracksLoading) {
@@ -3442,6 +3531,7 @@ export function App() {
       setPlayerQueueContext({ label: "Recent Likes" });
       setPlayerQueuePlayedKeys(new Set());
       setPlayerQueueError(null);
+      setPlayerQueueLoadAttempted(true);
       return;
     }
 
@@ -5808,6 +5898,9 @@ export function App() {
     if (experienceMode === "local") {
       return "Recent sections in restricted local mode come from local history data only.";
     }
+    if (loadingRecentSection) {
+      return "Loading recent sections...";
+    }
     const hasRecentDataLoaded = Boolean(
       profile
       && (
@@ -5914,8 +6007,15 @@ export function App() {
     }, 500);
     try {
       const endpoint = experienceMode === "local" ? "/me/local" : "/me";
+      const profileParams = new URLSearchParams({
+        recent_range: recentRange,
+        analysis_mode: analysisMode,
+      });
+      if (experienceMode !== "local" && analysisMode === "quick") {
+        profileParams.set("mode", "shell");
+      }
       const response = await fetch(
-        `${apiBaseUrl}${endpoint}?recent_range=${encodeURIComponent(recentRange)}&analysis_mode=${encodeURIComponent(analysisMode)}`,
+        `${apiBaseUrl}${endpoint}?${profileParams.toString()}`,
         {
         method: "GET",
         credentials: "include",
@@ -5954,39 +6054,12 @@ export function App() {
           email: session?.email ?? hydratedProfile.email,
         };
       }
-      if ((data.analysis_mode ?? analysisMode) === "quick" && experienceMode !== "local") {
-        setStatusMessage("Loading recent activity...");
-        try {
-          const recentData = await fetchRecentSections(data.recent_range ?? recentRange);
-          hydratedProfile = {
-            ...hydratedProfile,
-            recent_range: recentData.recent_range,
-            recent_window_days: recentData.recent_window_days,
-            recent_top_artists: recentData.recent_top_artists,
-            recent_top_artists_available: recentData.recent_top_artists_available,
-            recent_top_tracks: recentData.recent_top_tracks,
-            recent_top_tracks_available: recentData.recent_top_tracks_available,
-            recent_top_albums: recentData.recent_top_albums,
-            recent_top_albums_available: recentData.recent_top_albums_available,
-            recent_tracks: recentData.recent_tracks,
-            recent_tracks_available: recentData.recent_tracks_available,
-            recent_likes_tracks: recentData.recent_likes_tracks,
-            recent_likes_available: recentData.recent_likes_available,
-          };
-        } catch (recentError) {
-          const message = recentError instanceof Error ? recentError.message : "Recent activity could not be preloaded.";
-          setStatusHistory((current) => [...current, `Recent preload warning: ${message}`]);
-        }
-      }
 
       setProfile(hydratedProfile);
       setAnalysisMode(hydratedProfile.analysis_mode ?? analysisMode);
       setAuthTransitioning(false);
       setSectionPages(INITIAL_SECTION_PAGES);
       setStatusMessage("");
-      setStatusHistory((current) =>
-        current.length > 0 ? [...current, "Initial load complete."] : ["Initial load started.", "Initial load complete."],
-      );
       if (hydratedProfile.recent_range) {
         setRecentRange(hydratedProfile.recent_range);
       }
@@ -6002,6 +6075,67 @@ export function App() {
         window.clearInterval(progressTimer);
       }
       setLoadingProfile(false);
+    }
+  }
+
+  async function loadQuickProfileSections(targetRange: RecentRange = recentRange) {
+    if (experienceMode !== "full" || spotifyCooldownActive || quickProfileLoadInFlightRef.current) {
+      return;
+    }
+    quickProfileLoadInFlightRef.current = true;
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/me?recent_range=${encodeURIComponent(targetRange)}&analysis_mode=quick`,
+        {
+          method: "GET",
+          credentials: "include",
+        },
+      );
+
+      if (!response.ok) {
+        let detail = "Failed to load quick profile sections.";
+        try {
+          const payload = (await response.json()) as { detail?: string };
+          if (payload.detail) {
+            detail = payload.detail;
+          }
+        } catch {
+          // ignore invalid error payloads
+        }
+        throw new Error(detail);
+      }
+
+      const data = (await response.json()) as ProfileResponse;
+      setProfile((current) => current
+        ? {
+            ...current,
+            followers_total: data.followers_total,
+            followed_artists_total: data.followed_artists_total,
+            followed_artists_available: data.followed_artists_available,
+            followed_artists: data.followed_artists,
+            followed_artists_list_available: data.followed_artists_list_available,
+            top_tracks: data.top_tracks,
+            top_tracks_available: data.top_tracks_available,
+            top_albums: data.top_albums,
+            top_albums_available: data.top_albums_available,
+            top_playlists_recent: data.top_playlists_recent,
+            top_playlists_all_time: data.top_playlists_all_time,
+            top_playlists_available: data.top_playlists_available,
+            owned_playlists: data.owned_playlists,
+            owned_playlists_available: data.owned_playlists_available,
+            history_insights_available: data.history_insights_available,
+            history_first_played_at: data.history_first_played_at,
+            history_last_played_at: data.history_last_played_at,
+            history_total_listen_ms: data.history_total_listen_ms,
+            history_total_play_count: data.history_total_play_count,
+            extended_loaded: data.extended_loaded,
+          }
+        : current);
+    } catch (error) {
+      const message = formatUiErrorMessage(error, "Failed to load quick profile sections.");
+      setStatusHistory((current) => [...current, `Quick profile warning: ${message}`]);
+    } finally {
+      quickProfileLoadInFlightRef.current = false;
     }
   }
 
@@ -7987,6 +8121,7 @@ export function App() {
     } catch (error) {
       setPlayerRecentTracksError(formatUiErrorMessage(error, "Failed to load recently played songs."));
     } finally {
+      setPlayerRecentTracksLoadAttempted(true);
       setPlayerRecentTracksLoading(false);
     }
   }
@@ -8000,6 +8135,7 @@ export function App() {
       resetQueueControls();
       setQueuePlaylistUri(null);
       setPlayerQueueError(null);
+      setPlayerQueueLoadAttempted(true);
       return;
     }
     setPlayerQueueLoading(true);
@@ -8078,6 +8214,7 @@ export function App() {
       resetQueueControls();
       setPlayerQueueError(formatUiErrorMessage(error, "Failed to load Spotify queue."));
     } finally {
+      setPlayerQueueLoadAttempted(true);
       setPlayerQueueLoading(false);
     }
   }
@@ -8737,6 +8874,7 @@ export function App() {
     if (loadingRecentSection) {
       return;
     }
+    setRecentSectionStartupError(false);
     setLoadingRecentSection(true);
     setStatusMessage("Refreshing recent sections...");
     try {
@@ -8764,12 +8902,13 @@ export function App() {
         setRecentRange(targetRange);
       }
       setStatusMessage("");
-      setStatusHistory((current) => [...current, "Recent sections refreshed."]);
     } catch (error) {
       const message = formatUiErrorMessage(error, "Failed to refresh recent sections.");
       setStatusMessage(message);
+      setRecentSectionStartupError(true);
       setStatusHistory((current) => [...current, `Recent refresh error: ${message}`]);
     } finally {
+      setRecentSectionLoadAttempted(true);
       setLoadingRecentSection(false);
     }
   }
@@ -9669,7 +9808,8 @@ export function App() {
     }
     return countLabel;
   })();
-  const showLoadingScreen = (authTransitioning || session?.authenticated || experienceMode === "local") && !profile;
+  const showLoadingScreen = (authTransitioning || session?.authenticated || experienceMode === "local")
+    && (!profile || !startupDashboardReleased);
   const heroTitle = "ListenLab";
   const heroCopy =
     "Connect your account and browse the listening, library, and profile details Spotify already makes available to ListenLab.";
@@ -10810,104 +10950,108 @@ export function App() {
         )}
         </section>
       </main>
-      <DetailPreviewModal
-        albumTrackEntries={albumTrackEntries}
-        albumTrackEntriesError={albumTrackEntriesError}
-        albumTrackEntriesLoading={albumTrackEntriesLoading}
-        albumTrackIsKnownLiked={albumTrackIsKnownLiked}
-        albumTrackLastSortMode={albumTrackLastSortMode}
-        albumTrackListRef={albumTrackListRef}
-        albumTrackPreviewKey={albumTrackPreviewKey}
-        albumTracklistSummaryLabel={albumTracklistSummaryLabel}
-        artistEntriesForAlbumTrack={artistEntriesForAlbumTrack}
-        artistNameMatches={artistNameMatches}
-        backendSelectedPreviewArtistAlbums={backendSelectedPreviewArtistAlbums}
-        buildAlbumPlaybackQueue={buildAlbumPlaybackQueue}
-        clearAlbumWithArtistHighlight={clearAlbumWithArtistHighlight}
-        currentTrack={currentTrack}
-        detailOptionsOpen={detailOptionsOpen}
-        displayAlbumTrackEntries={displayAlbumTrackEntries}
-        familyCoverRemixRelationshipKinds={familyCoverRemixRelationshipKinds}
-        formatCompactRelativeAge={formatCompactRelativeAge}
-        formatPlaybackClock={formatPlaybackClock}
-        handleAlbumPlayAll={handleAlbumPlayAll}
-        handlePlaybackAction={handlePlaybackAction}
-        hasPremiumPlayback={hasPremiumPlayback}
-        hoveredAlbumWithArtistName={hoveredAlbumWithArtistName}
-        isTrackPlaying={isTrackPlaying}
-        localStarredTrackById={localStarredTrackById}
-        nextLastPlayedSortMode={nextLastPlayedSortMode}
-        openAlbumTrackPreview={openAlbumTrackPreview}
-        openAlbumWithArtistPreview={openAlbumWithArtistPreview}
-        openRecordingCandidateReleaseTrack={openRecordingCandidateReleaseTrack}
-        openReleaseSourceVersion={openReleaseSourceVersion}
-        openSelectedAlbumArtistPreview={openSelectedAlbumArtistPreview}
-        openSelectedArtistMemberPreview={openSelectedArtistMemberPreview}
-        openSelectedTrackAlbumPreview={openSelectedTrackAlbumPreview}
-        openSelectedTrackArtistPreview={openSelectedTrackArtistPreview}
-        pausedTimeFlashOn={pausedTimeFlashOn}
-        playbackDurationMs={playbackDurationMs}
-        playbackPaused={playbackPaused}
-        playbackPositionMs={playbackPositionMs}
-        playerSummaryFromAlbumTrack={playerSummaryFromAlbumTrack}
-        previewAlbumHeading={previewAlbumHeading}
-        previewPlayedTrackKeys={previewPlayedTrackKeys}
-        previewingTrackUri={previewingTrackUri}
-        recordingMemberAlbumImageUrl={recordingMemberAlbumImageUrl}
-        recordingMemberReleaseYear={recordingMemberReleaseYear}
-        recordingVariationStripRef={recordingVariationStripRef}
-        releaseSourceVersionAlbumImageUrl={releaseSourceVersionAlbumImageUrl}
-        releaseSourceVersionPlayCountLabel={releaseSourceVersionPlayCountLabel}
-        renderSelectedPreviewArtistAlbumSection={renderSelectedPreviewArtistAlbumSection}
-        scheduleAlbumWithArtistHighlight={scheduleAlbumWithArtistHighlight}
-        scrollRecordingVariationStrip={scrollRecordingVariationStrip}
-        selectedAlbumTrackMarkerTop={selectedAlbumTrackMarkerTop}
-        selectedPreview={selectedPreview}
-        selectedPreviewAlbumGuestArtists={selectedPreviewAlbumGuestArtists}
-        selectedPreviewAlbumHasGuestArtists={selectedPreviewAlbumHasGuestArtists}
-        selectedPreviewAlbumMainArtists={selectedPreviewAlbumMainArtists}
-        selectedPreviewAlbumSummary={selectedPreviewAlbumSummary}
-        selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbums}
-        selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForDisplay}
-        selectedPreviewArtistImageUrl={selectedPreviewArtistImageUrl}
-        selectedPreviewArtists={selectedPreviewArtists}
-        selectedPreviewCanOpenAlbum={selectedPreviewCanOpenAlbum}
-        selectedPreviewCanOpenArtist={selectedPreviewCanOpenArtist}
-        selectedPreviewCanonicalTrackTitle={selectedPreviewCanonicalTrackTitle}
-        selectedPreviewCurrentSpotifyTrackId={selectedPreviewCurrentSpotifyTrackId}
-        selectedPreviewDetailView={selectedPreviewDetailView}
-        selectedPreviewDisplayRelationRows={selectedPreviewDisplayRelationRows}
-        selectedPreviewHasReleaseSibling={selectedPreviewHasReleaseSibling}
-        selectedPreviewIsBookmarked={selectedPreviewIsBookmarked}
-        selectedPreviewIsKnownLiked={selectedPreviewIsKnownLiked}
-        selectedPreviewIsSharedArtistPage={selectedPreviewIsSharedArtistPage}
-        selectedPreviewLastListenedLabel={selectedPreviewLastListenedLabel}
-        selectedPreviewListenCountLabel={selectedPreviewListenCountLabel}
-        selectedPreviewOtherRecordingMembers={selectedPreviewOtherRecordingMembers}
-        selectedPreviewPlaybackTrackUri={selectedPreviewPlaybackTrackUri}
-        selectedPreviewPrimaryArtistAlbums={selectedPreviewPrimaryArtistAlbums}
-        selectedPreviewRecordingCandidateError={selectedPreviewRecordingCandidateError}
-        selectedPreviewReleaseAlbumVariationCount={selectedPreviewReleaseAlbumVariationCount}
-        selectedPreviewReleaseSiblingSourceCount={selectedPreviewReleaseSiblingSourceCount}
-        selectedPreviewReleaseSourceVersionNeedsArrows={selectedPreviewReleaseSourceVersionNeedsArrows}
-        selectedPreviewReleaseSourceVersions={selectedPreviewReleaseSourceVersions}
-        selectedPreviewReleaseTrackDetailError={selectedPreviewReleaseTrackDetailError}
-        selectedPreviewReleaseTrackDetailReady={selectedPreviewReleaseTrackDetailReady}
-        selectedPreviewStarTrackId={selectedPreviewStarTrackId}
-        selectedPreviewTrackDurationLabel={selectedPreviewTrackDurationLabel}
-        selectedPreviewTrackGuestArtists={selectedPreviewTrackGuestArtists}
-        selectedPreviewTrackMainArtists={selectedPreviewTrackMainArtists}
-        selectedPreviewTrackOptimisticSummary={selectedPreviewTrackOptimisticSummary}
-        setAlbumTrackLastSortMode={setAlbumTrackLastSortMode}
-        setDetailOptionsOpen={setDetailOptionsOpen}
-        setLocalBookmarkedTrackById={setLocalBookmarkedTrackById}
-        setLocalStarredTrackById={setLocalStarredTrackById}
-        setSelectedPreview={setSelectedPreview}
-        setSelectedPreviewDetailView={setSelectedPreviewDetailView}
-        spotifyTrackIdFromUri={spotifyTrackIdFromUri}
-        toggleAlbumTrackPreview={toggleAlbumTrackPreview}
-        variationSubtitleFromTitle={variationSubtitleFromTitle}
-      />
+      {selectedPreview ? (
+        <Suspense fallback={null}>
+          <DetailPreviewModal
+            albumTrackEntries={albumTrackEntries}
+            albumTrackEntriesError={albumTrackEntriesError}
+            albumTrackEntriesLoading={albumTrackEntriesLoading}
+            albumTrackIsKnownLiked={albumTrackIsKnownLiked}
+            albumTrackLastSortMode={albumTrackLastSortMode}
+            albumTrackListRef={albumTrackListRef}
+            albumTrackPreviewKey={albumTrackPreviewKey}
+            albumTracklistSummaryLabel={albumTracklistSummaryLabel}
+            artistEntriesForAlbumTrack={artistEntriesForAlbumTrack}
+            artistNameMatches={artistNameMatches}
+            backendSelectedPreviewArtistAlbums={backendSelectedPreviewArtistAlbums}
+            buildAlbumPlaybackQueue={buildAlbumPlaybackQueue}
+            clearAlbumWithArtistHighlight={clearAlbumWithArtistHighlight}
+            currentTrack={currentTrack}
+            detailOptionsOpen={detailOptionsOpen}
+            displayAlbumTrackEntries={displayAlbumTrackEntries}
+            familyCoverRemixRelationshipKinds={familyCoverRemixRelationshipKinds}
+            formatCompactRelativeAge={formatCompactRelativeAge}
+            formatPlaybackClock={formatPlaybackClock}
+            handleAlbumPlayAll={handleAlbumPlayAll}
+            handlePlaybackAction={handlePlaybackAction}
+            hasPremiumPlayback={hasPremiumPlayback}
+            hoveredAlbumWithArtistName={hoveredAlbumWithArtistName}
+            isTrackPlaying={isTrackPlaying}
+            localStarredTrackById={localStarredTrackById}
+            nextLastPlayedSortMode={nextLastPlayedSortMode}
+            openAlbumTrackPreview={openAlbumTrackPreview}
+            openAlbumWithArtistPreview={openAlbumWithArtistPreview}
+            openRecordingCandidateReleaseTrack={openRecordingCandidateReleaseTrack}
+            openReleaseSourceVersion={openReleaseSourceVersion}
+            openSelectedAlbumArtistPreview={openSelectedAlbumArtistPreview}
+            openSelectedArtistMemberPreview={openSelectedArtistMemberPreview}
+            openSelectedTrackAlbumPreview={openSelectedTrackAlbumPreview}
+            openSelectedTrackArtistPreview={openSelectedTrackArtistPreview}
+            pausedTimeFlashOn={pausedTimeFlashOn}
+            playbackDurationMs={playbackDurationMs}
+            playbackPaused={playbackPaused}
+            playbackPositionMs={playbackPositionMs}
+            playerSummaryFromAlbumTrack={playerSummaryFromAlbumTrack}
+            previewAlbumHeading={previewAlbumHeading}
+            previewPlayedTrackKeys={previewPlayedTrackKeys}
+            previewingTrackUri={previewingTrackUri}
+            recordingMemberAlbumImageUrl={recordingMemberAlbumImageUrl}
+            recordingMemberReleaseYear={recordingMemberReleaseYear}
+            recordingVariationStripRef={recordingVariationStripRef}
+            releaseSourceVersionAlbumImageUrl={releaseSourceVersionAlbumImageUrl}
+            releaseSourceVersionPlayCountLabel={releaseSourceVersionPlayCountLabel}
+            renderSelectedPreviewArtistAlbumSection={renderSelectedPreviewArtistAlbumSection}
+            scheduleAlbumWithArtistHighlight={scheduleAlbumWithArtistHighlight}
+            scrollRecordingVariationStrip={scrollRecordingVariationStrip}
+            selectedAlbumTrackMarkerTop={selectedAlbumTrackMarkerTop}
+            selectedPreview={selectedPreview}
+            selectedPreviewAlbumGuestArtists={selectedPreviewAlbumGuestArtists}
+            selectedPreviewAlbumHasGuestArtists={selectedPreviewAlbumHasGuestArtists}
+            selectedPreviewAlbumMainArtists={selectedPreviewAlbumMainArtists}
+            selectedPreviewAlbumSummary={selectedPreviewAlbumSummary}
+            selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbums}
+            selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForDisplay}
+            selectedPreviewArtistImageUrl={selectedPreviewArtistImageUrl}
+            selectedPreviewArtists={selectedPreviewArtists}
+            selectedPreviewCanOpenAlbum={selectedPreviewCanOpenAlbum}
+            selectedPreviewCanOpenArtist={selectedPreviewCanOpenArtist}
+            selectedPreviewCanonicalTrackTitle={selectedPreviewCanonicalTrackTitle}
+            selectedPreviewCurrentSpotifyTrackId={selectedPreviewCurrentSpotifyTrackId}
+            selectedPreviewDetailView={selectedPreviewDetailView}
+            selectedPreviewDisplayRelationRows={selectedPreviewDisplayRelationRows}
+            selectedPreviewHasReleaseSibling={selectedPreviewHasReleaseSibling}
+            selectedPreviewIsBookmarked={selectedPreviewIsBookmarked}
+            selectedPreviewIsKnownLiked={selectedPreviewIsKnownLiked}
+            selectedPreviewIsSharedArtistPage={selectedPreviewIsSharedArtistPage}
+            selectedPreviewLastListenedLabel={selectedPreviewLastListenedLabel}
+            selectedPreviewListenCountLabel={selectedPreviewListenCountLabel}
+            selectedPreviewOtherRecordingMembers={selectedPreviewOtherRecordingMembers}
+            selectedPreviewPlaybackTrackUri={selectedPreviewPlaybackTrackUri}
+            selectedPreviewPrimaryArtistAlbums={selectedPreviewPrimaryArtistAlbums}
+            selectedPreviewRecordingCandidateError={selectedPreviewRecordingCandidateError}
+            selectedPreviewReleaseAlbumVariationCount={selectedPreviewReleaseAlbumVariationCount}
+            selectedPreviewReleaseSiblingSourceCount={selectedPreviewReleaseSiblingSourceCount}
+            selectedPreviewReleaseSourceVersionNeedsArrows={selectedPreviewReleaseSourceVersionNeedsArrows}
+            selectedPreviewReleaseSourceVersions={selectedPreviewReleaseSourceVersions}
+            selectedPreviewReleaseTrackDetailError={selectedPreviewReleaseTrackDetailError}
+            selectedPreviewReleaseTrackDetailReady={selectedPreviewReleaseTrackDetailReady}
+            selectedPreviewStarTrackId={selectedPreviewStarTrackId}
+            selectedPreviewTrackDurationLabel={selectedPreviewTrackDurationLabel}
+            selectedPreviewTrackGuestArtists={selectedPreviewTrackGuestArtists}
+            selectedPreviewTrackMainArtists={selectedPreviewTrackMainArtists}
+            selectedPreviewTrackOptimisticSummary={selectedPreviewTrackOptimisticSummary}
+            setAlbumTrackLastSortMode={setAlbumTrackLastSortMode}
+            setDetailOptionsOpen={setDetailOptionsOpen}
+            setLocalBookmarkedTrackById={setLocalBookmarkedTrackById}
+            setLocalStarredTrackById={setLocalStarredTrackById}
+            setSelectedPreview={setSelectedPreview}
+            setSelectedPreviewDetailView={setSelectedPreviewDetailView}
+            spotifyTrackIdFromUri={spotifyTrackIdFromUri}
+            toggleAlbumTrackPreview={toggleAlbumTrackPreview}
+            variationSubtitleFromTitle={variationSubtitleFromTitle}
+          />
+        </Suspense>
+      ) : null}
     </>
   );
 }

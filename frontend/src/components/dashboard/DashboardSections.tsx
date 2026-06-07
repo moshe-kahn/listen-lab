@@ -1,3 +1,5 @@
+import { lazy, Suspense } from "react";
+
 import type {
   AnalysisMode,
   AppPage,
@@ -9,13 +11,30 @@ import type {
   TrackRankingMode,
 } from "../../types/appTypes";
 import { LIKED_TRACKS_RECENT_DISPLAY_LIMIT } from "../../constants/appConstants";
-import { CatalogBackfillPage } from "../catalogBackfill/CatalogBackfillPage";
-import { FormulaLabPage } from "../formulaLab/FormulaLabPage";
-import { RecentDebugPage } from "../recentDebug/RecentDebugPage";
-import { SearchLookupPage } from "../searchLookup/SearchLookupPage";
 import { DashboardAlbumColumn, DashboardArtistColumn } from "./DashboardColumns";
 import { DashboardPlaylistsSection } from "./DashboardPlaylistsSection";
 import { DualSectionCard } from "./DualSectionCard";
+
+const CatalogBackfillPage = lazy(() => import("../catalogBackfill/CatalogBackfillPage").then((module) => ({
+  default: module.CatalogBackfillPage,
+})));
+const FormulaLabPage = lazy(() => import("../formulaLab/FormulaLabPage").then((module) => ({
+  default: module.FormulaLabPage,
+})));
+const RecentDebugPage = lazy(() => import("../recentDebug/RecentDebugPage").then((module) => ({
+  default: module.RecentDebugPage,
+})));
+const SearchLookupPage = lazy(() => import("../searchLookup/SearchLookupPage").then((module) => ({
+  default: module.SearchLookupPage,
+})));
+
+function RouteChunkFallback() {
+  return (
+    <section className="info-card info-card-wide tracks-only-card">
+      <p className="empty-copy">Loading page...</p>
+    </section>
+  );
+}
 
 type DashboardSectionsProps = {
   albumCatalogLookupEnqueueError: any;
@@ -339,6 +358,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
   } = props;
   return appPage === "formulaLab" ? (
             <div className="dashboard-grid">
+              <Suspense fallback={<RouteChunkFallback />}>
                 <FormulaLabPage
                   hasProfile={Boolean(profile)}
                   mergedTracks={mergedTracks}
@@ -356,6 +376,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
                   reloadTrackRankings={reloadTrackRankings}
                   onBack={() => setAppPage("dashboard")}
                 />
+              </Suspense>
               </div>
             ) : appPage === "identityAudit" ? (
               <div className="dashboard-grid">
@@ -363,122 +384,128 @@ export function DashboardSections(props: DashboardSectionsProps) {
               </div>
             ) : appPage === "recentDebug" ? (
               <div className="dashboard-grid">
-                <RecentDebugPage
-                  hasProfile={Boolean(profile)}
-                  listeningLogTracks={listeningLogTracks}
-                  listeningLogLoading={listeningLogLoading}
-                  listeningLogError={listeningLogError}
-                  listeningLogOffset={listeningLogOffset}
-                  listeningLogHasMore={listeningLogHasMore}
-                  listeningLogLastLoadedAt={listeningLogLastLoadedAt}
-                  recentDebugSourceFilter={recentDebugSourceFilter}
-                  setRecentDebugSourceFilter={setRecentDebugSourceFilter}
-                  setListeningLogTracks={setListeningLogTracks}
-                  setListeningLogHasMore={setListeningLogHasMore}
-                  setListeningLogOffset={setListeningLogOffset}
-                  setListeningLogLoaded={setListeningLogLoaded}
-                  setListeningLogLastLoadedAt={setListeningLogLastLoadedAt}
-                  setListeningLogError={setListeningLogError}
-                  showDebugLinkFields={showDebugLinkFields}
-                  setShowDebugLinkFields={setShowDebugLinkFields}
-                  openDebugSessions={openDebugSessions}
-                  setOpenDebugSessions={setOpenDebugSessions}
-                  openDebugTracks={openDebugTracks}
-                  setOpenDebugTracks={setOpenDebugTracks}
-                  loadListeningLogBatch={loadListeningLogBatch}
-                  onBack={() => setAppPage("dashboard")}
-                  onSelectPreview={setSelectedPreview}
-                />
+                <Suspense fallback={<RouteChunkFallback />}>
+                  <RecentDebugPage
+                    hasProfile={Boolean(profile)}
+                    listeningLogTracks={listeningLogTracks}
+                    listeningLogLoading={listeningLogLoading}
+                    listeningLogError={listeningLogError}
+                    listeningLogOffset={listeningLogOffset}
+                    listeningLogHasMore={listeningLogHasMore}
+                    listeningLogLastLoadedAt={listeningLogLastLoadedAt}
+                    recentDebugSourceFilter={recentDebugSourceFilter}
+                    setRecentDebugSourceFilter={setRecentDebugSourceFilter}
+                    setListeningLogTracks={setListeningLogTracks}
+                    setListeningLogHasMore={setListeningLogHasMore}
+                    setListeningLogOffset={setListeningLogOffset}
+                    setListeningLogLoaded={setListeningLogLoaded}
+                    setListeningLogLastLoadedAt={setListeningLogLastLoadedAt}
+                    setListeningLogError={setListeningLogError}
+                    showDebugLinkFields={showDebugLinkFields}
+                    setShowDebugLinkFields={setShowDebugLinkFields}
+                    openDebugSessions={openDebugSessions}
+                    setOpenDebugSessions={setOpenDebugSessions}
+                    openDebugTracks={openDebugTracks}
+                    setOpenDebugTracks={setOpenDebugTracks}
+                    loadListeningLogBatch={loadListeningLogBatch}
+                    onBack={() => setAppPage("dashboard")}
+                    onSelectPreview={setSelectedPreview}
+                  />
+                </Suspense>
               </div>
             ) : appPage === "catalogBackfill" ? (
               <div className="dashboard-grid">
-                <CatalogBackfillPage
-                  hasProfile={Boolean(profile)}
-                  catalogBackfillTab={catalogBackfillTab}
-                  setCatalogBackfillTab={setCatalogBackfillTab}
-                  catalogBackfillCoverage={catalogBackfillCoverage}
-                  catalogBackfillCoverageLoading={catalogBackfillCoverageLoading}
-                  catalogBackfillCoverageError={catalogBackfillCoverageError}
-                  catalogBackfillCoverageLastLoadedAt={catalogBackfillCoverageLastLoadedAt}
-                  catalogBackfillRuns={catalogBackfillRuns}
-                  catalogBackfillRunsLoading={catalogBackfillRunsLoading}
-                  catalogBackfillRunsError={catalogBackfillRunsError}
-                  catalogBackfillRunsLastLoadedAt={catalogBackfillRunsLastLoadedAt}
-                  catalogBackfillQueue={catalogBackfillQueue}
-                  catalogBackfillQueueLoading={catalogBackfillQueueLoading}
-                  catalogBackfillQueueError={catalogBackfillQueueError}
-                  catalogBackfillQueueLastLoadedAt={catalogBackfillQueueLastLoadedAt}
-                  catalogBackfillQueueStatusFilter={catalogBackfillQueueStatusFilter}
-                  catalogBackfillQueueReasonFilter={catalogBackfillQueueReasonFilter}
-                  catalogBackfillQueueRepairLoading={catalogBackfillQueueRepairLoading}
-                  catalogBackfillQueueRepairMessage={catalogBackfillQueueRepairMessage}
-                  catalogBackfillLatestResult={catalogBackfillLatestResult}
-                  catalogBackfillRunLoading={catalogBackfillRunLoading}
-                  catalogBackfillRunError={catalogBackfillRunError}
-                  catalogBackfillLimit={catalogBackfillLimit}
-                  setCatalogBackfillLimit={setCatalogBackfillLimit}
-                  catalogBackfillOffset={catalogBackfillOffset}
-                  setCatalogBackfillOffset={setCatalogBackfillOffset}
-                  catalogBackfillMarket={catalogBackfillMarket}
-                  setCatalogBackfillMarket={setCatalogBackfillMarket}
-                  catalogBackfillForceRefresh={catalogBackfillForceRefresh}
-                  setCatalogBackfillForceRefresh={setCatalogBackfillForceRefresh}
-                  catalogBackfillMaxRequests={catalogBackfillMaxRequests}
-                  setCatalogBackfillMaxRequests={setCatalogBackfillMaxRequests}
-                  catalogBackfillMaxRuntimeSeconds={catalogBackfillMaxRuntimeSeconds}
-                  setCatalogBackfillMaxRuntimeSeconds={setCatalogBackfillMaxRuntimeSeconds}
-                  catalogBackfillFullRunMode={catalogBackfillFullRunMode}
-                  setCatalogBackfillFullRunMode={setCatalogBackfillFullRunMode}
-                  catalogBackfillAlbumTracklistPolicy={catalogBackfillAlbumTracklistPolicy}
-                  setCatalogBackfillAlbumTracklistPolicy={setCatalogBackfillAlbumTracklistPolicy}
-                  catalogBackfillMaxAlbumTracksPagesPerAlbum={catalogBackfillMaxAlbumTracksPagesPerAlbum}
-                  setCatalogBackfillMaxAlbumTracksPagesPerAlbum={setCatalogBackfillMaxAlbumTracksPagesPerAlbum}
-                  catalogBackfillIncludeAlbums={catalogBackfillIncludeAlbums}
-                  setCatalogBackfillIncludeAlbums={setCatalogBackfillIncludeAlbums}
-                  loadCatalogBackfillCoverage={loadCatalogBackfillCoverage}
-                  loadCatalogBackfillRuns={loadCatalogBackfillRuns}
-                  loadCatalogBackfillQueue={loadCatalogBackfillQueue}
-                  repairCatalogBackfillQueueStatuses={repairCatalogBackfillQueueStatuses}
-                  runCatalogBackfill={runCatalogBackfill}
-                  onBack={() => setAppPage("dashboard")}
-                />
+                <Suspense fallback={<RouteChunkFallback />}>
+                  <CatalogBackfillPage
+                    hasProfile={Boolean(profile)}
+                    catalogBackfillTab={catalogBackfillTab}
+                    setCatalogBackfillTab={setCatalogBackfillTab}
+                    catalogBackfillCoverage={catalogBackfillCoverage}
+                    catalogBackfillCoverageLoading={catalogBackfillCoverageLoading}
+                    catalogBackfillCoverageError={catalogBackfillCoverageError}
+                    catalogBackfillCoverageLastLoadedAt={catalogBackfillCoverageLastLoadedAt}
+                    catalogBackfillRuns={catalogBackfillRuns}
+                    catalogBackfillRunsLoading={catalogBackfillRunsLoading}
+                    catalogBackfillRunsError={catalogBackfillRunsError}
+                    catalogBackfillRunsLastLoadedAt={catalogBackfillRunsLastLoadedAt}
+                    catalogBackfillQueue={catalogBackfillQueue}
+                    catalogBackfillQueueLoading={catalogBackfillQueueLoading}
+                    catalogBackfillQueueError={catalogBackfillQueueError}
+                    catalogBackfillQueueLastLoadedAt={catalogBackfillQueueLastLoadedAt}
+                    catalogBackfillQueueStatusFilter={catalogBackfillQueueStatusFilter}
+                    catalogBackfillQueueReasonFilter={catalogBackfillQueueReasonFilter}
+                    catalogBackfillQueueRepairLoading={catalogBackfillQueueRepairLoading}
+                    catalogBackfillQueueRepairMessage={catalogBackfillQueueRepairMessage}
+                    catalogBackfillLatestResult={catalogBackfillLatestResult}
+                    catalogBackfillRunLoading={catalogBackfillRunLoading}
+                    catalogBackfillRunError={catalogBackfillRunError}
+                    catalogBackfillLimit={catalogBackfillLimit}
+                    setCatalogBackfillLimit={setCatalogBackfillLimit}
+                    catalogBackfillOffset={catalogBackfillOffset}
+                    setCatalogBackfillOffset={setCatalogBackfillOffset}
+                    catalogBackfillMarket={catalogBackfillMarket}
+                    setCatalogBackfillMarket={setCatalogBackfillMarket}
+                    catalogBackfillForceRefresh={catalogBackfillForceRefresh}
+                    setCatalogBackfillForceRefresh={setCatalogBackfillForceRefresh}
+                    catalogBackfillMaxRequests={catalogBackfillMaxRequests}
+                    setCatalogBackfillMaxRequests={setCatalogBackfillMaxRequests}
+                    catalogBackfillMaxRuntimeSeconds={catalogBackfillMaxRuntimeSeconds}
+                    setCatalogBackfillMaxRuntimeSeconds={setCatalogBackfillMaxRuntimeSeconds}
+                    catalogBackfillFullRunMode={catalogBackfillFullRunMode}
+                    setCatalogBackfillFullRunMode={setCatalogBackfillFullRunMode}
+                    catalogBackfillAlbumTracklistPolicy={catalogBackfillAlbumTracklistPolicy}
+                    setCatalogBackfillAlbumTracklistPolicy={setCatalogBackfillAlbumTracklistPolicy}
+                    catalogBackfillMaxAlbumTracksPagesPerAlbum={catalogBackfillMaxAlbumTracksPagesPerAlbum}
+                    setCatalogBackfillMaxAlbumTracksPagesPerAlbum={setCatalogBackfillMaxAlbumTracksPagesPerAlbum}
+                    catalogBackfillIncludeAlbums={catalogBackfillIncludeAlbums}
+                    setCatalogBackfillIncludeAlbums={setCatalogBackfillIncludeAlbums}
+                    loadCatalogBackfillCoverage={loadCatalogBackfillCoverage}
+                    loadCatalogBackfillRuns={loadCatalogBackfillRuns}
+                    loadCatalogBackfillQueue={loadCatalogBackfillQueue}
+                    repairCatalogBackfillQueueStatuses={repairCatalogBackfillQueueStatuses}
+                    runCatalogBackfill={runCatalogBackfill}
+                    onBack={() => setAppPage("dashboard")}
+                  />
+                </Suspense>
               </div>
             ) : appPage === "searchLookup" ? (
               <div className="dashboard-grid">
-                <SearchLookupPage
-                  hasProfile={Boolean(profile)}
-                  searchLookupEntityType={searchLookupEntityType}
-                  setSearchLookupEntityType={setSearchLookupEntityType}
-                  albumCatalogLookupQ={albumCatalogLookupQ}
-                  setAlbumCatalogLookupQ={setAlbumCatalogLookupQ}
-                  albumCatalogLookupStatus={albumCatalogLookupStatus}
-                  setAlbumCatalogLookupStatus={setAlbumCatalogLookupStatus}
-                  trackCatalogLookupStatus={trackCatalogLookupStatus}
-                  setTrackCatalogLookupStatus={setTrackCatalogLookupStatus}
-                  searchLookupQueueStatus={searchLookupQueueStatus}
-                  setSearchLookupQueueStatus={setSearchLookupQueueStatus}
-                  searchLookupSort={searchLookupSort}
-                  setSearchLookupSort={setSearchLookupSort}
-                  albumCatalogLookupResult={albumCatalogLookupResult}
-                  albumCatalogLookupLoading={albumCatalogLookupLoading}
-                  albumCatalogLookupError={albumCatalogLookupError}
-                  albumCatalogLookupLastLoadedAt={albumCatalogLookupLastLoadedAt}
-                  trackCatalogLookupResult={trackCatalogLookupResult}
-                  trackCatalogLookupLoading={trackCatalogLookupLoading}
-                  trackCatalogLookupError={trackCatalogLookupError}
-                  trackCatalogLookupLastLoadedAt={trackCatalogLookupLastLoadedAt}
-                  albumCatalogLookupEnqueueLoading={albumCatalogLookupEnqueueLoading}
-                  albumCatalogLookupEnqueueError={albumCatalogLookupEnqueueError}
-                  setAlbumCatalogLookupEnqueueError={setAlbumCatalogLookupEnqueueError}
-                  albumCatalogLookupEnqueueResult={albumCatalogLookupEnqueueResult}
-                  setAlbumCatalogLookupEnqueueResult={setAlbumCatalogLookupEnqueueResult}
-                  loadActiveSearchLookup={loadActiveSearchLookup}
-                  enqueueVisibleIncompleteLookupAlbums={enqueueVisibleIncompleteLookupAlbums}
-                  enqueueVisibleIncompleteLookupTracks={enqueueVisibleIncompleteLookupTracks}
-                  openAlbumLookupPreview={openAlbumLookupPreview}
-                  openTrackLookupPreview={openTrackLookupPreview}
-                  onBack={() => setAppPage("dashboard")}
-                />
+                <Suspense fallback={<RouteChunkFallback />}>
+                  <SearchLookupPage
+                    hasProfile={Boolean(profile)}
+                    searchLookupEntityType={searchLookupEntityType}
+                    setSearchLookupEntityType={setSearchLookupEntityType}
+                    albumCatalogLookupQ={albumCatalogLookupQ}
+                    setAlbumCatalogLookupQ={setAlbumCatalogLookupQ}
+                    albumCatalogLookupStatus={albumCatalogLookupStatus}
+                    setAlbumCatalogLookupStatus={setAlbumCatalogLookupStatus}
+                    trackCatalogLookupStatus={trackCatalogLookupStatus}
+                    setTrackCatalogLookupStatus={setTrackCatalogLookupStatus}
+                    searchLookupQueueStatus={searchLookupQueueStatus}
+                    setSearchLookupQueueStatus={setSearchLookupQueueStatus}
+                    searchLookupSort={searchLookupSort}
+                    setSearchLookupSort={setSearchLookupSort}
+                    albumCatalogLookupResult={albumCatalogLookupResult}
+                    albumCatalogLookupLoading={albumCatalogLookupLoading}
+                    albumCatalogLookupError={albumCatalogLookupError}
+                    albumCatalogLookupLastLoadedAt={albumCatalogLookupLastLoadedAt}
+                    trackCatalogLookupResult={trackCatalogLookupResult}
+                    trackCatalogLookupLoading={trackCatalogLookupLoading}
+                    trackCatalogLookupError={trackCatalogLookupError}
+                    trackCatalogLookupLastLoadedAt={trackCatalogLookupLastLoadedAt}
+                    albumCatalogLookupEnqueueLoading={albumCatalogLookupEnqueueLoading}
+                    albumCatalogLookupEnqueueError={albumCatalogLookupEnqueueError}
+                    setAlbumCatalogLookupEnqueueError={setAlbumCatalogLookupEnqueueError}
+                    albumCatalogLookupEnqueueResult={albumCatalogLookupEnqueueResult}
+                    setAlbumCatalogLookupEnqueueResult={setAlbumCatalogLookupEnqueueResult}
+                    loadActiveSearchLookup={loadActiveSearchLookup}
+                    enqueueVisibleIncompleteLookupAlbums={enqueueVisibleIncompleteLookupAlbums}
+                    enqueueVisibleIncompleteLookupTracks={enqueueVisibleIncompleteLookupTracks}
+                    openAlbumLookupPreview={openAlbumLookupPreview}
+                    openTrackLookupPreview={openTrackLookupPreview}
+                    onBack={() => setAppPage("dashboard")}
+                  />
+                </Suspense>
               </div>
             ) : appPage === "dashboard" ? (
             <div className="dashboard-grid">

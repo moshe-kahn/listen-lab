@@ -127,11 +127,13 @@ This document is the implementation-oriented technical source of truth for the L
 ### High-level flow
 1. The user opens the React app and starts Spotify login.
 2. The backend runs OAuth with Spotify and stores session state for the logged-in user.
-3. The frontend calls `GET /auth/session` and `GET /me`.
-4. The backend fetches fresh recent sections, short-cache live ranking sections, and optionally serves persistent history-derived favorites or local snapshot sections when valid.
-5. The frontend first renders a loading handoff, then the dashboard snapshot, then optionally fills in the extended view and liked-track cache state.
-6. When Spotify is unavailable or the user explicitly chooses local mode, the backend returns a locally assembled payload backed by history and cached Spotify-derived metadata.
-7. A later milestone will add `POST /analysis` and `POST /playlist`.
+3. The frontend calls `GET /auth/session` and, for quick full-mode startup, `GET /me?mode=shell`.
+4. The backend shell response fetches Spotify profile identity and returns the existing dashboard profile shape with empty section placeholders.
+5. While the loading handoff remains visible, the frontend prioritizes visible screen data: playback/current/queue/player-recent first attempts, then Activity/recent sections.
+6. After visible startup data is ready, the dashboard is released and lower-screen/top sections are filled by normal quick `/me` and later optional extended loads.
+7. The full-screen loading handoff is latched off after dashboard release for the current user/session so ordinary background refreshes do not flash back to loading.
+8. When Spotify is unavailable or the user explicitly chooses local mode, the backend returns a locally assembled payload backed by history and cached Spotify-derived metadata.
+9. A later milestone will add `POST /analysis` and `POST /playlist`.
 
 ## Raw Ingest Architecture
 ### Album entity layers
@@ -302,7 +304,7 @@ docs/
 The React SPA is responsible for:
 - showing authenticated vs unauthenticated states
 - starting the Spotify login flow
-- showing a dedicated loading state while the first dashboard snapshot is computed
+- showing a dedicated loading state while visible startup data is prepared
 - providing an "Analyze my listening" action
 - rendering ranked overlooked artists
 - rendering explanation text and signal breakdowns
