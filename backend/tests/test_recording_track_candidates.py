@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from backend.app.recording_track_candidates import (
     classify_recording_track_candidate_group,
     get_recording_track_candidate_for_release_track,
     query_recording_track_candidates,
+    rebuild_generated_recording_track_clusters,
     summarize_recording_track_candidates,
 )
 from backend.app.release_track_metadata import release_track_metadata_for_spotify_ids
@@ -37,6 +39,7 @@ def _member(
         "release_track_id": release_track_id,
         "title": title,
         "artist": artist,
+        "artists": [{"name": name.strip()} for name in artist.split("|") if name.strip()],
         "album": album,
         "release_album_ids": [release_track_id],
         "spotify_album_ids": [],
@@ -560,6 +563,9 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
         self.assertIn("reason", item["representative"])
         self.assertIn("why_grouped", item)
         self.assertIn("why_review", item)
+        self.assertEqual("Endpoint Artist", item["members"][0]["artists"][0]["name"])
+        self.assertEqual("primary", item["members"][0]["artists"][0]["role"])
+        self.assertEqual(0, item["members"][0]["artists"][0]["billing_index"])
         self.assertEqual("USENDPOINT1", item["members"][0]["isrc"])
         self.assertIn("duration_delta_ms", item["members"][0]["evidence"])
 
@@ -629,6 +635,181 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
         self.assertEqual(["USCATALOG1"], item["members"][0]["isrc_values"])
         self.assertIn(199_000, item["members"][0]["duration_values_ms"])
         self.assertIn("catalog-album-id", item["members"][0]["spotify_album_ids"])
+
+    def test_raw_payload_album_fields_are_surfaced_and_album_names_are_deduped(self) -> None:
+        first_release_track_id = self._seed_release_track(
+            title="Raw Candidate Song",
+            artist="Raw Candidate Artist",
+            album="Raw Candidate Song",
+            spotify_id="raw-candidate-single",
+            isrc=None,
+            duration_ms=170_107,
+        )
+        self._seed_release_track(
+            title="Raw Candidate Song",
+            artist="Raw Candidate Artist",
+            album="Raw Candidate Album",
+            spotify_id="raw-candidate-album",
+            isrc=None,
+            duration_ms=170_107,
+        )
+        raw_payload = {
+            "track": {
+                "duration_ms": 170107,
+                "album": {
+                    "id": "raw-candidate-album-id",
+                    "album_type": "single",
+                    "release_date": "2026-05-01",
+                    "images": [{"url": "https://images.example/raw-candidate.jpg"}],
+                },
+            }
+        }
+        with sqlite_connection(write=True) as connection:
+            duplicate_album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Raw Candidate Song", "raw candidate song"),
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)",
+                (duplicate_album_id, first_release_track_id),
+            )
+            connection.execute(
+                "UPDATE source_track SET raw_payload_json = ? WHERE external_id = ?",
+                (json.dumps(raw_payload), "raw-candidate-single"),
+            )
+
+        payload = query_recording_track_candidates(limit=10, offset=0)
+
+        self.assertEqual(1, payload["total"])
+        first_member = next(
+            member for member in payload["items"][0]["members"]
+            if member["release_track_id"] == first_release_track_id
+        )
+        self.assertEqual("Raw Candidate Song", first_member["album"])
+        self.assertEqual(["raw-candidate-album-id"], first_member["spotify_album_ids"])
+        self.assertEqual(["https://images.example/raw-candidate.jpg"], first_member["album_image_urls"])
+        self.assertEqual(["2026-05-01"], first_member["album_release_dates"])
+        self.assertEqual(["single"], first_member["album_types"])
+        self.assertIn(170107, first_member["duration_values_ms"])
+
+    def test_spotify_uri_source_rows_use_catalog_album_metadata(self) -> None:
+        first_release_track_id = self._seed_release_track(
+            title="URI Candidate Song",
+            artist="URI Candidate Artist",
+            album="URI Candidate Album",
+            spotify_id="uri-candidate-album-track",
+            isrc="USURICANDIDATE1",
+            duration_ms=None,
+            catalog_duration_ms=180_000,
+            catalog_album_id="uri-candidate-album-id",
+        )
+        self._seed_release_track(
+            title="URI Candidate Song",
+            artist="URI Candidate Artist",
+            album="URI Candidate Single",
+            spotify_id="uri-candidate-single-track",
+            isrc="USURICANDIDATE1",
+            duration_ms=None,
+            catalog_duration_ms=180_000,
+            catalog_album_id="uri-candidate-single-id",
+        )
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                UPDATE source_track
+                SET source_name = 'spotify_uri',
+                    external_id = ?,
+                    external_uri = NULL
+                WHERE external_id = ?
+                """,
+                ("spotify:track:uri-candidate-album-track", "uri-candidate-album-track"),
+            )
+            connection.execute(
+                """
+                UPDATE spotify_album_catalog
+                SET images_json = ?, release_date = ?
+                WHERE spotify_album_id = ?
+                """,
+                (
+                    json.dumps([{"url": "https://images.example/uri-candidate-album.jpg"}]),
+                    "2026-06-01",
+                    "uri-candidate-album-id",
+                ),
+            )
+
+        payload = query_recording_track_candidates(same_isrc_only=True, limit=10)
+
+        self.assertEqual(1, payload["total"])
+        first_member = next(
+            member for member in payload["items"][0]["members"]
+            if member["release_track_id"] == first_release_track_id
+        )
+        self.assertIn("uri-candidate-album-track", first_member["source_track_ids"])
+        self.assertIn("spotify:track:uri-candidate-album-track", first_member["source_track_uris"])
+        self.assertEqual(["https://images.example/uri-candidate-album.jpg"], first_member["album_image_urls"])
+        self.assertEqual(["2026-06-01"], first_member["album_release_dates"])
+
+    def test_generated_candidate_lookup_hydrates_stale_member_album_metadata(self) -> None:
+        first_release_track_id = self._seed_release_track(
+            title="Hydrated Candidate Song",
+            artist="Hydrated Candidate Artist",
+            album="Hydrated Candidate Album",
+            spotify_id="hydrated-candidate-album-track",
+            isrc="USHYDRATED1",
+            duration_ms=None,
+            catalog_duration_ms=180_000,
+            catalog_album_id="hydrated-candidate-album-id",
+        )
+        self._seed_release_track(
+            title="Hydrated Candidate Song",
+            artist="Hydrated Candidate Artist",
+            album="Hydrated Candidate Single",
+            spotify_id="hydrated-candidate-single-track",
+            isrc="USHYDRATED1",
+            duration_ms=None,
+            catalog_duration_ms=180_000,
+            catalog_album_id="hydrated-candidate-single-id",
+        )
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                UPDATE spotify_album_catalog
+                SET images_json = ?, release_date = ?
+                WHERE spotify_album_id = ?
+                """,
+                (
+                    json.dumps([{"url": "https://images.example/hydrated-candidate-album.jpg"}]),
+                    "2026-06-02",
+                    "hydrated-candidate-album-id",
+                ),
+            )
+
+        rebuild_generated_recording_track_clusters()
+        with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+            rows = connection.execute("SELECT id, candidate_snapshot_json FROM generated_recording_track_cluster").fetchall()
+            for row in rows:
+                snapshot = json.loads(str(row["candidate_snapshot_json"] or "{}"))
+                for member in snapshot.get("members", []):
+                    if isinstance(member, dict):
+                        member["album_image_urls"] = []
+                        member["album_release_dates"] = []
+                connection.execute(
+                    "UPDATE generated_recording_track_cluster SET candidate_snapshot_json = ? WHERE id = ?",
+                    (json.dumps(snapshot), int(row["id"])),
+                )
+
+        item = get_recording_track_candidate_for_release_track(first_release_track_id)
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        first_member = next(
+            member for member in item["members"]
+            if member["release_track_id"] == first_release_track_id
+        )
+        self.assertEqual(["https://images.example/hydrated-candidate-album.jpg"], first_member["album_image_urls"])
+        self.assertEqual(["2026-06-02"], first_member["album_release_dates"])
 
     def test_same_isrc_with_conflicting_title_downgrades_to_needs_review(self) -> None:
         self._seed_release_track(

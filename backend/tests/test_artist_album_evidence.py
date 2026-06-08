@@ -94,7 +94,7 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
         album_name: str,
         artist_names: tuple[str, ...],
         spotify_album_id: str | None = None,
-    ) -> None:
+    ) -> int:
         with sqlite_connection(write=True) as connection:
             album_id = connection.execute(
                 "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
@@ -129,6 +129,60 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
                     """,
                     (album_id, artist_id, index, artist_name),
                 )
+            return int(album_id)
+
+    def _insert_entity_album_source_track(
+        self,
+        release_album_id: int,
+        *,
+        release_track_name: str,
+        spotify_track_id: str,
+        spotify_album_id: str,
+        spotify_album_name: str,
+        image_url: str,
+        release_date: str,
+    ) -> None:
+        with sqlite_connection(write=True) as connection:
+            release_track_id = connection.execute(
+                "INSERT INTO release_track (primary_name, normalized_name) VALUES (?, ?)",
+                (release_track_name, release_track_name.strip().lower()),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)",
+                (release_album_id, release_track_id),
+            )
+            source_track_id = connection.execute(
+                """
+                INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw, raw_payload_json)
+                VALUES ('spotify', ?, ?, ?, ?)
+                """,
+                (
+                    spotify_track_id,
+                    f"spotify:track:{spotify_track_id}",
+                    release_track_name,
+                    json.dumps(
+                        {
+                            "track": {
+                                "name": release_track_name,
+                                "album": {
+                                    "id": spotify_album_id,
+                                    "name": spotify_album_name,
+                                    "images": [{"url": image_url}],
+                                    "release_date": release_date,
+                                },
+                            }
+                        }
+                    ),
+                ),
+            ).lastrowid
+            connection.execute(
+                """
+                INSERT INTO source_track_map (
+                  source_track_id, release_track_id, match_method, confidence, status
+                ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted')
+                """,
+                (source_track_id, release_track_id),
+            )
 
     def _seed_catalog(self) -> None:
         self._insert_album("album-primary", "Primary Album", ("Primary Artist",), 3)
@@ -189,6 +243,22 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
         self.assertEqual(["entity-album"], [item["album_id"] for item in items])
         self.assertEqual("album", items[0]["relationship"])
         self.assertEqual("Internal album artist link", items[0]["evidence"])
+
+    def test_entity_album_link_uses_linked_source_track_album_metadata(self) -> None:
+        release_album_id = self._insert_entity_album("Entity Album", ("Entity Artist",), spotify_album_id="entity-album")
+        self._insert_entity_album_source_track(
+            release_album_id,
+            release_track_name="Entity Track",
+            spotify_track_id="entity-track",
+            spotify_album_id="entity-album",
+            spotify_album_name="Entity Album",
+            image_url="https://images.example/entity-album.jpg",
+            release_date="2026-05-01",
+        )
+        items = list_artist_album_evidence(["Entity Artist"])
+        self.assertEqual(["entity-album"], [item["album_id"] for item in items])
+        self.assertEqual("https://images.example/entity-album.jpg", items[0]["image_url"])
+        self.assertEqual("2026", items[0]["release_year"])
 
     def test_entity_album_link_dedupes_catalog_match(self) -> None:
         self._insert_entity_album("Primary Album", ("Primary Artist",), spotify_album_id="album-primary")

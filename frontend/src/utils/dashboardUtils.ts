@@ -101,8 +101,15 @@ export function firstArtistFromRecentTrack(track: RecentTrack | null | undefined
 }
 
 export function previewAlbumHeading(preview: PreviewItem): string {
-  const albumName = preview.sourceTrack?.album_name ?? preview.detail ?? "Album";
-  const albumYear = preview.sourceTrack?.album_release_year ?? preview.sourceAlbumYear ?? null;
+  const detailText = preview.detail?.trim() ?? null;
+  const detailIsYear = Boolean(detailText && /^\d{4}$/.test(detailText));
+  const albumName = preview.sourceTrack?.album_name
+    ?? preview.sourceAlbumName
+    ?? (preview.kind === "album" ? preview.label : detailIsYear ? null : detailText)
+    ?? "Album";
+  const albumYear = preview.sourceTrack?.album_release_year
+    ?? preview.sourceAlbumYear
+    ?? (detailIsYear ? detailText : null);
   return albumYear ? `${albumYear} - ${albumName}` : albumName;
 }
 

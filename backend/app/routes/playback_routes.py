@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 
 from backend.app.artist_album_evidence import list_artist_album_evidence
+from backend.app.artwork import resolve_artist_artwork
 from backend.app.auth.session import _require_local_data_session, _require_user_id
 from backend.app.auth.token import _require_token
 from backend.app.db import (
@@ -58,6 +59,48 @@ def _spotify_track_id_from_uri(track_uri: str | None) -> str | None:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _artist_entries_for_album_evidence(artist_names: list[str], artist_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    normalized_ids = [str(artist_id or "").strip() for artist_id in (artist_ids or [])]
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        for index, artist_name in enumerate(artist_names):
+            clean_name = str(artist_name or "").strip()
+            if not clean_name:
+                continue
+            artist_id = normalized_ids[index] if index < len(normalized_ids) and normalized_ids[index] else None
+            if not artist_id:
+                row = connection.execute(
+                    """
+                    SELECT sa.external_id
+                    FROM artist a
+                    JOIN source_artist_map sam
+                      ON sam.artist_id = a.id
+                     AND sam.status = 'accepted'
+                    JOIN source_artist sa
+                      ON sa.id = sam.source_artist_id
+                     AND sa.source_name = 'spotify'
+                    WHERE lower(trim(a.canonical_name)) = lower(trim(?))
+                      AND sa.external_id IS NOT NULL
+                      AND trim(sa.external_id) != ''
+                    ORDER BY sam.is_user_confirmed DESC, sam.confidence DESC, sam.id
+                    LIMIT 1
+                    """,
+                    (clean_name,),
+                ).fetchone()
+                artist_id = str(row["external_id"]).strip() if row and row["external_id"] else None
+            entries.append(
+                {
+                    "artist_id": artist_id,
+                    "id": artist_id,
+                    "name": clean_name,
+                    "uri": f"spotify:artist:{artist_id}" if artist_id else None,
+                    "url": f"https://open.spotify.com/artist/{artist_id}" if artist_id else None,
+                    "image_url": None,
+                }
+            )
+    return entries
 
 
 @router.get("/tracks/release-track/{release_track_id}")
@@ -208,19 +251,27 @@ async def auth_current_playback(request: Request) -> dict[str, Any]:
 async def auth_artist_albums(
     request: Request,
     artist_names: list[str] | None = Query(default=None),
+    artist_ids: list[str] | None = Query(default=None),
     source_album_id: str | None = None,
     source_album_name: str | None = None,
 ) -> dict[str, Any]:
     _require_user_id(request)
+    token = _require_token(request)
     try:
+        normalized_artist_names = [str(name or "").strip() for name in (artist_names or []) if str(name or "").strip()]
         items = list_artist_album_evidence(
-            artist_names=artist_names or [],
+            artist_names=normalized_artist_names,
             source_album_id=source_album_id,
             source_album_name=source_album_name,
         )
+        artists = await resolve_artist_artwork(
+            _artist_entries_for_album_evidence(normalized_artist_names, artist_ids),
+            access_token=token,
+            allow_spotify_fetch=True,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Artist album evidence could not be loaded.") from exc
-    return {"items": items}
+    return {"items": items, "artists": artists}
 
 
 @router.post("/auth/playback/queue-playlist/sync")

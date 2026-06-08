@@ -258,8 +258,22 @@ function artistEntryFromDisplayText(value: string | null | undefined): TrackArti
   return name ? [{ name }] : [];
 }
 
-function hasStableArtistIdentity(artist: TrackArtistEntry | null | undefined): boolean {
-  return Boolean(artist?.artist_id?.trim() || artist?.id?.trim() || artist?.url?.trim() || artist?.image_url?.trim());
+function recordingMemberArtistEntries(member: RecordingTrackCandidateMember): TrackArtistEntry[] {
+  if (member.artists?.length) {
+    return uniqueArtistEntries(member.artists);
+  }
+  return String(member.artist ?? "")
+    .split("|")
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .map((name) => ({ name }));
+}
+
+function recordingMemberArtistDisplay(member: RecordingTrackCandidateMember) {
+  return recordingMemberArtistEntries(member)
+    .map((artist) => artist.name?.trim())
+    .filter(Boolean)
+    .join(", ");
 }
 
 function uniqueArtistEntries(...groups: Array<RecentTrack["artists"] | null | undefined>): TrackArtistEntry[] {
@@ -292,7 +306,9 @@ function uniqueArtistEntries(...groups: Array<RecentTrack["artists"] | null | un
 function artistEntriesForAlbumTrack(track: AlbumTrackEntry): TrackArtistEntry[] {
   return track.sourceTrack?.artists?.length
     ? uniqueArtistEntries(track.sourceTrack.artists)
-    : uniqueArtistEntries(artistEntryFromDisplayText(track.artistName));
+    : track.artists?.length
+      ? uniqueArtistEntries(track.artists)
+      : uniqueArtistEntries(artistEntriesFromText(track.artistName));
 }
 
 function artistNameMatches(candidate: string | null | undefined, target: string | null | undefined) {
@@ -304,6 +320,11 @@ function artistNameMatches(candidate: string | null | undefined, target: string 
     .split(",")
     .map((name) => name.trim().toLocaleLowerCase())
     .some((name) => name === normalizedTarget);
+}
+
+function nonYearArtistText(value: string | null | undefined) {
+  const text = String(value ?? "").trim();
+  return /^\d{4}$/.test(text) ? null : text || null;
 }
 
 function collaboratorLabel(artistNames: string | null | undefined, selectedArtistName: string | null | undefined) {
@@ -840,16 +861,9 @@ export function App() {
       ? (() => {
         const structuredArtists = uniqueArtistEntries(selectedPreview.artists, selectedPreview.sourceTrack?.artists);
         const displayArtistText = selectedPreview.artistName ?? selectedPreview.meta;
-        if (
-          structuredArtists.length > 1
-          && displayArtistText?.includes(",")
-          && !structuredArtists.some(hasStableArtistIdentity)
-        ) {
-          return uniqueArtistEntries(artistEntryFromDisplayText(displayArtistText));
-        }
         return structuredArtists.length > 0
           ? structuredArtists
-          : uniqueArtistEntries(artistEntryFromDisplayText(displayArtistText));
+          : uniqueArtistEntries(artistEntriesFromText(displayArtistText));
       })()
       : [];
   const selectedPreviewPrimaryArtistName = selectedPreview?.kind === "track" || selectedPreview?.kind === "album" || selectedPreview?.kind === "artist"
@@ -1183,10 +1197,30 @@ export function App() {
       artistNames,
       selectedPreview.sourceAlbumId ?? selectedPreview.sourceTrack?.album_id ?? null,
       selectedPreview.sourceAlbumName ?? selectedPreview.sourceTrack?.album_name ?? null,
+      selectedPreviewArtists.map((artist) => artist.artist_id ?? artist.id ?? null),
     )
       .then((payload) => {
         if (!cancelled) {
           setArtistAlbumEvidenceItems(payload.items);
+          const enrichedArtists = uniqueArtistEntries(payload.artists, selectedPreviewArtists);
+          const enrichedImage = enrichedArtists.find((artist) => Boolean(artist.image_url))?.image_url ?? null;
+          if (enrichedImage && (!selectedPreview.image || selectedPreview.image === selectedPreview.sourceAlbumImage)) {
+            setSelectedPreview((currentPreview) => {
+              if (
+                !currentPreview
+                || currentPreview.kind !== "artist"
+                || (currentPreview.image && currentPreview.image !== currentPreview.sourceAlbumImage)
+              ) {
+                return currentPreview;
+              }
+              return {
+                ...currentPreview,
+                image: enrichedImage,
+                artists: enrichedArtists,
+                targetArtists: enrichedArtists,
+              };
+            });
+          }
         }
       })
       .catch(() => {
@@ -2467,7 +2501,7 @@ export function App() {
             name?: string | null;
             uri?: string | null;
             duration_ms?: number | null;
-            artists?: Array<{ name?: string | null }>;
+            artists?: TrackArtistEntry[];
             release_track_id?: number | null;
             release_track_name?: string | null;
             release_track_source_count?: number | null;
@@ -2742,7 +2776,7 @@ export function App() {
             name?: string | null;
             uri?: string | null;
             duration_ms?: number | null;
-            artists?: Array<{ name?: string | null }>;
+            artists?: TrackArtistEntry[];
             release_track_id?: number | null;
             release_track_name?: string | null;
             release_track_source_count?: number | null;
@@ -2898,7 +2932,7 @@ export function App() {
       name?: string | null;
       uri?: string | null;
       duration_ms?: number | null;
-      artists?: Array<{ name?: string | null }>;
+      artists?: TrackArtistEntry[];
       release_track_id?: number | null;
       release_track_name?: string | null;
       release_track_source_count?: number | null;
@@ -2957,7 +2991,8 @@ export function App() {
 
     return items.map((item) => {
       const id = item.id ?? null;
-      const artistNames = (item.artists ?? []).map((artist) => artist.name ?? "").filter(Boolean).join(", ");
+      const itemArtists = uniqueArtistEntries(item.artists);
+      const artistNames = itemArtists.map((artist) => artist.name ?? "").filter(Boolean).join(", ");
       const normalizedKey = normalizedTrackArtistKey(item.name ?? null, artistNames || null);
       const isTopTrack = Boolean((id && topTrackIds.has(id)) || normalizedTopTrackKeys.has(normalizedKey));
       const sourceTrack = id ? (knownTracksById.get(id) ?? null) : null;
@@ -2971,6 +3006,7 @@ export function App() {
         uri: item.uri ?? null,
         durationMs: typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) ? Math.max(0, item.duration_ms) : null,
         artistName: artistNames || null,
+        artists: itemArtists,
         sourceTrack,
         lastPlayedAt,
         playCount: typeof item.play_count === "number" && Number.isFinite(item.play_count) ? Math.max(0, item.play_count) : (lastPlayedAt ? 1 : 0),
@@ -3163,11 +3199,13 @@ export function App() {
     const albumImageUrl = recordingMemberAlbumImageUrl(member);
     const releaseDate = albumReleaseDates.find((value) => /^\d{4}/.test(String(value ?? ""))) ?? null;
     const releaseYear = releaseDate ? String(releaseDate).slice(0, 4) : null;
+    const artistName = recordingMemberArtistDisplay(member);
+    const artists = recordingMemberArtistEntries(member);
     setSelectedPreview({
       image: albumImageUrl,
       fallbackLabel: "T",
       label: member.title || `Release track ${member.release_track_id}`,
-      meta: member.artist || null,
+      meta: artistName || null,
       detail: member.album || null,
       kind: "track",
       entityId: spotifyTrackId,
@@ -3179,8 +3217,8 @@ export function App() {
       releaseTrackSourceCount: sourceTrackDbIds.length || sourceTrackIds.length || null,
       hasReleaseTrackSiblings: sourceTrackDbIds.length > 1 || sourceTrackIds.length > 1,
       albumId,
-      artistName: member.artist || null,
-      artists: artistEntriesFromText(member.artist),
+      artistName: artistName || null,
+      artists,
       sourceAlbumId: albumId,
       sourceAlbumName: member.album || null,
       sourceAlbumImage: albumImageUrl,
@@ -4627,7 +4665,7 @@ export function App() {
       hasReleaseTrackSiblings: track.hasReleaseTrackSiblings,
       albumId: contextAlbumId,
       artistName: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview.artistName ?? null,
-      artists: uniqueArtistEntries(track.sourceTrack?.artists, artistEntryFromDisplayText(track.artistName)),
+      artists: artistEntriesForAlbumTrack(track),
       targetArtists: null,
       sourceAlbumId: contextAlbumId,
       sourceAlbumName: track.sourceTrack?.album_name ?? contextAlbumName,
@@ -4648,7 +4686,7 @@ export function App() {
     const sourceTrack = selectedPreview.sourceTrack ?? null;
     const artistId = targetArtist?.artist_id ?? targetArtist?.id ?? null;
     setSelectedPreview({
-      image: targetArtist?.image_url ?? selectedPreviewArtistImageUrl ?? findArtistImageUrl(artistName) ?? selectedPreview.image ?? null,
+      image: targetArtist?.image_url ?? selectedPreviewArtistImageUrl ?? findArtistImageUrl(artistName) ?? null,
       fallbackLabel: "A",
       label: artistName,
       meta: null,
@@ -4682,7 +4720,7 @@ export function App() {
     }
     const artistId = targetArtist?.artist_id ?? targetArtist?.id ?? null;
     setSelectedPreview({
-      image: targetArtist?.image_url ?? findArtistImageUrl(artistName) ?? selectedPreview.image ?? null,
+      image: targetArtist?.image_url ?? findArtistImageUrl(artistName) ?? null,
       fallbackLabel: "A",
       label: artistName,
       meta: null,
@@ -4717,7 +4755,7 @@ export function App() {
     const firstArtist = artists[0] ?? artist;
     const firstArtistId = firstArtist.artist_id ?? firstArtist.id ?? null;
     setSelectedPreview({
-      image: firstArtist.image_url ?? findArtistImageUrl(artistNames[0]) ?? selectedPreview.image ?? null,
+      image: firstArtist.image_url ?? findArtistImageUrl(artistNames[0]) ?? null,
       fallbackLabel: "A",
       label: artistNames.join(", "),
       meta: null,
@@ -4750,7 +4788,7 @@ export function App() {
     }
     const artistId = artist.artist_id ?? artist.id ?? null;
     setSelectedPreview({
-      image: artist.image_url ?? findArtistImageUrl(artistName) ?? selectedPreview.image ?? null,
+      image: artist.image_url ?? findArtistImageUrl(artistName) ?? null,
       fallbackLabel: "A",
       label: artistName,
       meta: null,
@@ -4807,16 +4845,25 @@ export function App() {
       return;
     }
     const sourceTrack = selectedPreview.sourceTrack ?? null;
-    const albumId = selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? selectedPreviewReleasePlaybackSourceVersion?.album_id ?? sourceTrack?.album_id ?? null;
-    const albumName = sourceTrack?.album_name ?? selectedPreviewReleasePlaybackSourceVersion?.album_name ?? selectedPreview.sourceAlbumName ?? selectedPreview.detail ?? "Unknown album";
-    const albumYear = sourceTrack?.album_release_year ?? selectedPreviewReleasePlaybackSourceVersion?.album_release_year ?? selectedPreview.sourceAlbumYear ?? null;
+    const albumId = selectedPreviewReleasePlaybackSourceVersion?.album_id ?? sourceTrack?.album_id ?? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? null;
+    const albumName = selectedPreviewReleasePlaybackSourceVersion?.album_name ?? sourceTrack?.album_name ?? selectedPreview.sourceAlbumName ?? selectedPreview.detail ?? "Unknown album";
+    const albumYear = selectedPreviewReleasePlaybackSourceVersion?.album_release_year ?? sourceTrack?.album_release_year ?? selectedPreview.sourceAlbumYear ?? null;
     const albumImage = selectedPreviewReleasePlaybackSourceVersion?.album_image_url ?? selectedPreview.sourceAlbumImage ?? selectedPreview.image ?? sourceTrack?.image_url ?? null;
-    const albumUrl = selectedPreview.sourceAlbumUrl ?? sourceTrack?.album_url ?? spotifyEntityUrl("album", albumId);
+    const albumUrl = spotifyEntityUrl("album", selectedPreviewReleasePlaybackSourceVersion?.album_id) || sourceTrack?.album_url || selectedPreview.sourceAlbumUrl || spotifyEntityUrl("album", albumId);
+    const albumArtistEntries = uniqueArtistEntries(
+      sourceTrack?.artists,
+      selectedPreview.artists,
+      artistEntriesFromText(nonYearArtistText(sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.meta)),
+    );
+    const albumArtistEntryText = albumArtistEntries.map((artist) => artist.name?.trim()).filter(Boolean).join(", ");
+    const albumArtistName = nonYearArtistText(sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.meta)
+      ?? (albumArtistEntryText || null)
+      ?? null;
     setSelectedPreview({
       image: albumImage,
       fallbackLabel: "L",
       label: albumName,
-      meta: sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.meta ?? null,
+      meta: albumArtistName,
       detail: albumYear,
       kind: "album",
       entityId: albumId,
@@ -4824,8 +4871,8 @@ export function App() {
       url: albumUrl,
       trackId: null,
       albumId,
-      artistName: sourceTrack?.artist_name ?? selectedPreview.artistName ?? null,
-      artists: uniqueArtistEntries(sourceTrack?.artists, selectedPreview.artists, artistEntryFromDisplayText(sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.meta)),
+      artistName: albumArtistName,
+      artists: albumArtistEntries,
       targetArtists: null,
       sourceAlbumId: albumId,
       sourceAlbumName: albumName,
@@ -9756,7 +9803,7 @@ export function App() {
   };
   const recordingMemberReleaseYear = (member: RecordingTrackCandidateMember) => {
     const rawDate = member.album_release_dates?.find((value) => /^\d{4}/.test(String(value ?? "")));
-    return rawDate ? String(rawDate).slice(0, 4) : "Year unknown";
+    return rawDate ? String(rawDate).slice(0, 4) : null;
   };
   const recordingMemberDurationLabel = (member: RecordingTrackCandidateMember) => {
     const durations = member.duration_values_ms?.length ? member.duration_values_ms : member.duration_ms ? [member.duration_ms] : [];

@@ -200,7 +200,7 @@ function memberDurationLabel(member: RecordingTrackCandidateMember) {
 
 function memberReleaseYear(member: RecordingTrackCandidateMember) {
   const rawDate = member.album_release_dates?.find((value) => /^\d{4}/.test(String(value ?? "")));
-  return rawDate ? String(rawDate).slice(0, 4) : "Year unknown";
+  return rawDate ? String(rawDate).slice(0, 4) : null;
 }
 
 function renderEvidencePills(item: RecordingTrackCandidateItem) {
@@ -235,7 +235,7 @@ function renderMember(member: RecordingTrackCandidateMember, onOpenReleaseTrack?
       <span className="identity-audit-variant-main">
         <strong>{member.title || `Release track ${member.release_track_id}`}</strong>
         <span>{member.artist || "Unknown artist"}</span>
-        <span>{member.album || "Unknown album"} · {memberReleaseYear(member)}</span>
+        <span>{[member.album || "Unknown album", memberReleaseYear(member)].filter(Boolean).join(" · ")}</span>
       </span>
       <span className="identity-audit-variant-stats">
         <span>release {member.release_track_id}</span>

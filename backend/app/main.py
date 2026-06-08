@@ -113,6 +113,7 @@ from backend.app.spotify_catalog_backfill import (
     list_spotify_catalog_backfill_queue,
     list_spotify_catalog_backfill_runs,
     preview_release_album_merge,
+    repair_safe_history_spotify_release_album_duplicates,
     repair_spotify_catalog_backfill_queue_statuses,
     run_spotify_catalog_backfill,
     search_album_catalog_duplicate_by_name_identities,
@@ -3011,6 +3012,16 @@ async def debug_identity_release_album_merge_dry_run(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="survivor_release_album_id must be an integer.")
     return dry_run_release_album_merge(release_album_ids, survivor_release_album_id=survivor_id)
+
+
+@app.post("/debug/identity/release-albums/history-spotify-repair")
+async def debug_identity_release_album_history_spotify_repair(
+    request: Request,
+    dry_run: bool = True,
+    limit: int = 50,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return repair_safe_history_spotify_release_album_duplicates(dry_run=dry_run, limit=limit)
 
 
 def _spotify_unauthenticated_response() -> JSONResponse:

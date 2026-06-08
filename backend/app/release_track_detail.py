@@ -15,7 +15,11 @@ class ReleaseTrackDetailNotFound(LookupError):
 
 
 class ReleaseTrackDetailArtist(TypedDict, total=False):
+    artist_id: str | None
+    id: str | None
     name: str
+    uri: str | None
+    url: str | None
     role: str | None
     billing_index: int | None
 
@@ -84,6 +88,10 @@ def _spotify_track_url(track_id: str | None) -> str | None:
     return f"https://open.spotify.com/track/{track_id}" if track_id else None
 
 
+def _spotify_artist_url(artist_id: str | None) -> str | None:
+    return f"https://open.spotify.com/artist/{artist_id}" if artist_id else None
+
+
 def _first_album_image_url(images_json: Any) -> str | None:
     for image in _json_list(images_json):
         if isinstance(image, dict) and image.get("url"):
@@ -99,8 +107,30 @@ def _artists_from_catalog_json(value: Any) -> list[ReleaseTrackDetailArtist]:
         name = str(artist.get("name") or "").strip()
         if not name:
             continue
-        artists.append({"name": name, "role": None, "billing_index": index})
+        artist_id = str(artist.get("id") or artist.get("artist_id") or "").strip() or None
+        artist_uri = str(artist.get("uri") or "").strip() or (f"spotify:artist:{artist_id}" if artist_id else None)
+        external_urls = artist.get("external_urls") if isinstance(artist.get("external_urls"), dict) else {}
+        artist_url = str(artist.get("url") or external_urls.get("spotify") or "").strip() or _spotify_artist_url(artist_id)
+        artists.append(
+            {
+                "artist_id": artist_id,
+                "id": artist_id,
+                "name": name,
+                "uri": artist_uri,
+                "url": artist_url,
+                "role": None,
+                "billing_index": index,
+            }
+        )
     return artists
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
 
 
 def _artist_name(artists: list[ReleaseTrackDetailArtist]) -> str | None:
@@ -178,6 +208,14 @@ def get_release_track_detail(
               stc.explicit AS catalog_explicit,
               stc.album_id AS catalog_album_id,
               stc.artists_json AS catalog_artists_json,
+              json_extract(st.raw_payload_json, '$.track.name') AS raw_track_name,
+              json_extract(st.raw_payload_json, '$.track.duration_ms') AS raw_duration_ms,
+              json_extract(st.raw_payload_json, '$.track.explicit') AS raw_explicit,
+              json_extract(st.raw_payload_json, '$.track.album.id') AS raw_album_id,
+              json_extract(st.raw_payload_json, '$.track.album.name') AS raw_album_name,
+              json_extract(st.raw_payload_json, '$.track.album.images') AS raw_album_images_json,
+              json_extract(st.raw_payload_json, '$.track.album.release_date') AS raw_album_release_date,
+              json_extract(st.raw_payload_json, '$.track.artists') AS raw_artists_json,
               stc.last_status AS catalog_last_status,
               sac.name AS catalog_album_name,
               sac.images_json AS catalog_album_images_json,
@@ -217,6 +255,10 @@ def get_release_track_detail(
     canonical_artists: list[ReleaseTrackDetailArtist] = [
         {
             "name": str(row["canonical_name"]),
+            "artist_id": None,
+            "id": None,
+            "uri": None,
+            "url": None,
             "role": str(row["role"]) if row["role"] is not None else None,
             "billing_index": _optional_int(row["billing_index"]),
         }
@@ -229,27 +271,26 @@ def get_release_track_detail(
         spotify_track_id = _spotify_track_id_from_source(row["source_name"], row["external_id"], row["external_uri"])
         uri = _spotify_uri(spotify_track_id, row["source_name"], row["external_id"], row["external_uri"])
         catalog_artists = _artists_from_catalog_json(row["catalog_artists_json"])
+        raw_artists = _artists_from_catalog_json(row["raw_artists_json"])
+        album_images_json = row["catalog_album_images_json"] or row["raw_album_images_json"]
+        album_release_date = row["catalog_album_release_date"] or row["raw_album_release_date"]
         versions.append(
             {
                 "source_track_id": int(row["source_track_id"]),
                 "spotify_track_id": spotify_track_id,
                 "uri": uri,
-                "name": (
-                    str(row["catalog_name"] or row["source_name_raw"])
-                    if row["catalog_name"] or row["source_name_raw"]
-                    else None
-                ),
-                "artists": catalog_artists or canonical_artists,
-                "album_id": str(row["catalog_album_id"]) if row["catalog_album_id"] else None,
-                "album_name": str(row["catalog_album_name"]) if row["catalog_album_name"] else None,
-                "album_image_url": _first_album_image_url(row["catalog_album_images_json"]),
+                "name": _first_text(row["catalog_name"], row["raw_track_name"], row["source_name_raw"]),
+                "artists": catalog_artists or raw_artists or canonical_artists,
+                "album_id": _first_text(row["catalog_album_id"], row["raw_album_id"]),
+                "album_name": _first_text(row["catalog_album_name"], row["raw_album_name"]),
+                "album_image_url": _first_album_image_url(album_images_json),
                 "album_release_year": (
-                    str(row["catalog_album_release_date"])[:4]
-                    if row["catalog_album_release_date"] and str(row["catalog_album_release_date"])[:4].isdigit()
+                    str(album_release_date)[:4]
+                    if album_release_date and str(album_release_date)[:4].isdigit()
                     else None
                 ),
-                "duration_ms": _optional_int(row["catalog_duration_ms"]),
-                "explicit": _optional_bool(row["catalog_explicit"]),
+                "duration_ms": _optional_int(row["catalog_duration_ms"]) or _optional_int(row["raw_duration_ms"]),
+                "explicit": _optional_bool(row["catalog_explicit"] if row["catalog_explicit"] is not None else row["raw_explicit"]),
                 "playable": None,
                 "play_count": int(row["play_count"] or 0),
                 "last_played_at": str(row["last_played_at"]) if row["last_played_at"] else None,

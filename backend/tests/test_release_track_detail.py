@@ -216,6 +216,79 @@ class ReleaseTrackDetailTests(unittest.TestCase):
         self.assertEqual((False, False), flags["track-a"])
         self.assertEqual((True, True), flags["track-b"])
 
+    def test_raw_spotify_payload_fills_missing_catalog_album_fields(self) -> None:
+        with sqlite_connection(write=True) as connection:
+            artist_id = int(
+                connection.execute(
+                    "INSERT INTO artist (canonical_name, sort_name) VALUES (?, ?)",
+                    ("Canonical Artist", "canonical artist"),
+                ).lastrowid
+            )
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name, duration_ms) VALUES (?, ?, ?)",
+                    ("Raw Song", "raw song", None),
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (release_track_id, artist_id),
+            )
+            raw_payload = {
+                "track": {
+                    "name": "Raw Song",
+                    "duration_ms": 170107,
+                    "explicit": False,
+                    "artists": [
+                        {
+                            "id": "artist-a",
+                            "name": "Raw Artist A",
+                            "uri": "spotify:artist:artist-a",
+                            "external_urls": {"spotify": "https://open.spotify.com/artist/artist-a"},
+                        },
+                        {"id": "artist-b", "name": "Raw Artist B"},
+                    ],
+                    "album": {
+                        "id": "raw-album",
+                        "name": "Raw Album",
+                        "release_date": "2026-05-01",
+                        "images": [{"url": "https://images.example/raw-album.jpg"}],
+                    },
+                }
+            }
+            source_track_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO source_track (
+                      source_name, external_id, external_uri, source_name_raw, raw_payload_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    ("spotify", "raw-track", "spotify:track:raw-track", "Raw Song", json.dumps(raw_payload)),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_map (
+                  source_track_id, release_track_id, match_method, confidence, status
+                ) VALUES (?, ?, 'test', 1.0, 'accepted')
+                """,
+                (source_track_id, release_track_id),
+            )
+
+        payload = get_release_track_detail(release_track_id, context_spotify_track_id="raw-track")
+
+        self.assertEqual("raw-track", payload["playback"]["spotify_track_id"])
+        self.assertEqual("Raw Album", payload["display"]["album_name"])
+        self.assertEqual("https://images.example/raw-album.jpg", payload["display"]["image_url"])
+        version = payload["source_versions"][0]
+        self.assertEqual("raw-album", version["album_id"])
+        self.assertEqual("Raw Album", version["album_name"])
+        self.assertEqual("2026", version["album_release_year"])
+        self.assertEqual(170107, version["duration_ms"])
+        self.assertEqual(["Raw Artist A", "Raw Artist B"], [artist["name"] for artist in version["artists"]])
+        self.assertEqual("artist-a", version["artists"][0]["artist_id"])
+        self.assertEqual("https://open.spotify.com/artist/artist-b", version["artists"][1]["url"])
+
     def test_context_spotify_track_id_is_ignored_when_it_does_not_belong(self) -> None:
         release_track_id = self._seed_release_track()
         payload = get_release_track_detail(release_track_id, context_spotify_track_id="other-track")

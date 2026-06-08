@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 import httpx
 
-from backend.app.db import sqlite_connection
+from backend.app.db import mark_generated_recording_track_clusters_dirty_with_connection, sqlite_connection
 from backend.app.track_identity_audit import track_identity_readiness_source_ctes
 
 
@@ -6652,6 +6652,326 @@ def dry_run_release_album_merge(
         "release_album_retirements": release_album_retirements,
     }
     return base_response
+
+
+def _spotify_album_ids_for_release_album(connection: sqlite3.Connection, release_album_id: int) -> list[str]:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT sa.external_id
+        FROM source_album_map sam
+        JOIN source_album sa
+          ON sa.id = sam.source_album_id
+        WHERE sam.release_album_id = ?
+          AND sam.status = 'accepted'
+          AND sa.source_name = 'spotify'
+          AND sa.external_id IS NOT NULL
+          AND trim(sa.external_id) != ''
+        ORDER BY sa.external_id ASC
+        """,
+        (release_album_id,),
+    ).fetchall()
+    return [str(row[0]) for row in rows if row[0]]
+
+
+def _release_track_has_spotify_album_evidence(
+    connection: sqlite3.Connection,
+    *,
+    release_track_id: int,
+    spotify_album_id: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM source_track_map stm
+        JOIN source_track st
+          ON st.id = stm.source_track_id
+        LEFT JOIN spotify_track_catalog stc
+          ON stc.spotify_track_id = CASE
+            WHEN st.source_name = 'spotify' THEN st.external_id
+            WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+            WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+            ELSE NULL
+          END
+        LEFT JOIN spotify_album_track sat
+          ON sat.spotify_album_id = ?
+         AND sat.spotify_track_id = CASE
+            WHEN st.source_name = 'spotify' THEN st.external_id
+            WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+            WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+            ELSE NULL
+          END
+        WHERE stm.release_track_id = ?
+          AND stm.status = 'accepted'
+          AND st.source_name IN ('spotify', 'spotify_uri')
+          AND (
+            stc.album_id = ?
+            OR json_extract(st.raw_payload_json, '$.track.album.id') = ?
+            OR sat.spotify_track_id IS NOT NULL
+          )
+        LIMIT 1
+        """,
+        (spotify_album_id, release_track_id, spotify_album_id, spotify_album_id),
+    ).fetchone()
+    return row is not None
+
+
+def _plan_is_safe_history_spotify_album_merge(plan: dict[str, Any]) -> tuple[bool, list[str]]:
+    if not plan.get("ok") or plan.get("blocked"):
+        return False, [str(reason) for reason in plan.get("blocked_reasons", [])] or ["Merge plan is blocked."]
+    readiness = str(plan.get("merge_readiness") or "")
+    if readiness == "safe_candidate":
+        return True, []
+    if readiness != "needs_review":
+        return False, [f"Merge readiness is {readiness or 'unknown'}, not safe_candidate."]
+    reasons = [str(reason) for reason in plan.get("readiness_reasons", [])]
+    unsafe_reasons = [
+        reason for reason in reasons
+        if "album-track rows would collide" not in reason
+    ]
+    if unsafe_reasons:
+        return False, unsafe_reasons
+    return True, []
+
+
+def apply_release_album_merge(
+    release_album_ids: list[int],
+    *,
+    survivor_release_album_id: int | None,
+    allow_safe_history_spotify_conflicts: bool = False,
+) -> dict[str, Any]:
+    plan = dry_run_release_album_merge(
+        release_album_ids,
+        survivor_release_album_id=survivor_release_album_id,
+    )
+    if allow_safe_history_spotify_conflicts:
+        safe_enough, blocked_reasons = _plan_is_safe_history_spotify_album_merge(plan)
+    else:
+        safe_enough = plan.get("ok") and not plan.get("blocked") and plan.get("merge_readiness") == "safe_candidate"
+        blocked_reasons = [] if safe_enough else ["Only safe_candidate release album merge plans can be applied."]
+    response = {
+        **plan,
+        "mode": "apply",
+        "applied": False,
+        "blocked": not safe_enough,
+        "blocked_reasons": blocked_reasons if not safe_enough else [],
+    }
+    if not safe_enough:
+        return response
+
+    survivor_id = int(survivor_release_album_id or plan["survivor_release_album_id"])
+    plan_rows = plan.get("plan") or {}
+    source_album_map_repoints = plan_rows.get("source_album_map_repoints") or []
+    album_artist_inserts = plan_rows.get("album_artist_inserts") or []
+    album_artist_deletes = plan_rows.get("album_artist_deletes") or []
+    album_track_repoints = plan_rows.get("album_track_repoints") or []
+    album_track_conflicts = plan_rows.get("album_track_conflicts") or []
+    release_album_retirements = plan_rows.get("release_album_retirements") or []
+
+    with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+        touched_release_track_ids = {
+            int(row["release_track_id"])
+            for row in [*album_track_repoints, *album_track_conflicts]
+            if row.get("release_track_id") is not None
+        }
+        for row in source_album_map_repoints:
+            if row.get("would_conflict"):
+                connection.execute("DELETE FROM source_album_map WHERE id = ?", (int(row["source_album_map_id"]),))
+            else:
+                connection.execute(
+                    "UPDATE source_album_map SET release_album_id = ? WHERE id = ?",
+                    (survivor_id, int(row["source_album_map_id"])),
+                )
+        for row in album_artist_inserts:
+            connection.execute(
+                """
+                UPDATE album_artist
+                SET release_album_id = ?
+                WHERE id = ?
+                """,
+                (survivor_id, int(row["from_album_artist_id"])),
+            )
+        moved_album_artist_ids = {int(row["from_album_artist_id"]) for row in album_artist_inserts}
+        for row in album_artist_deletes:
+            if int(row["album_artist_id"]) in moved_album_artist_ids:
+                continue
+            connection.execute("DELETE FROM album_artist WHERE id = ?", (int(row["album_artist_id"]),))
+        for row in album_track_repoints:
+            connection.execute(
+                "UPDATE album_track SET release_album_id = ? WHERE id = ?",
+                (survivor_id, int(row["album_track_id"])),
+            )
+        for row in album_track_conflicts:
+            connection.execute("DELETE FROM album_track WHERE id = ?", (int(row["album_track_id"]),))
+        for row in release_album_retirements:
+            connection.execute("DELETE FROM release_album WHERE id = ?", (int(row["release_album_id"]),))
+        if touched_release_track_ids:
+            mark_generated_recording_track_clusters_dirty_with_connection(
+                connection,
+                touched_release_track_ids,
+                reason="release_album_merge",
+            )
+    response["applied"] = True
+    response["blocked"] = False
+    response["blocked_reasons"] = []
+    response["performed_action"] = "merged_release_albums"
+    return response
+
+
+def _safe_history_spotify_release_album_merge_candidates(limit: int) -> list[dict[str, Any]]:
+    bounded_limit = max(1, min(int(limit), 200))
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            WITH primary_artists AS (
+              SELECT
+                ordered.release_album_id,
+                group_concat(ordered.artist_name, ' | ') AS artist_signature
+              FROM (
+                SELECT
+                  aa.release_album_id,
+                  a.canonical_name AS artist_name
+                FROM album_artist aa
+                JOIN artist a
+                  ON a.id = aa.artist_id
+                WHERE aa.role = 'primary'
+                ORDER BY aa.release_album_id, COALESCE(aa.billing_index, 999999), aa.id, a.canonical_name
+              ) ordered
+              GROUP BY ordered.release_album_id
+            ),
+            spotify_maps AS (
+              SELECT
+                sam.release_album_id,
+                group_concat(DISTINCT sa.external_id) AS spotify_album_ids,
+                count(DISTINCT sa.external_id) AS spotify_album_id_count
+              FROM source_album_map sam
+              JOIN source_album sa
+                ON sa.id = sam.source_album_id
+              WHERE sam.status = 'accepted'
+                AND sa.source_name = 'spotify'
+                AND sa.external_id IS NOT NULL
+                AND trim(sa.external_id) != ''
+              GROUP BY sam.release_album_id
+            )
+            SELECT
+              ra.id AS release_album_id,
+              ra.primary_name AS release_album_name,
+              ra.normalized_name AS normalized_album_name,
+              COALESCE(pa.artist_signature, '') AS artist_signature,
+              COALESCE(sm.spotify_album_ids, '') AS spotify_album_ids,
+              COALESCE(sm.spotify_album_id_count, 0) AS spotify_album_id_count
+            FROM release_album ra
+            LEFT JOIN primary_artists pa
+              ON pa.release_album_id = ra.id
+            LEFT JOIN spotify_maps sm
+              ON sm.release_album_id = ra.id
+            WHERE COALESCE(ra.normalized_name, '') != ''
+              AND COALESCE(pa.artist_signature, '') != ''
+            ORDER BY ra.normalized_name ASC, pa.artist_signature ASC, ra.id ASC
+            """
+        ).fetchall()
+
+    groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        key = (str(row["normalized_album_name"] or ""), _normalize_identity_text(row["artist_signature"]))
+        if not key[0] or not key[1]:
+            continue
+        groups.setdefault(key, []).append(row)
+
+    candidates: list[dict[str, Any]] = []
+    for (normalized_album_name, normalized_artist), group_rows in groups.items():
+        spotify_rows = [
+            row for row in group_rows
+            if int(row["spotify_album_id_count"] or 0) == 1
+        ]
+        history_rows = [
+            row for row in group_rows
+            if int(row["spotify_album_id_count"] or 0) == 0
+        ]
+        spotify_album_ids = sorted({
+            spotify_album_id
+            for row in spotify_rows
+            for spotify_album_id in str(row["spotify_album_ids"] or "").split(",")
+            if spotify_album_id
+        })
+        if len(spotify_rows) != 1 or len(history_rows) == 0 or len(spotify_album_ids) != 1:
+            continue
+        release_album_ids = [int(spotify_rows[0]["release_album_id"])] + [
+            int(row["release_album_id"]) for row in history_rows
+        ]
+        preview = preview_release_album_merge(release_album_ids)
+        if int(preview.get("survivor_release_album_id") or 0) != int(spotify_rows[0]["release_album_id"]):
+            continue
+        dry_run = dry_run_release_album_merge(
+            release_album_ids,
+            survivor_release_album_id=int(spotify_rows[0]["release_album_id"]),
+        )
+        safe_enough, blocked_reasons = _plan_is_safe_history_spotify_album_merge(dry_run)
+        if safe_enough:
+            spotify_album_id = spotify_album_ids[0]
+            with sqlite_connection(row_factory=sqlite3.Row) as connection:
+                unsafe_repoints = [
+                    row for row in dry_run["plan"]["album_track_repoints"]
+                    if not _release_track_has_spotify_album_evidence(
+                        connection,
+                        release_track_id=int(row["release_track_id"]),
+                        spotify_album_id=spotify_album_id,
+                    )
+                ]
+            if unsafe_repoints:
+                safe_enough = False
+                blocked_reasons = ["One or more album-track repoints lack Spotify album evidence."]
+        candidates.append(
+            {
+                "release_album_ids": release_album_ids,
+                "survivor_release_album_id": int(spotify_rows[0]["release_album_id"]),
+                "merge_release_album_ids": [int(row["release_album_id"]) for row in history_rows],
+                "spotify_album_id": spotify_album_ids[0],
+                "release_album_name": str(spotify_rows[0]["release_album_name"] or ""),
+                "normalized_album_name": normalized_album_name,
+                "normalized_artist": normalized_artist,
+                "safe": safe_enough,
+                "blocked_reasons": blocked_reasons,
+                "merge_readiness": dry_run.get("merge_readiness"),
+                "rows_affected": dry_run.get("rows_affected"),
+                "plan": dry_run.get("plan"),
+            }
+        )
+        if len(candidates) >= bounded_limit:
+            break
+    return candidates
+
+
+def repair_safe_history_spotify_release_album_duplicates(
+    *,
+    dry_run: bool = True,
+    limit: int = 50,
+) -> dict[str, Any]:
+    candidates = _safe_history_spotify_release_album_merge_candidates(limit)
+    safe_candidates = [candidate for candidate in candidates if candidate["safe"]]
+    applied_results: list[dict[str, Any]] = []
+    if not dry_run:
+        for candidate in safe_candidates:
+            applied_results.append(
+                apply_release_album_merge(
+                    candidate["release_album_ids"],
+                    survivor_release_album_id=candidate["survivor_release_album_id"],
+                    allow_safe_history_spotify_conflicts=True,
+                )
+            )
+    return {
+        "ok": True,
+        "mode": "dry_run" if dry_run else "apply",
+        "candidate_count": len(candidates),
+        "safe_candidate_count": len(safe_candidates),
+        "applied_count": sum(1 for result in applied_results if result.get("applied")),
+        "items": candidates,
+        "applied_results": applied_results,
+        "source": {
+            "kind": "sqlite",
+            "uses_spotify_api": False,
+            "mutates_identity": not dry_run,
+        },
+    }
 
 
 def search_track_catalog_lookup(

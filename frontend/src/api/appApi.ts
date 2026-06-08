@@ -206,6 +206,7 @@ export async function fetchArtistAlbumEvidence(
     artistNames: string[],
     sourceAlbumId?: string | null,
     sourceAlbumName?: string | null,
+    artistIds?: Array<string | null | undefined>,
   ): Promise<ArtistAlbumEvidenceResponse> {
     const params = new URLSearchParams();
     for (const artistName of artistNames) {
@@ -219,6 +220,12 @@ export async function fetchArtistAlbumEvidence(
     }
     if (sourceAlbumName?.trim()) {
       params.set("source_album_name", sourceAlbumName.trim());
+    }
+    for (const artistId of artistIds ?? []) {
+      const cleanId = artistId?.trim();
+      if (cleanId) {
+        params.append("artist_ids", cleanId);
+      }
     }
     const response = await fetch(`${apiBaseUrl}/auth/artist-albums?${params.toString()}`, {
       credentials: "include",

@@ -91,6 +91,7 @@ class RecordingTrackCandidateMember(TypedDict):
     release_track_id: int
     title: str
     artist: str
+    artists: list[dict[str, Any]]
     album: str
     release_album_ids: list[int]
     spotify_album_ids: list[str]
@@ -117,6 +118,35 @@ def _split_aggregate(value: Any) -> list[str]:
     return [item for item in (str(part).strip() for part in str(value).split("|")) if item]
 
 
+def _json_list(value: Any) -> list[Any]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _artist_entries_from_json(value: Any) -> list[dict[str, Any]]:
+    artists: list[dict[str, Any]] = []
+    for item in _json_list(value):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        artists.append(
+            {
+                "artist_id": str(item["artist_id"]) if item.get("artist_id") is not None else None,
+                "name": name,
+                "role": item.get("role"),
+                "billing_index": item.get("billing_index"),
+            }
+        )
+    return artists
+
+
 def _split_int_aggregate(value: Any) -> list[int]:
     items: list[int] = []
     for part in _split_aggregate(value):
@@ -135,6 +165,19 @@ def _unique_values(values: list[str]) -> list[str]:
         if not clean or clean in seen:
             continue
         seen.add(clean)
+        unique.append(clean)
+    return unique
+
+
+def _unique_display_values(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = str(value or "").strip()
+        key = _normalize_text(clean)
+        if not clean or not key or key in seen:
+            continue
+        seen.add(key)
         unique.append(clean)
     return unique
 
@@ -328,6 +371,22 @@ def _member_album_context(member: RecordingTrackCandidateMember) -> str:
     if context == "album" and _normalize_text(member["album"]) == _base_title(member["title"]):
         return "single"
     return context
+
+
+def _has_duplicate_display_values(value: Any) -> bool:
+    parts = [part.strip() for part in str(value or "").split(",") if part.strip()]
+    normalized = [_normalize_text(part) for part in parts]
+    normalized = [part for part in normalized if part]
+    return len(normalized) > len(set(normalized))
+
+
+def _generated_item_needs_display_refresh(item: dict[str, Any]) -> bool:
+    for member in item.get("members") or []:
+        if not isinstance(member, dict):
+            continue
+        if _has_duplicate_display_values(member.get("album")):
+            return True
+    return False
 
 
 def _earliest_release_year(member: RecordingTrackCandidateMember) -> int | None:
@@ -577,7 +636,7 @@ def classify_recording_track_candidate_group(
 
 def _candidate_member_from_row(row: sqlite3.Row) -> RecordingTrackCandidateMember:
     title = str(row["title"] or "")
-    album_names = _split_aggregate(row["album_names"])
+    album_names = _unique_display_values(_split_aggregate(row["album_names"]))
     release_album_ids = _split_int_aggregate(row["release_album_ids"])
     spotify_album_ids = _unique_values(_split_aggregate(row["spotify_album_ids"]))
     album_image_urls = _unique_values(_split_aggregate(row["album_image_urls"]))
@@ -593,6 +652,7 @@ def _candidate_member_from_row(row: sqlite3.Row) -> RecordingTrackCandidateMembe
         "release_track_id": int(row["release_track_id"]),
         "title": title,
         "artist": str(row["artist"] or ""),
+        "artists": _artist_entries_from_json(row["artists_json"]),
         "album": ", ".join(album_names),
         "release_album_ids": release_album_ids,
         "spotify_album_ids": spotify_album_ids,
@@ -641,11 +701,22 @@ def _candidate_source_rows(
         WITH primary_artists AS (
           SELECT
             ordered.release_track_id,
-            group_concat(ordered.artist_name, ' | ') AS artist_signature
+            group_concat(ordered.artist_name, ' | ') AS artist_signature,
+            json_group_array(
+              json_object(
+                'artist_id', ordered.artist_id,
+                'name', ordered.artist_name,
+                'role', ordered.role,
+                'billing_index', ordered.billing_index
+              )
+            ) AS artists_json
           FROM (
             SELECT
               ta.release_track_id,
-              a.canonical_name AS artist_name
+              ta.artist_id,
+              a.canonical_name AS artist_name,
+              ta.role,
+              ta.billing_index
             FROM track_artist ta
             JOIN artist a ON a.id = ta.artist_id
             WHERE ta.role = 'primary'
@@ -696,18 +767,85 @@ def _candidate_source_rows(
             SELECT
               stm.release_track_id,
               st.id AS source_track_db_id,
-              st.external_id AS spotify_track_id,
-              COALESCE(st.external_uri, CASE WHEN st.source_name = 'spotify' THEN 'spotify:track:' || st.external_id ELSE NULL END) AS external_uri,
-              NULLIF(TRIM(COALESCE(st.isrc, json_extract(COALESCE(stc.raw_json, '{{}}'), '$.external_ids.isrc'))), '') AS isrc,
-              stc.duration_ms AS duration_ms,
-              stc.album_id AS catalog_album_id,
-              json_extract(stc_album.images_json, '$[0].url') AS catalog_album_image_url,
-              stc_album.release_date AS catalog_release_date,
-              stc_album.album_type AS catalog_album_type
+              CASE
+                WHEN st.source_name = 'spotify' THEN st.external_id
+                WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+                WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+                ELSE st.external_id
+              END AS spotify_track_id,
+              COALESCE(
+                st.external_uri,
+                CASE
+                  WHEN st.source_name = 'spotify' THEN 'spotify:track:' || st.external_id
+                  WHEN st.source_name = 'spotify_uri' THEN st.external_id
+                  ELSE NULL
+                END
+              ) AS external_uri,
+              NULLIF(TRIM(COALESCE(
+                st.isrc,
+                json_extract(COALESCE(stc.raw_json, '{{}}'), '$.external_ids.isrc'),
+                CASE
+                  WHEN json_valid(st.raw_payload_json)
+                  THEN json_extract(st.raw_payload_json, '$.track.external_ids.isrc')
+                  ELSE NULL
+                END
+              )), '') AS isrc,
+              COALESCE(
+                stc.duration_ms,
+                CASE
+                  WHEN json_valid(st.raw_payload_json)
+                  THEN json_extract(st.raw_payload_json, '$.track.duration_ms')
+                  ELSE NULL
+                END
+              ) AS duration_ms,
+              COALESCE(
+                stc.album_id,
+                CASE
+                  WHEN json_valid(st.raw_payload_json)
+                  THEN json_extract(st.raw_payload_json, '$.track.album.id')
+                  ELSE NULL
+                END
+              ) AS catalog_album_id,
+              COALESCE(
+                json_extract(stc_album.images_json, '$[0].url'),
+                CASE
+                  WHEN json_valid(st.raw_payload_json)
+                  THEN json_extract(st.raw_payload_json, '$.track.album.images[0].url')
+                  ELSE NULL
+                END
+              ) AS catalog_album_image_url,
+              COALESCE(
+                stc_album.release_date,
+                CASE
+                  WHEN json_valid(st.raw_payload_json)
+                  THEN json_extract(st.raw_payload_json, '$.track.album.release_date')
+                  ELSE NULL
+                END
+              ) AS catalog_release_date,
+              COALESCE(
+                stc_album.album_type,
+                CASE
+                  WHEN json_valid(st.raw_payload_json)
+                  THEN json_extract(st.raw_payload_json, '$.track.album.album_type')
+                  ELSE NULL
+                END
+              ) AS catalog_album_type
             FROM source_track_map stm
             JOIN source_track st ON st.id = stm.source_track_id
-            LEFT JOIN spotify_track_catalog stc ON stc.spotify_track_id = st.external_id
-            LEFT JOIN spotify_album_catalog stc_album ON stc_album.spotify_album_id = stc.album_id
+            LEFT JOIN spotify_track_catalog stc ON stc.spotify_track_id = CASE
+              WHEN st.source_name = 'spotify' THEN st.external_id
+              WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+              WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+              ELSE st.external_id
+            END
+            LEFT JOIN spotify_album_catalog stc_album ON stc_album.spotify_album_id = COALESCE(
+              stc.album_id,
+              CASE
+                WHEN json_valid(st.raw_payload_json)
+                THEN json_extract(st.raw_payload_json, '$.track.album.id')
+                ELSE NULL
+              END
+            )
             WHERE stm.status = 'accepted'
               AND st.source_name IN ('spotify', 'spotify_uri')
             ORDER BY stm.release_track_id, st.id
@@ -720,6 +858,7 @@ def _candidate_source_rows(
           rt.normalized_name AS normalized_title,
           rt.duration_ms AS duration_ms,
           COALESCE(pa.artist_signature, '') AS artist,
+          COALESCE(pa.artists_json, '[]') AS artists_json,
           COALESCE(ral.release_album_ids, '') AS release_album_ids,
           COALESCE(ral.spotify_album_ids, sr.catalog_album_ids, '') AS spotify_album_ids,
           COALESCE(ral.album_image_urls, sr.catalog_album_image_urls, '') AS album_image_urls,
@@ -740,6 +879,50 @@ def _candidate_source_rows(
         """,
         tuple(params),
     ).fetchall()
+
+
+def _hydrate_candidate_items_with_current_member_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    release_track_ids = {
+        int(member["release_track_id"])
+        for item in items
+        for member in item.get("members", [])
+        if isinstance(member, dict) and isinstance(member.get("release_track_id"), int)
+    }
+    if not release_track_ids:
+        return items
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        current_members = {
+            member["release_track_id"]: member
+            for member in (_candidate_member_from_row(row) for row in _candidate_source_rows(connection, release_track_ids=release_track_ids))
+        }
+    display_fields = (
+        "title",
+        "artist",
+        "artists",
+        "album",
+        "release_album_ids",
+        "spotify_album_ids",
+        "album_image_urls",
+        "album_release_dates",
+        "album_types",
+        "source_track_ids",
+        "source_track_db_ids",
+        "source_track_uris",
+        "isrc",
+        "isrc_values",
+        "duration_ms",
+        "duration_values_ms",
+    )
+    for item in items:
+        for member in item.get("members", []):
+            if not isinstance(member, dict):
+                continue
+            current_member = current_members.get(int(member.get("release_track_id") or 0))
+            if not current_member:
+                continue
+            for field in display_fields:
+                member[field] = current_member[field]
+    return items
 
 
 def _item_isrc_values(item: dict[str, Any]) -> set[str]:
@@ -1178,6 +1361,29 @@ def _generated_candidate_items_for_release_track(release_track_id: int) -> list[
             continue
         if isinstance(value, dict):
             items.append(value)
+    items = _hydrate_candidate_items_with_current_member_metadata(items)
+    if any(_generated_item_needs_display_refresh(item) for item in items):
+        refresh_generated_recording_track_clusters_for_release_tracks([release_track_id])
+        with sqlite_connection(row_factory=sqlite3.Row) as connection:
+            rows = connection.execute(
+                """
+                SELECT c.candidate_snapshot_json
+                FROM generated_recording_track_cluster_member m
+                JOIN generated_recording_track_cluster c
+                  ON c.id = m.cluster_id
+                WHERE m.release_track_id = ?
+                """,
+                (release_track_id,),
+            ).fetchall()
+        items = []
+        for row in rows:
+            try:
+                value = json.loads(str(row["candidate_snapshot_json"] or "{}"))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                items.append(value)
+        items = _hydrate_candidate_items_with_current_member_metadata(items)
     return items
 
 

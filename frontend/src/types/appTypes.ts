@@ -166,7 +166,11 @@ export type ReleaseTrackMetadataResponse = {
 };
 
 export type ReleaseTrackDetailArtist = {
+  artist_id?: string | null;
+  id?: string | null;
   name: string;
+  uri?: string | null;
+  url?: string | null;
   role?: string | null;
   billing_index?: number | null;
 };
@@ -246,6 +250,7 @@ export type ArtistAlbumEvidenceItem = {
 
 export type ArtistAlbumEvidenceResponse = {
   items: ArtistAlbumEvidenceItem[];
+  artists?: TrackArtistEntry[];
 };
 
 export type MatchCounts = {
@@ -501,6 +506,7 @@ export type RecordingTrackCandidateMember = {
   release_track_id: number;
   title: string;
   artist: string;
+  artists?: TrackArtistEntry[];
   album: string;
   release_album_ids?: number[];
   spotify_album_ids?: string[];
@@ -1745,6 +1751,7 @@ export type AlbumTrackEntry = {
   uri: string | null;
   durationMs: number | null;
   artistName: string | null;
+  artists?: TrackArtistEntry[];
   sourceTrack: RecentTrack | null;
   lastPlayedAt: string | null;
   playCount: number;

@@ -53,8 +53,54 @@ def _release_year(value: Any) -> str | None:
     return text[:4] if len(text) >= 4 else None
 
 
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
 def _spotify_album_url(album_id: str | None) -> str | None:
     return f"https://open.spotify.com/album/{album_id}" if album_id else None
+
+
+def _metadata_candidate_matches_release(candidate: dict[str, Any], entry: dict[str, Any]) -> bool:
+    candidate_id = str(candidate.get("album_id") or "").strip()
+    entry_id = str(entry.get("spotify_album_id") or "").strip()
+    if candidate_id and entry_id and candidate_id == entry_id:
+        return True
+    candidate_name = _normalize_name(candidate.get("album_name"))
+    entry_name = _normalize_name(entry.get("album_name"))
+    return bool(candidate_name and entry_name and candidate_name == entry_name)
+
+
+def _apply_entity_album_metadata(
+    albums: dict[int, dict[str, Any]],
+    metadata_rows: list[sqlite3.Row],
+) -> None:
+    for row in metadata_rows:
+        release_album_id = int(row["release_album_id"])
+        entry = albums.get(release_album_id)
+        if not entry:
+            continue
+        candidate = {
+            "album_id": _first_text(row["catalog_album_id"], row["raw_album_id"]),
+            "album_name": _first_text(row["catalog_album_name"], row["raw_album_name"]),
+            "image_url": _first_image_url(row["catalog_album_images_json"]) or _first_image_url(row["raw_album_images_json"]),
+            "release_year": _release_year(row["catalog_album_release_date"]) or _release_year(row["raw_album_release_date"]),
+            "total_tracks": row["catalog_total_tracks"],
+        }
+        if not _metadata_candidate_matches_release(candidate, entry):
+            continue
+        if not entry.get("spotify_album_id") and candidate["album_id"]:
+            entry["spotify_album_id"] = candidate["album_id"]
+        if not entry.get("image_url") and candidate["image_url"]:
+            entry["image_url"] = candidate["image_url"]
+        if not entry.get("release_year") and candidate["release_year"]:
+            entry["release_year"] = candidate["release_year"]
+        if not entry.get("total_tracks") and candidate["total_tracks"] is not None:
+            entry["total_tracks"] = int(candidate["total_tracks"])
 
 
 def _dedupe_key(item: dict[str, Any]) -> str:
@@ -140,6 +186,68 @@ def _entity_album_evidence(
         ORDER BY ra.primary_name, aa.billing_index, a.canonical_name
         """
     ).fetchall()
+    metadata_rows = connection.execute(
+        """
+        SELECT
+          at.release_album_id AS release_album_id,
+          stc.album_id AS catalog_album_id,
+          sac.name AS catalog_album_name,
+          sac.images_json AS catalog_album_images_json,
+          sac.release_date AS catalog_album_release_date,
+          sac.total_tracks AS catalog_total_tracks,
+          CASE
+            WHEN json_valid(st.raw_payload_json)
+            THEN COALESCE(
+              json_extract(st.raw_payload_json, '$.track.album.id'),
+              json_extract(st.raw_payload_json, '$.album.id')
+            )
+            ELSE NULL
+          END AS raw_album_id,
+          CASE
+            WHEN json_valid(st.raw_payload_json)
+            THEN COALESCE(
+              json_extract(st.raw_payload_json, '$.track.album.name'),
+              json_extract(st.raw_payload_json, '$.album.name')
+            )
+            ELSE NULL
+          END AS raw_album_name,
+          CASE
+            WHEN json_valid(st.raw_payload_json)
+            THEN COALESCE(
+              json_extract(st.raw_payload_json, '$.track.album.images'),
+              json_extract(st.raw_payload_json, '$.album.images')
+            )
+            ELSE NULL
+          END AS raw_album_images_json,
+          CASE
+            WHEN json_valid(st.raw_payload_json)
+            THEN COALESCE(
+              json_extract(st.raw_payload_json, '$.track.album.release_date'),
+              json_extract(st.raw_payload_json, '$.album.release_date')
+            )
+            ELSE NULL
+          END AS raw_album_release_date
+        FROM album_track at
+        JOIN source_track_map stm
+          ON stm.release_track_id = at.release_track_id
+         AND stm.status = 'accepted'
+        JOIN source_track st
+          ON st.id = stm.source_track_id
+         AND st.source_name IN ('spotify', 'spotify_uri')
+        LEFT JOIN spotify_track_catalog stc
+          ON stc.spotify_track_id = CASE
+            WHEN st.source_name = 'spotify' THEN st.external_id
+            WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+            WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+            ELSE NULL
+          END
+         AND lower(COALESCE(stc.last_status, '')) != 'error'
+        LEFT JOIN spotify_album_catalog sac
+          ON sac.spotify_album_id = stc.album_id
+         AND lower(COALESCE(sac.last_status, '')) != 'error'
+        ORDER BY at.release_album_id, at.id, st.id
+        """
+    ).fetchall()
 
     albums: dict[int, dict[str, Any]] = {}
     for row in album_rows:
@@ -150,7 +258,9 @@ def _entity_album_evidence(
                 "album_name": str(row["album_name"] or "").strip(),
                 "release_year": str(row["release_year"]) if row["release_year"] is not None else None,
                 "spotify_album_id": None,
+                "image_url": None,
                 "track_count": 0,
+                "total_tracks": None,
                 "album_artist_names": [],
                 "album_artist_keys": set(),
             },
@@ -164,6 +274,8 @@ def _entity_album_evidence(
         if source_album_id and not entry["spotify_album_id"]:
             entry["spotify_album_id"] = source_album_id
         entry["track_count"] = max(int(entry["track_count"] or 0), int(row["track_count"] or 0))
+
+    _apply_entity_album_metadata(albums, metadata_rows)
 
     items_by_name: dict[str, dict[str, Any]] = {}
     for entry in albums.values():
@@ -179,10 +291,10 @@ def _entity_album_evidence(
             "album_id": album_id,
             "album_name": album_name,
             "album_artist_names": list(entry["album_artist_names"]),
-            "image_url": None,
+            "image_url": entry["image_url"],
             "url": _spotify_album_url(album_id),
             "release_year": entry["release_year"],
-            "total_tracks": track_count or None,
+            "total_tracks": entry["total_tracks"] or track_count or None,
             "cached_track_count": track_count,
             "matching_artist_names": targets,
             "matching_track_count_by_artist": {name: 0 for name in targets},
