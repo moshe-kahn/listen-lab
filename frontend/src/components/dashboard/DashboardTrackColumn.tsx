@@ -93,6 +93,10 @@ export function DashboardTrackColumn({
     }
     return track.track_id ? (releaseTrackSiblingById?.get(track.track_id) ?? 0) : 0;
   };
+  const hasRelationTags = (track: RecentTrack) =>
+    releaseSiblingSourceCount(track) > 1
+    || Number(track.release_track_duplicate_source_count ?? 0) > 1
+    || Boolean(track.release_track_cluster_candidate_type);
 
   const cappedRows = isAllTimeTrackSection || section === "tracksRecent"
     ? capTracksPerAlbum(rankedItems, 1)
@@ -111,8 +115,11 @@ export function DashboardTrackColumn({
               fallbackLabel: "T",
               primaryText: row.track.track_name ?? "Unknown track",
               liked: trackIsKnownLiked(row.track),
-              releaseSibling: releaseSiblingSourceCount(row.track) > 1,
+              releaseSibling: hasRelationTags(row.track),
               releaseSiblingSourceCount: releaseSiblingSourceCount(row.track),
+              releaseSiblingDuplicateSourceCount: row.track.release_track_duplicate_source_count ?? null,
+              releaseTrackClusterCandidateType: row.track.release_track_cluster_candidate_type ?? null,
+              releaseTrackClusterRelationshipKind: row.track.release_track_cluster_relationship_kind ?? null,
               primaryBadgeText: formulaRankDeltaText(row.track) ?? completedRepeatText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
               secondaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
               secondaryText: row.track.artist_name ?? "Unknown artist",

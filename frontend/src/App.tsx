@@ -2011,13 +2011,35 @@ export function App() {
     setSelectedPreviewRecordingCandidateLoading(true);
     setSelectedPreviewRecordingCandidateError(null);
     fetchRecordingTrackCandidateByReleaseTrack(releaseTrackId)
-      .then((payload) => {
+      .then(async (payload) => {
         if (cancelled) {
           return;
         }
-        const items = payload.items ?? (payload.item ? [payload.item] : []);
+        const baseItems = payload.items ?? (payload.item ? [payload.item] : []);
+        const recordingCandidate = baseItems.find((item) => item.candidate_type === "recording_track_candidate") ?? null;
+        const siblingReleaseTrackIds = recordingCandidate
+          ? recordingCandidate.members
+            .map((member) => member.release_track_id)
+            .filter((memberReleaseTrackId) => memberReleaseTrackId !== releaseTrackId)
+          : [];
+        const siblingPayloads = await Promise.all(
+          siblingReleaseTrackIds.map((memberReleaseTrackId) => fetchRecordingTrackCandidateByReleaseTrack(memberReleaseTrackId).catch(() => null)),
+        );
+        if (cancelled) {
+          return;
+        }
+        const itemByKey = new Map<string, RecordingTrackCandidateItem>();
+        for (const item of baseItems) {
+          itemByKey.set(item.candidate_key, item);
+        }
+        for (const siblingPayload of siblingPayloads) {
+          for (const item of siblingPayload?.items ?? []) {
+            itemByKey.set(item.candidate_key, item);
+          }
+        }
+        const items = Array.from(itemByKey.values());
         setSelectedPreviewRelatedCandidates(items);
-        setSelectedPreviewRecordingCandidate(items.find((item) => item.candidate_type === "recording_track_candidate") ?? null);
+        setSelectedPreviewRecordingCandidate(recordingCandidate);
         setSelectedPreviewRecordingCandidateLoading(false);
       })
       .catch((error) => {
@@ -4012,12 +4034,22 @@ export function App() {
       trackId: spotifyTrackIdFromUri(trackUri) ?? sourceTrack?.track_id ?? null,
       albumId: sourceTrack?.album_id ?? null,
       artistItems: sourceTrack?.artists ?? artistEntriesFromText(optimisticTrack?.artists ?? sourceTrack?.artist_name),
-      hasReleaseTrackSiblings: sourceTrack ? hasReleaseSiblingForTrackId(sourceTrack.track_id) : null,
+      hasReleaseTrackSiblings: sourceTrack
+        ? Boolean(
+          sourceTrack.has_release_track_siblings
+          || hasReleaseSiblingForTrackId(sourceTrack.track_id)
+          || Number(sourceTrack.release_track_duplicate_source_count ?? 0) > 1
+          || sourceTrack.release_track_cluster_candidate_type,
+        )
+        : null,
       isLiked: sourceTrack ? recentTrackIsKnownLiked(sourceTrack, spotifyTrackIdFromUri(trackUri)) : null,
       likedAt: sourceTrack?.liked_at ?? null,
       releaseTrackId: sourceTrack?.release_track_id ?? null,
       releaseTrackName: sourceTrack?.release_track_name ?? null,
       releaseTrackSourceCount: sourceTrack?.release_track_source_count ?? null,
+      releaseTrackDuplicateSourceCount: sourceTrack?.release_track_duplicate_source_count ?? null,
+      releaseTrackClusterCandidateType: sourceTrack?.release_track_cluster_candidate_type ?? null,
+      releaseTrackClusterRelationshipKind: sourceTrack?.release_track_cluster_relationship_kind ?? null,
     };
   }
 
@@ -4032,12 +4064,22 @@ export function App() {
       trackId: spotifyTrackIdFromUri(displayTrack.uri) ?? knownTrack?.track_id ?? null,
       albumId: knownTrack?.album_id ?? playerDisplayAlbumId ?? null,
       artistItems: knownTrack?.artists ?? artistEntriesFromText(displayTrack.artists),
-      hasReleaseTrackSiblings: knownTrack ? hasReleaseSiblingForTrackId(knownTrack.track_id) : null,
+      hasReleaseTrackSiblings: knownTrack
+        ? Boolean(
+          knownTrack.has_release_track_siblings
+          || hasReleaseSiblingForTrackId(knownTrack.track_id)
+          || Number(knownTrack.release_track_duplicate_source_count ?? 0) > 1
+          || knownTrack.release_track_cluster_candidate_type,
+        )
+        : null,
       isLiked: knownTrack ? recentTrackIsKnownLiked(knownTrack, spotifyTrackIdFromUri(displayTrack.uri)) : null,
       likedAt: knownTrack?.liked_at ?? null,
       releaseTrackId: knownTrack?.release_track_id ?? null,
       releaseTrackName: knownTrack?.release_track_name ?? null,
       releaseTrackSourceCount: knownTrack?.release_track_source_count ?? null,
+      releaseTrackDuplicateSourceCount: knownTrack?.release_track_duplicate_source_count ?? null,
+      releaseTrackClusterCandidateType: knownTrack?.release_track_cluster_candidate_type ?? null,
+      releaseTrackClusterRelationshipKind: knownTrack?.release_track_cluster_relationship_kind ?? null,
     };
   }
 
@@ -4662,6 +4704,9 @@ export function App() {
       releaseTrackId: track.releaseTrackId ?? null,
       releaseTrackName: track.releaseTrackName ?? null,
       releaseTrackSourceCount: track.releaseTrackSourceCount ?? null,
+      releaseTrackDuplicateSourceCount: track.releaseTrackDuplicateSourceCount ?? null,
+      releaseTrackClusterCandidateType: track.releaseTrackClusterCandidateType ?? null,
+      releaseTrackClusterRelationshipKind: track.releaseTrackClusterRelationshipKind ?? null,
       hasReleaseTrackSiblings: track.hasReleaseTrackSiblings,
       albumId: contextAlbumId,
       artistName: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview.artistName ?? null,
@@ -9029,8 +9074,14 @@ export function App() {
                         type="button"
                       >
                         <span>
-                          {hasReleaseSiblingForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri)) ? (
-                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri))} />
+                          {recentTrackHasRelationTags(playerDisplayKnownTrack) || hasReleaseSiblingForTrackId(spotifyTrackIdFromUri(playerDisplayTrack.uri)) ? (
+                            <ReleaseSiblingBadge
+                              className="player-release-sibling-badge"
+                              sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri))}
+                              duplicateSourceCount={playerDisplayKnownTrack?.release_track_duplicate_source_count ?? null}
+                              clusterCandidateType={playerDisplayKnownTrack?.release_track_cluster_candidate_type ?? null}
+                              clusterRelationshipKind={playerDisplayKnownTrack?.release_track_cluster_relationship_kind ?? null}
+                            />
                           ) : null}
                           {playerDisplayTrack.name ?? "ListenLab Player"}
                         </span>
@@ -9474,8 +9525,14 @@ export function App() {
                       <div className="player-recent-copy player-queue-drag-copy">
                         <span className="player-recent-track single-line-ellipsis">
                           {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                          {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
-                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
+                          {queueTrackHasRelationTags(track) ? (
+                            <ReleaseSiblingBadge
+                              className="player-release-sibling-badge"
+                              sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
+                              duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
+                              clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
+                              clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
+                            />
                           ) : null}
                           {track.name}
                         </span>
@@ -9485,8 +9542,14 @@ export function App() {
                       <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
                         <span className="player-recent-track single-line-ellipsis">
                           {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                          {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
-                            <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
+                          {queueTrackHasRelationTags(track) ? (
+                            <ReleaseSiblingBadge
+                              className="player-release-sibling-badge"
+                              sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
+                              duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
+                              clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
+                              clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
+                            />
                           ) : null}
                           {track.name}
                         </span>
@@ -9661,10 +9724,32 @@ export function App() {
     trackId ? (releaseTrackSiblingById.get(trackId) ?? 0) : 0;
   const hasReleaseSiblingForTrackId = (trackId: string | null | undefined) =>
     releaseSiblingSourceCountForTrackId(trackId) > 1;
+  const recentTrackHasRelationTags = (track: RecentTrack | null | undefined) =>
+    Boolean(
+      track
+      && (
+        track.has_release_track_siblings
+        || hasReleaseSiblingForTrackId(track.track_id)
+        || Number(track.release_track_duplicate_source_count ?? 0) > 1
+        || track.release_track_cluster_candidate_type
+      ),
+    );
+  const queueTrackHasRelationTags = (track: PlayerQueueTrack | null | undefined) =>
+    Boolean(
+      track
+      && (
+        track.hasReleaseTrackSiblings
+        || hasReleaseSiblingForTrackId(track.trackId)
+        || Number(track.releaseTrackDuplicateSourceCount ?? 0) > 1
+        || track.releaseTrackClusterCandidateType
+      ),
+    );
   const selectedPreviewReleaseSiblingSourceCount = selectedPreview?.hasReleaseTrackSiblings
     ? selectedPreview.releaseTrackSourceCount ?? 0
     : releaseSiblingSourceCountForTrackId(selectedPreview?.trackId ?? selectedPreview?.sourceTrack?.track_id);
-  const selectedPreviewHasReleaseSibling = selectedPreviewReleaseSiblingSourceCount > 1;
+  const selectedPreviewHasReleaseSibling = selectedPreviewReleaseSiblingSourceCount > 1
+    || Number(selectedPreview?.releaseTrackDuplicateSourceCount ?? 0) > 1
+    || Boolean(selectedPreview?.releaseTrackClusterCandidateType);
   const selectedPreviewReleaseSiblingNote = selectedPreviewHasReleaseSibling
     ? `Grouped with ${selectedPreviewReleaseSiblingSourceCount} source ${selectedPreviewReleaseSiblingSourceCount === 1 ? "version" : "versions"}`
     : null;
@@ -9677,12 +9762,16 @@ export function App() {
     && selectedPreviewRecordingCandidate?.members.some((member) => member.release_track_id === selectedPreview.releaseTrackId)
     ? selectedPreviewRecordingCandidate
     : null;
+  const selectedPreviewRecordingMembers = selectedPreviewRecordingCandidateForCurrent?.members ?? [];
+  const selectedPreviewRelationAnchorReleaseTrackIds = new Set([
+    ...(selectedPreview?.kind === "track" && selectedPreview.releaseTrackId ? [selectedPreview.releaseTrackId] : []),
+    ...selectedPreviewRecordingMembers.map((member) => member.release_track_id),
+  ]);
   const selectedPreviewRelatedCandidatesForCurrent = selectedPreview?.kind === "track"
     ? selectedPreviewRelatedCandidates.filter((candidate) => (
-      candidate.members.some((member) => member.release_track_id === selectedPreview.releaseTrackId)
+      candidate.members.some((member) => selectedPreviewRelationAnchorReleaseTrackIds.has(member.release_track_id))
     ))
     : [];
-  const selectedPreviewRecordingMembers = selectedPreviewRecordingCandidateForCurrent?.members ?? [];
   const selectedPreviewRecordingRepresentative = selectedPreviewRecordingCandidateForCurrent
     ? selectedPreviewRecordingMembers.find((member) => member.release_track_id === selectedPreviewRecordingCandidateForCurrent.representative.release_track_id) ?? selectedPreviewRecordingMembers[0] ?? null
     : null;
@@ -10225,8 +10314,14 @@ export function App() {
                                   <span className="player-recent-copy">
                                     <span className="player-recent-track single-line-ellipsis">
                                       {recentTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                                      {hasReleaseSiblingForTrackId(track.track_id) ? (
-                                        <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(track.track_id)} />
+                                      {recentTrackHasRelationTags(track) ? (
+                                        <ReleaseSiblingBadge
+                                          className="player-release-sibling-badge"
+                                          sourceCount={releaseSiblingSourceCountForTrackId(track.track_id)}
+                                          duplicateSourceCount={track.release_track_duplicate_source_count ?? null}
+                                          clusterCandidateType={track.release_track_cluster_candidate_type ?? null}
+                                          clusterRelationshipKind={track.release_track_cluster_relationship_kind ?? null}
+                                        />
                                       ) : null}
                                       {track.track_name ?? "Unknown track"}
                                       {Number(track.completed_play_count ?? 0) > 1 ? (
@@ -10282,8 +10377,14 @@ export function App() {
                                     >
                                       <span>
                                         {playerDisplayKnownLiked ? <LikedBadge className="player-liked-badge" /> : null}
-                                        {hasReleaseSiblingForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri)) ? (
-                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri))} />
+                                        {recentTrackHasRelationTags(playerDisplayKnownTrack) || hasReleaseSiblingForTrackId(spotifyTrackIdFromUri(playerDisplayTrack.uri)) ? (
+                                          <ReleaseSiblingBadge
+                                            className="player-release-sibling-badge"
+                                            sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack.uri))}
+                                            duplicateSourceCount={playerDisplayKnownTrack?.release_track_duplicate_source_count ?? null}
+                                            clusterCandidateType={playerDisplayKnownTrack?.release_track_cluster_candidate_type ?? null}
+                                            clusterRelationshipKind={playerDisplayKnownTrack?.release_track_cluster_relationship_kind ?? null}
+                                          />
                                         ) : null}
                                         {playerDisplayTrack.name ?? "ListenLab Player"}
                                       </span>
@@ -10292,8 +10393,14 @@ export function App() {
                                     <span className="player-menu-title-scroll">
                                       <span>
                                         {playerDisplayKnownLiked ? <LikedBadge className="player-liked-badge" /> : null}
-                                        {hasReleaseSiblingForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack?.uri ?? null)) ? (
-                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack?.uri ?? null))} />
+                                        {recentTrackHasRelationTags(playerDisplayKnownTrack) || hasReleaseSiblingForTrackId(spotifyTrackIdFromUri(playerDisplayTrack?.uri ?? null)) ? (
+                                          <ReleaseSiblingBadge
+                                            className="player-release-sibling-badge"
+                                            sourceCount={releaseSiblingSourceCountForTrackId(playerDisplayKnownTrack?.track_id ?? spotifyTrackIdFromUri(playerDisplayTrack?.uri ?? null))}
+                                            duplicateSourceCount={playerDisplayKnownTrack?.release_track_duplicate_source_count ?? null}
+                                            clusterCandidateType={playerDisplayKnownTrack?.release_track_cluster_candidate_type ?? null}
+                                            clusterRelationshipKind={playerDisplayKnownTrack?.release_track_cluster_relationship_kind ?? null}
+                                          />
                                         ) : null}
                                         {playerDisplayTrack?.name ?? "ListenLab Player"}
                                       </span>
@@ -10655,8 +10762,14 @@ export function App() {
                                     <div className="player-recent-copy player-queue-drag-copy">
                                       <span className="player-recent-track single-line-ellipsis">
                                         {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                                        {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
-                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
+                                        {queueTrackHasRelationTags(track) ? (
+                                          <ReleaseSiblingBadge
+                                            className="player-release-sibling-badge"
+                                            sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
+                                            duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
+                                            clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
+                                            clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
+                                          />
                                         ) : null}
                                         {track.name}
                                       </span>
@@ -10672,8 +10785,14 @@ export function App() {
                                     >
                                       <span className="player-recent-track single-line-ellipsis">
                                         {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                                        {track.hasReleaseTrackSiblings || hasReleaseSiblingForTrackId(track.trackId) ? (
-                                          <ReleaseSiblingBadge className="player-release-sibling-badge" sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)} />
+                                        {queueTrackHasRelationTags(track) ? (
+                                          <ReleaseSiblingBadge
+                                            className="player-release-sibling-badge"
+                                            sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
+                                            duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
+                                            clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
+                                            clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
+                                          />
                                         ) : null}
                                         {track.name}
                                       </span>

@@ -17,6 +17,7 @@ import { LikedBadge } from "../common/LikedBadge";
 import { NewTrackBadge } from "../common/NewTrackBadge";
 import { ReleaseSiblingBadge } from "../common/ReleaseSiblingBadge";
 import { PlaybackActionMenu, type PlaybackAction } from "../playback/PlaybackActionMenu";
+import { trackRelationTags } from "../../utils/trackRelationTags";
 
 type AlbumPlaybackQueue = {
   playlistUris: string[];
@@ -226,6 +227,38 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     toggleAlbumTrackPreview,
     variationSubtitleFromTitle,
   } = props;
+
+  const recordingMemberArtistText = (member: RecordingTrackCandidateMember) => {
+    const structuredNames = member.artists
+      ?.map((artist) => artist.name?.trim())
+      .filter(Boolean);
+    if (structuredNames?.length) {
+      return structuredNames.join(", ");
+    }
+    return String(member.artist ?? "")
+      .split("|")
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .join(", ");
+  };
+
+  const familyListSections = [
+    {
+      key: "variations",
+      title: "Variations",
+      tag: "V",
+      rows: selectedPreviewDisplayRelationRows.contextStyle,
+    },
+    {
+      key: "covers-remixes",
+      title: "Covers / remixes / family",
+      tag: "C",
+      rows: selectedPreviewDisplayRelationRows.coverRemix,
+    },
+  ].filter((section) => section.rows.length > 0);
+
+  const familyListCount = familyListSections.reduce((count, section) => count + section.rows.length, 0);
+
   return selectedPreview ? (
         <div
           aria-modal="true"
@@ -310,7 +343,13 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
               <h2 className={selectedPreview.kind === "track" ? "detail-modal-track-title" : undefined}>
                 {selectedPreview.kind !== "track" && selectedPreviewIsKnownLiked ? <LikedBadge className="detail-liked-badge" /> : null}
                 {selectedPreview.kind !== "track" && selectedPreviewHasReleaseSibling ? (
-                  <ReleaseSiblingBadge className="detail-release-sibling-badge" sourceCount={selectedPreviewReleaseSiblingSourceCount} />
+                  <ReleaseSiblingBadge
+                    className="detail-release-sibling-badge"
+                    sourceCount={selectedPreviewReleaseSiblingSourceCount}
+                    duplicateSourceCount={selectedPreview.releaseTrackDuplicateSourceCount}
+                    clusterCandidateType={selectedPreview.releaseTrackClusterCandidateType}
+                    clusterRelationshipKind={selectedPreview.releaseTrackClusterRelationshipKind}
+                  />
                 ) : null}
                 {selectedPreviewIsSharedArtistPage ? (
                   <span className="detail-modal-artist-links">
@@ -778,22 +817,15 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                       const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                       const rowLastPlayed = formatCompactRelativeAge(track.lastPlayedAt);
                       const rowIsUnlistened = !track.lastPlayedAt && track.playCount <= 0;
-                      const rowHasDuplicateSources = track.releaseTrackDuplicateSourceCount > 1;
-                      const rowIsRecordingGroup = track.releaseTrackClusterCandidateType === "recording_track_candidate";
-                      const rowIsCoverRemixFamily = track.releaseTrackClusterCandidateType === "track_family_candidate"
-                        && familyCoverRemixRelationshipKinds.has(track.releaseTrackClusterRelationshipKind ?? "");
-                      const rowIsVariationFamily = track.releaseTrackClusterCandidateType === "track_family_candidate"
-                        && !rowIsCoverRemixFamily;
-                      const rowRelationTagEntries = [
-                        rowHasDuplicateSources ? { code: "D", label: "duplicate source grouping" } : null,
-                        rowIsRecordingGroup ? { code: "R", label: "recording group" } : null,
-                        rowIsVariationFamily ? { code: "V", label: "variation" } : null,
-                        rowIsCoverRemixFamily ? { code: "C", label: "cover/remix/rework" } : null,
-                      ].filter((entry): entry is { code: string; label: string } => Boolean(entry));
-                      const rowRelationTags = rowRelationTagEntries.map((entry) => entry.code).join("");
-                      const rowRelationTagsTitle = rowRelationTagEntries.length > 0
-                        ? `Track relation: ${rowRelationTagEntries.map((entry) => entry.label).join(", ")}`
-                        : "";
+                      const rowRelationTagsResult = trackRelationTags({
+                        releaseTrackDuplicateSourceCount: track.releaseTrackDuplicateSourceCount,
+                        releaseTrackSourceCount: track.releaseTrackSourceCount,
+                        hasReleaseTrackSiblings: track.hasReleaseTrackSiblings,
+                        releaseTrackClusterCandidateType: track.releaseTrackClusterCandidateType,
+                        releaseTrackClusterRelationshipKind: track.releaseTrackClusterRelationshipKind,
+                      });
+                      const rowRelationTags = rowRelationTagsResult.text;
+                      const rowRelationTagsTitle = rowRelationTagsResult.title;
                       const rowStarTrackId = track.id ?? spotifyTrackIdFromUri(rowTrackUri);
                       const rowMatchesSelectedReleaseTrack = Boolean(
                         selectedPreview.kind === "track"
@@ -1035,6 +1067,41 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     );
                   })}
                 </div>
+              </div>
+            ) : null}
+            {selectedPreview.kind === "track" && familyListCount > 0 ? (
+              <div className="detail-modal-family-list">
+                <div className="detail-modal-recording-variations-header">
+                  <span>Related family tracks</span>
+                  <span className="detail-modal-family-count">{familyListCount}</span>
+                </div>
+                {familyListSections.map((section) => (
+                  <div className="detail-modal-family-section" key={`family-list-${section.key}`}>
+                    <span className="detail-modal-family-section-title">{section.title}</span>
+                    <div className="detail-modal-family-rows">
+                      {section.rows.map((member) => {
+                        const artistText = recordingMemberArtistText(member);
+                        const albumYear = recordingMemberReleaseYear(member);
+                        return (
+                          <button
+                            className="detail-modal-family-row"
+                            key={`family-list-${section.key}-${member.release_track_id}`}
+                            onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
+                            type="button"
+                          >
+                            <span className="relation-tags-badge detail-modal-family-tag">{section.tag}</span>
+                            <span className="detail-modal-family-row-copy">
+                              <strong>{member.title || "Unknown track"}</strong>
+                              <span>
+                                {[artistText || null, member.album || null, albumYear].filter(Boolean).join(" · ")}
+                              </span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             ) : null}
           </section>

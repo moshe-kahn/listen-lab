@@ -1742,6 +1742,38 @@ h1 {
   font-size: 0.74rem;
 }
 
+.album-repair-actions {
+  align-items: center;
+}
+
+.album-repair-limit {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  color: #9bc5a6;
+  font-size: 0.78rem;
+}
+
+.album-repair-limit input {
+  width: 72px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f7f8f2;
+  padding: 6px 8px;
+}
+
+.album-repair-card-grid,
+.album-repair-plan-list,
+.album-repair-reasons {
+  display: grid;
+  gap: 8px;
+}
+
+.album-repair-card {
+  gap: 12px;
+}
+
 .identity-audit-ambiguous-filters {
   display: flex;
   flex-wrap: wrap;
@@ -4231,6 +4263,84 @@ h1 {
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: thin;
+}
+
+.detail-modal-family-list {
+  order: 4;
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.detail-modal-family-count {
+  color: rgba(223, 248, 232, 0.72);
+}
+
+.detail-modal-family-section {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.detail-modal-family-section-title {
+  color: #dff8e8;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.detail-modal-family-rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+.detail-modal-family-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(223, 248, 232, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #dff8e8;
+  cursor: pointer;
+  text-align: left;
+}
+
+.detail-modal-family-row:hover,
+.detail-modal-family-row:focus-visible {
+  border-color: rgba(125, 255, 172, 0.44);
+  outline: none;
+}
+
+.detail-modal-family-tag {
+  min-width: 22px;
+  padding: 2px 6px;
+}
+
+.detail-modal-family-row-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detail-modal-family-row-copy strong,
+.detail-modal-family-row-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-modal-family-row-copy strong {
+  font-size: 0.86rem;
+}
+
+.detail-modal-family-row-copy span {
+  color: rgba(223, 248, 232, 0.68);
+  font-size: 0.72rem;
 }
 
 .detail-modal-recording-variation-cover {

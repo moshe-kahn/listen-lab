@@ -22,6 +22,9 @@ export function DashboardListCard({
   liked,
   releaseSibling,
   releaseSiblingSourceCount,
+  releaseSiblingDuplicateSourceCount,
+  releaseTrackClusterCandidateType,
+  releaseTrackClusterRelationshipKind,
   secondaryBadgeText,
   completionRatio,
   trackUri,
@@ -57,7 +60,10 @@ export function DashboardListCard({
           releaseTrackId: previewTrack?.release_track_id ?? null,
           releaseTrackName: previewTrack?.release_track_name ?? null,
           releaseTrackSourceCount: previewTrack?.release_track_source_count ?? null,
+          releaseTrackDuplicateSourceCount: previewTrack?.release_track_duplicate_source_count ?? null,
           hasReleaseTrackSiblings: previewTrack?.has_release_track_siblings ?? null,
+          releaseTrackClusterCandidateType: previewTrack?.release_track_cluster_candidate_type ?? null,
+          releaseTrackClusterRelationshipKind: previewTrack?.release_track_cluster_relationship_kind ?? null,
           albumId: previewTrack?.album_id ?? null,
           artistName: previewTrack?.artist_name ?? null,
           sourceTrack: previewTrack ?? null,
@@ -104,7 +110,15 @@ export function DashboardListCard({
             {liked || releaseSibling || primaryBadgeText || secondaryBadgeText ? (
               <div className="card-badge-stack">
                 {liked ? <LikedBadge className="card-liked-badge" /> : null}
-                {releaseSibling ? <ReleaseSiblingBadge className="card-release-sibling-badge" sourceCount={releaseSiblingSourceCount} /> : null}
+                {releaseSibling ? (
+                  <ReleaseSiblingBadge
+                    className="card-release-sibling-badge"
+                    sourceCount={releaseSiblingSourceCount}
+                    duplicateSourceCount={releaseSiblingDuplicateSourceCount}
+                    clusterCandidateType={releaseTrackClusterCandidateType}
+                    clusterRelationshipKind={releaseTrackClusterRelationshipKind}
+                  />
+                ) : null}
                 {primaryBadgeText ? <span className="card-inline-badge">{primaryBadgeText}</span> : null}
                 {secondaryBadgeText ? <span className="card-inline-badge">{secondaryBadgeText}</span> : null}
               </div>

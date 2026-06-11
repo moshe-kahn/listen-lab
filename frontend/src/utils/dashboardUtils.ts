@@ -261,7 +261,10 @@ export function previewItems(
     release_track_id?: number | null;
     release_track_name?: string | null;
     release_track_source_count?: number | null;
+    release_track_duplicate_source_count?: number | null;
     has_release_track_siblings?: boolean | null;
+    release_track_cluster_candidate_type?: string | null;
+    release_track_cluster_relationship_kind?: string | null;
     artist_id?: string | null;
     artist_name?: string | null;
     album_name?: string | null;
@@ -323,7 +326,10 @@ export function previewItems(
         releaseTrackId: isTrack ? item.release_track_id ?? null : null,
         releaseTrackName: isTrack ? item.release_track_name ?? null : null,
         releaseTrackSourceCount: isTrack ? item.release_track_source_count ?? null : null,
+        releaseTrackDuplicateSourceCount: isTrack ? item.release_track_duplicate_source_count ?? null : null,
         hasReleaseTrackSiblings: isTrack ? item.has_release_track_siblings ?? null : null,
+        releaseTrackClusterCandidateType: isTrack ? item.release_track_cluster_candidate_type ?? null : null,
+        releaseTrackClusterRelationshipKind: isTrack ? item.release_track_cluster_relationship_kind ?? null : null,
         albumId: isTrack || kind === "album" ? item.album_id ?? null : null,
         artistName: isTrack || kind === "album" ? item.artist_name ?? null : null,
         artists: kind === "album" && item.artist_name

@@ -16,10 +16,10 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- `Preserve album metadata across identity previews`
+- `Add album repair UI and track family relation badges`
 
 Worktree at handoff:
-- clean after committing album/recording identity metadata fixes
+- clean after committing release-album repair UI plus relation badge/family list fixes
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
@@ -46,6 +46,11 @@ Backend changes:
 - safe release-album repair merges only when Spotify/source-track evidence supports the move, handles duplicate same-track album-track collisions, and marks generated recording clusters dirty.
 - artist album evidence enriches internal album-artist links from linked Spotify source-track payload/catalog data, including album id, image, release year, and total tracks when safe.
 - `/auth/artist-albums` returns enriched requested artist metadata so artist previews can populate real artist images when cache/API evidence exists.
+- release-album history/Spotify repair dry-run was run locally with `limit=50`:
+  - `candidate_count=50`
+  - `safe_candidate_count=28`
+  - `applied_count=0`
+  - 22 candidates blocked because one or more album-track repoints lacked Spotify album evidence
 
 Frontend changes:
 - recording variation cards and navigation use structured artist entries when available.
@@ -53,6 +58,15 @@ Frontend changes:
 - artist preview no longer uses album art as an artist-photo fallback.
 - album heading formatting now treats album previews correctly: album label/source album name is the album name, and `detail` is only a year when it looks like a year.
 - missing recording variation years are omitted in dashboard modal and Identity Audit candidate rows.
+- Identity Audit now has `Albums -> Repair` for the release-album history/Spotify repair endpoint:
+  - limit input
+  - dry-run button
+  - apply-safe button gated behind dry-run confirmation
+  - summary chips, all/safe/blocked filters, evidence/reason display, and moved-track details
+- release/recording/family badges render concatenated `D/R/V/C` tags instead of showing a generic `R` for every related-track case.
+- representative track pages show true Track Family rows for variations, covers, remixes, and related family members.
+  - same-recording rows from different albums stay in the recording/release appearance area and are excluded from the family list.
+  - family lookup now fetches sibling release-track candidate payloads from the current recording group, because broader family candidates may be attached to a sibling rather than the exact opened release track.
 
 Important implementation note:
 - Some backend fixes affect generated recording candidate lookup. If QA appears stale, restart the backend first, then hard refresh the frontend.
@@ -130,6 +144,7 @@ Relevant current rules:
   - `V`: variation/context/style family
   - `C`: cover/remix/rework family
 - track relation rows in overlays are separated into `Recording variations`, `Variations`, and `Covers / remixes`
+- representative track family lists are anchored to the full current recording group for lookup, but display excludes current/same-recording release appearances so only true alternate versions/covers/family rows appear there.
 
 ## Source/Text Identity Status
 Artist reconciliation now has audit, safe repair, composite cleanup, and ingest prevention.
@@ -176,6 +191,16 @@ Manual QA completed by user:
 - Telenova recording variation art/date navigation issue works after backend restart/reload.
 - `Hope` album subtitle no longer shows `2026 - 2026`.
 
+Checks run for the release-album repair UI / relation badge / track-family list work:
+- `npm run build` from `frontend/`
+- `git diff --check`
+
+Manual/browser QA completed:
+- Identity Audit `Albums -> Repair` dry-run rendered candidates and summary counts without console errors.
+
+Outstanding QA:
+- After the final family-anchor display-filter fix, build and whitespace checks passed, but authenticated browser QA was not rerun.
+
 ## Known Limitations
 - Frontend bookmark/star behavior is local placeholder UI; bookmark persistence is not implemented.
 - Source/text album and track reconciliation are not broadly implemented.
@@ -188,10 +213,8 @@ Manual QA completed by user:
 Recommended project-level next steps:
 
 1. Push this branch after the commit if remote backup/review is desired.
-2. Fix the local `.venv` interpreter path or recreate the venv. The current repo venv points at an old `/Users/kahntra/Documents/ListenLab/...` path, which blocks the standard `./.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8765` startup command.
-3. Run the safe release-album repair dry-run on the real local DB:
-   - `POST /debug/identity/release-albums/history-spotify-repair?dry_run=true&limit=50`
-   - inspect candidates before running write mode.
+2. If desired, run the release-album history/Spotify repair write path only after reviewing the 28 safe candidates from the dry-run.
+3. Re-run authenticated browser QA for representative track pages that should show alternate versions/covers/family rows.
 4. Continue source/text identity reconciliation for albums and tracks:
    - album duplicate repair beyond the safe history/Spotify merge path
    - track duplicate repair using title + artist + album + duration/ISRC/context evidence
@@ -212,4 +235,4 @@ Recommended project-level next steps:
 - Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest committed work fixes album/recording identity metadata preservation across track, album, artist, and recording variation preview flows. User confirmed the previously reported Kutiman/Dekel, Telenova recording variation, and `Hope` `2026 - 2026` issues work after restart/reload. Verification passed with the focused backend unittest suite, frontend `npm run build`, Python compile checks, and `git diff --check`. Next: push if desired, fix/recreate the broken local venv path, run the release-album history/Spotify repair dry-run on the real DB, then continue album/track source-text identity reconciliation with explicit dry-run/apply repair flows.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest committed work adds Identity Audit `Albums -> Repair`, fixes related-track badges to concatenate `D/R/V/C`, and adds representative track family lists for variations/covers/remixes while excluding same-recording album appearances. Verification passed with frontend `npm run build` and `git diff --check`; earlier browser QA verified the repair tab dry-run UI, but browser QA was not rerun after the final family-anchor display-filter fix. Next: push if desired, QA representative track family rows in the authenticated browser, review the 28 safe release-album repair candidates before any write run, then continue album/track source-text identity reconciliation through explicit dry-run/apply flows.

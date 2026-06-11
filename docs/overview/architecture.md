@@ -38,7 +38,7 @@ This document is the implementation-oriented technical source of truth for the L
 - Catalog Backfill now separates identity-critical metadata from catalog-expansion work, with explicit target modes for tracks, albums, album tracklists, and all targets.
 - A local Spotify track metadata worker exists for bounded identity metadata enrichment. It supports one-shot CLI runs by default, optional loop mode, JSONL event logging, condensed terminal output, local cooldowns, and a rolling request-budget guard.
 - Generated recording/track-family candidate clusters are cached in SQLite for fast local lookup. Startup builds the generated cache if empty, and source/release mapping changes mark affected release tracks dirty so later refreshes can be scoped instead of rebuilding all candidates.
-- Identity Audit includes read-only track/release diagnostics, release-album merge preview/dry-run tooling, and evidence-gated artist duplicate repair with dry-run/write separation.
+- Identity Audit includes read-only track/release diagnostics, release-album merge preview/dry-run tooling, release-album history/Spotify repair dry-run/apply tooling, and evidence-gated artist duplicate repair with dry-run/write separation.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
 ### Target MVP state

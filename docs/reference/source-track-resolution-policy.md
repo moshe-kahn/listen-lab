@@ -29,12 +29,14 @@ Current UI direction:
 - release-track identity is the preferred same-song identity for liked/display state.
 - Activity/Listened display grouping prefers `release_track_id`, then falls back to Spotify track id, then normalized text identity.
 - Track preview payloads expose release-track metadata separately from Spotify track id/URI, and track overlays may show release, recording, and family relation evidence without changing playback identity.
+- User-facing relation badges concatenate `D/R/V/C`: duplicate source-track grouping, recording group, variation/context family, and cover/remix/rework family.
 - Spotify track IDs remain concrete playback and provider-version identifiers.
 - Future `recording_track` identity should become the default normal-song aggregation layer only after read-only evidence, review policy, and representative playback selection are defined.
 - Current Recording Tracks Identity Audit support is read-only/manual-review only: candidate evidence and saved decisions help inspect quality, but saved reviews do not create or apply `recording_track` identity.
 - `recording_track` should expose release appearances and selectable playback source versions without hiding the underlying `release_track` provenance.
 - Track Family should not be used for playback substitution without returning a playable representative Spotify URI.
 - Related-album UI should keep exact release-track source versions, same-recording appearances, and broader Track Family variations visibly distinct. Recording view may default to the representative release appearance; release view should expose same-release source versions.
+- Representative track pages may show Track Family rows for alternates, variations, covers, remixes, and related derived versions. Do not put same-recording release appearances there; those belong with recording/release appearance rows even when they come from different albums.
 - Generated recording/track-family candidate tables are evidence caches only. They are allowed to speed up view lookup, but they are not durable identity promotion tables.
 
 ## Classification Checklist

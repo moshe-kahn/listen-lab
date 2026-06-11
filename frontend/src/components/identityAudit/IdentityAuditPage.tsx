@@ -6,6 +6,7 @@ import type {
   TrackIdentityAuditTab,
 } from "../../utils/identityAuditPrefs";
 import type { RecordingTrackCandidateMember } from "../../types/appTypes";
+import { AlbumHistorySpotifyRepairTab } from "./AlbumHistorySpotifyRepairTab";
 import { ArtistDuplicateAuditTab } from "./ArtistDuplicateAuditTab";
 import { RecordingTrackCandidatesTab } from "./RecordingTrackCandidatesTab";
 import { ReleaseTrackDurationConflictsTab } from "./ReleaseTrackDurationConflictsTab";
@@ -54,6 +55,7 @@ const trackTabs: Array<{ value: TrackIdentityAuditTab; label: string }> = [
 const albumTabs: Array<{ value: AlbumIdentityAuditTab; label: string }> = [
   { value: "problems", label: "Problems" },
   { value: "merge_review", label: "Merge Review" },
+  { value: "history_spotify_repair", label: "Repair" },
   { value: "catalog", label: "Catalog" },
 ];
 
@@ -185,6 +187,7 @@ export function IdentityAuditPage({
       {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "duration_conflicts" ? <ReleaseTrackDurationConflictsTab /> : null}
       {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "problems" ? renderAlbumProblemsTab() : null}
       {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "merge_review" ? renderAlbumMergeReviewTab() : null}
+      {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "history_spotify_repair" ? <AlbumHistorySpotifyRepairTab /> : null}
       {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "catalog" ? renderAlbumCatalogTab() : null}
       {identityAuditEntityTab === "artists" ? <ArtistDuplicateAuditTab /> : null}
     </section>

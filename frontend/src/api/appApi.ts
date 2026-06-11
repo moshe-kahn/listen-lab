@@ -20,6 +20,7 @@ import type {
   MergedTrackAggregateResponse,
   ReleaseTrackDetailResponse,
   ReleaseTrackMetadataResponse,
+  ReleaseAlbumHistorySpotifyRepairResponse,
   ReleaseAlbumMergeDryRunResponse,
   ReleaseAlbumMergePreviewResponse,
   SuggestedGroupsResponse,
@@ -715,6 +716,35 @@ export async function cleanupArtistCompositeCredits(dryRun: boolean = true): Pro
       throw new Error(`Artist Composite Credit Cleanup (${response.status}): ${detail}`);
     }
     return (await response.json()) as ArtistCompositeCreditCleanupResponse;
+  }
+
+export async function repairReleaseAlbumsHistorySpotify(
+  dryRun: boolean = true,
+  limit: number = 50,
+): Promise<ReleaseAlbumHistorySpotifyRepairResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/identity/release-albums/history-spotify-repair?dry_run=${encodeURIComponent(String(dryRun))}&limit=${encodeURIComponent(String(limit))}`,
+      {
+        method: "POST",
+        credentials: "include",
+      },
+    );
+    if (!response.ok) {
+      let detail = "Failed to repair release albums.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Release Album Repair (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ReleaseAlbumHistorySpotifyRepairResponse;
   }
 
 export async function fetchIdentityAuditSuggestedGroups(): Promise<SuggestedGroupsResponse> {

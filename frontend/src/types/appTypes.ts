@@ -1275,6 +1275,36 @@ export type ReleaseAlbumMergeDryRunResponse = {
   statements: string[];
 };
 
+export type ReleaseAlbumHistorySpotifyRepairCandidate = {
+  release_album_ids: number[];
+  survivor_release_album_id: number;
+  merge_release_album_ids: number[];
+  spotify_album_id: string | null;
+  release_album_name: string;
+  normalized_album_name: string;
+  normalized_artist: string;
+  safe: boolean;
+  blocked_reasons: string[];
+  merge_readiness: "safe_candidate" | "needs_review" | "unsafe" | string;
+  rows_affected: Record<string, number>;
+  plan: ReleaseAlbumMergeDryRunResponse["plan"];
+};
+
+export type ReleaseAlbumHistorySpotifyRepairResponse = {
+  ok: boolean;
+  mode: "dry_run" | "apply" | string;
+  candidate_count: number;
+  safe_candidate_count: number;
+  applied_count: number;
+  items: ReleaseAlbumHistorySpotifyRepairCandidate[];
+  applied_results: Array<Record<string, unknown>>;
+  source: {
+    kind: string;
+    uses_spotify_api: boolean;
+    mutates_identity: boolean;
+  };
+};
+
 export type TrackDuplicateReleaseItem = {
   release_track_id: number;
   release_track_name: string;
@@ -1580,6 +1610,9 @@ export type DashboardListCardProps = {
   liked?: boolean;
   releaseSibling?: boolean;
   releaseSiblingSourceCount?: number | null;
+  releaseSiblingDuplicateSourceCount?: number | null;
+  releaseTrackClusterCandidateType?: string | null;
+  releaseTrackClusterRelationshipKind?: string | null;
   secondaryBadgeText?: string | null;
   completionRatio?: number | null;
   trackUri?: string | null;
@@ -1601,7 +1634,10 @@ export type PreviewItem = {
   releaseTrackId?: number | null;
   releaseTrackName?: string | null;
   releaseTrackSourceCount?: number | null;
+  releaseTrackDuplicateSourceCount?: number | null;
   hasReleaseTrackSiblings?: boolean | null;
+  releaseTrackClusterCandidateType?: string | null;
+  releaseTrackClusterRelationshipKind?: string | null;
   albumId?: string | null;
   artistName?: string | null;
   artists?: Array<{
@@ -1723,7 +1759,10 @@ export type PlayerQueueTrack = PlayerTrackSummary & {
   releaseTrackId?: number | null;
   releaseTrackName?: string | null;
   releaseTrackSourceCount?: number | null;
+  releaseTrackDuplicateSourceCount?: number | null;
   hasReleaseTrackSiblings?: boolean | null;
+  releaseTrackClusterCandidateType?: string | null;
+  releaseTrackClusterRelationshipKind?: string | null;
   albumId: string | null;
   isLiked?: boolean | null;
   likedAt?: string | null;

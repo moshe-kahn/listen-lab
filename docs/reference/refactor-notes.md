@@ -208,6 +208,8 @@ Current frontend extraction:
   - API fetch/post wrappers that were previously in `App.tsx`
 - `frontend/src/components/identityAudit/IssueFeed.tsx`
   - Identity Audit issue feed component and related issue sort/review types
+- `frontend/src/components/identityAudit/AlbumHistorySpotifyRepairTab.tsx`
+  - Identity Audit Albums repair dry-run/apply UI for `POST /debug/identity/release-albums/history-spotify-repair`
 - `frontend/src/components/identityAudit/IdentityAuditDiagnostics.tsx`
   - Identity Audit diagnostic rendering helpers
 - `frontend/src/constants/appConstants.ts`
@@ -216,6 +218,8 @@ Current frontend extraction:
   - broad response/UI/player/profile/catalog/audit types
 - `frontend/src/utils/identityAuditPrefs.ts`
   - Identity Audit localStorage preference load/save helpers and persisted preference types
+- `frontend/src/utils/trackRelationTags.ts`
+  - shared `D/R/V/C` relation-tag construction for duplicate source, recording, variation, and cover/remix/family badges
 - route/page chunks:
   - Formula Lab, Recent Debug, Catalog Backfill, and Search Lookup are lazy-loaded from `DashboardSections`
   - `DetailPreviewModal` is lazy-loaded from `App.tsx` only after a preview item is selected
@@ -229,8 +233,14 @@ Current startup-load behavior:
 - normal quick `/me` for top/all-time/profile sections runs after visible startup readiness
 - full-screen loading is latched off after dashboard release for the current Spotify user/session to avoid flashes during later refreshes
 
+Current relation UI behavior:
+- relation badges concatenate `D/R/V/C` in that order instead of using one generic `R`
+- representative track pages list Track Family rows under `Variations` and `Covers / remixes / family`
+- same-recording release appearances, including the same track on different albums, stay out of the Track Family list
+- family lookup for a representative track is anchored to all release-track members in the current recording group because family candidates can be attached to a sibling release track
+
 Current frontend size:
-- `frontend/src/App.tsx`: `11,057` lines / `499,927` bytes.
+- `frontend/src/App.tsx`: `11,223` lines / `508,612` bytes.
 - Original pre-extraction size in this branch was `13,387` lines / `566,339` bytes.
 
 Frontend behavior constraints:
