@@ -303,6 +303,15 @@ function uniqueArtistEntries(...groups: Array<RecentTrack["artists"] | null | un
   return entries;
 }
 
+function artistEntryIdentityKey(artist: TrackArtistEntry): string | null {
+  const artistId = artist.artist_id?.trim() || artist.id?.trim();
+  if (artistId) {
+    return `id:${artistId}`;
+  }
+  const artistName = artist.name?.trim().toLocaleLowerCase();
+  return artistName ? `name:${artistName}` : null;
+}
+
 function artistEntriesForAlbumTrack(track: AlbumTrackEntry): TrackArtistEntry[] {
   return track.sourceTrack?.artists?.length
     ? uniqueArtistEntries(track.sourceTrack.artists)
@@ -409,13 +418,7 @@ export function App() {
   const [selectedPreviewReleaseTrackDetailError, setSelectedPreviewReleaseTrackDetailError] = useState<string | null>(null);
   const [selectedPreviewRecordingCandidate, setSelectedPreviewRecordingCandidate] = useState<RecordingTrackCandidateItem | null>(null);
   const [selectedPreviewRelatedCandidates, setSelectedPreviewRelatedCandidates] = useState<RecordingTrackCandidateItem[]>([]);
-  const [selectedPreviewRecordingCandidateLoading, setSelectedPreviewRecordingCandidateLoading] = useState(false);
   const [selectedPreviewRecordingCandidateError, setSelectedPreviewRecordingCandidateError] = useState<string | null>(null);
-  const previousRecordingRelationRowsRef = useRef<{
-    recording: RecordingTrackCandidateMember[];
-    contextStyle: RecordingTrackCandidateMember[];
-    coverRemix: RecordingTrackCandidateMember[];
-  } | null>(null);
   const [selectedPreviewDetailView, setSelectedPreviewDetailView] = useState<"recording" | "release">("recording");
   const [recordingAlbumTracklistOpen, setRecordingAlbumTracklistOpen] = useState(false);
   const [detailOptionsOpen, setDetailOptionsOpen] = useState(false);
@@ -423,6 +426,13 @@ export function App() {
   const [albumTrackEntries, setAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [albumTrackEntriesLoading, setAlbumTrackEntriesLoading] = useState(false);
   const [albumTrackEntriesError, setAlbumTrackEntriesError] = useState<string | null>(null);
+  const [albumTrackEntriesPartial, setAlbumTrackEntriesPartial] = useState(false);
+  const [albumTrackSpotifyFetchRequest, setAlbumTrackSpotifyFetchRequest] = useState<{
+    albumId: string | null;
+    trackId: string | null;
+    nonce: number;
+  } | null>(null);
+  const [albumTrackSpotifyFetchPending, setAlbumTrackSpotifyFetchPending] = useState(false);
   const [albumTrackLastSortMode, setAlbumTrackLastSortMode] = useState<LastPlayedSortMode>(null);
   const [hoveredAlbumWithArtistName, setHoveredAlbumWithArtistName] = useState<string | null>(null);
   const [homeAlbumExpanded, setHomeAlbumExpanded] = useState(false);
@@ -673,6 +683,7 @@ export function App() {
   } | null>(null);
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
+  const albumTrackSpotifyAutoFetchAttemptedRef = useRef<Set<string>>(new Set());
   const loadedHomeAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const albumTrackListRef = useRef<HTMLUListElement | null>(null);
   const homeAlbumTrackListRef = useRef<HTMLUListElement | null>(null);
@@ -839,6 +850,16 @@ export function App() {
     }
     return Boolean(track.id && (likedTrackIdsForDisplay.has(track.id) || targetedLikedTrackById[track.id]));
   };
+  const albumTrackIsExactKnownLiked = (track: AlbumTrackEntry) => {
+    const spotifyTrackId = track.id ?? spotifyTrackIdFromUri(track.uri);
+    if (track.sourceTrack?.is_liked === true && (!spotifyTrackId || track.sourceTrack.track_id === spotifyTrackId)) {
+      return true;
+    }
+    if (track.sourceTrack?.source_label === "liked_cache" && (!spotifyTrackId || track.sourceTrack.track_id === spotifyTrackId)) {
+      return true;
+    }
+    return Boolean(spotifyTrackId && (likedTrackIdsForDisplay.has(spotifyTrackId) || targetedLikedTrackById[spotifyTrackId]));
+  };
   const queueTrackIsKnownLiked = (track: PlayerQueueTrack) => {
     if (track.isLiked === true) {
       return true;
@@ -898,27 +919,74 @@ export function App() {
     if (albumTrackEntries.length === 0) {
       return baseArtists;
     }
+    const knownArtists = uniqueArtistEntries(
+      selectedPreviewArtists,
+    );
+    const hydrateArtist = (artist: TrackArtistEntry): TrackArtistEntry => {
+      if (artist.image_url) {
+        return artist;
+      }
+      const artistKey = artistEntryIdentityKey(artist);
+      const nameKey = artist.name?.trim().toLocaleLowerCase();
+      const knownArtist = knownArtists.find((candidate) => (
+        (artistKey && artistEntryIdentityKey(candidate) === artistKey)
+        || (nameKey && candidate.name?.trim().toLocaleLowerCase() === nameKey)
+      ));
+      const imageUrl = knownArtist?.image_url ?? findArtistImageUrl(artist.name);
+      return imageUrl ? { ...artist, image_url: imageUrl } : artist;
+    };
     const artistCounts = new Map<string, { artist: TrackArtistEntry; count: number }>();
+    let tracksWithArtists = 0;
     for (const track of albumTrackEntries) {
-      for (const artist of artistEntriesForAlbumTrack(track)) {
+      const trackArtists = artistEntriesForAlbumTrack(track);
+      if (trackArtists.length === 0) {
+        continue;
+      }
+      tracksWithArtists += 1;
+      for (const artist of trackArtists) {
         const artistName = artist.name?.trim();
         if (!artistName) {
           continue;
         }
-        const key = artistName.toLocaleLowerCase();
+        const key = artistEntryIdentityKey(artist) ?? artistName.toLocaleLowerCase();
         const current = artistCounts.get(key);
-        artistCounts.set(key, { artist: current?.artist ?? artist, count: (current?.count ?? 0) + 1 });
+        artistCounts.set(key, { artist: current?.artist ?? hydrateArtist(artist), count: (current?.count ?? 0) + 1 });
       }
+    }
+    const albumWideArtists = tracksWithArtists > 1
+      ? [...artistCounts.values()]
+        .filter((entry) => entry.count === tracksWithArtists)
+        .map((entry) => entry.artist)
+      : [];
+    if (albumWideArtists.length > 0) {
+      return uniqueArtistEntries(albumWideArtists);
     }
     const majorityArtists = [...artistCounts.values()]
       .filter((entry) => entry.count > albumTrackEntries.length / 2)
       .map((entry) => entry.artist);
-    return majorityArtists.length > 0 ? uniqueArtistEntries(majorityArtists) : baseArtists;
-  }, [albumTrackEntries, selectedPreview, selectedPreviewArtists]);
+    return majorityArtists.length > 0 ? uniqueArtistEntries(majorityArtists) : baseArtists.map(hydrateArtist);
+  }, [albumTrackEntries, profile, selectedPreview, selectedPreviewArtists]);
   const selectedPreviewAlbumGuestArtists = useMemo<TrackArtistEntry[]>(() => {
     if (selectedPreview?.kind !== "album" && selectedPreview?.kind !== "track") {
       return [];
     }
+    const knownArtists = uniqueArtistEntries(
+      selectedPreviewArtists,
+      selectedPreviewAlbumMainArtists,
+    );
+    const hydrateArtist = (artist: TrackArtistEntry): TrackArtistEntry => {
+      if (artist.image_url) {
+        return artist;
+      }
+      const artistKey = artistEntryIdentityKey(artist);
+      const nameKey = artist.name?.trim().toLocaleLowerCase();
+      const knownArtist = knownArtists.find((candidate) => (
+        (artistKey && artistEntryIdentityKey(candidate) === artistKey)
+        || (nameKey && candidate.name?.trim().toLocaleLowerCase() === nameKey)
+      ));
+      const imageUrl = knownArtist?.image_url ?? findArtistImageUrl(artist.name);
+      return imageUrl ? { ...artist, image_url: imageUrl } : artist;
+    };
     const primaryNames = new Set(
       selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
     );
@@ -926,8 +994,8 @@ export function App() {
     return uniqueArtistEntries(guestArtists).filter((artist) => {
       const artistName = artist.name?.trim().toLocaleLowerCase();
       return Boolean(artistName && !primaryNames.has(artistName));
-    });
-  }, [albumTrackEntries, selectedPreview, selectedPreviewAlbumMainArtists]);
+    }).map(hydrateArtist);
+  }, [albumTrackEntries, profile, selectedPreview, selectedPreviewAlbumMainArtists, selectedPreviewArtists]);
   const selectedPreviewAlbumHasGuestArtists = useMemo(() => {
     if (selectedPreview?.kind !== "album" && selectedPreview?.kind !== "track") {
       return false;
@@ -1074,9 +1142,15 @@ export function App() {
   const selectedPreviewIsBookmarked = Boolean(
     selectedPreviewStarTrackId && localBookmarkedTrackById[selectedPreviewStarTrackId],
   );
-  const selectedPreviewListenCount = selectedPreview?.kind === "track"
+  const selectedPreviewRecordingListenCount = selectedPreview?.kind === "track"
     ? (selectedPreviewReleaseTrackDetailReady?.source_versions ?? []).reduce((total, version) => total + Math.max(0, Number(version.play_count ?? 0) || 0), 0)
     : 0;
+  const selectedPreviewReleaseVersionListenCount = selectedPreview?.kind === "track" && selectedPreviewDetailView === "release"
+    ? Math.max(0, Number(selectedPreviewReleasePlaybackSourceVersion?.play_count ?? 0) || 0)
+    : 0;
+  const selectedPreviewListenCount = selectedPreviewDetailView === "release"
+    ? selectedPreviewReleaseVersionListenCount
+    : selectedPreviewRecordingListenCount;
   const selectedPreviewReleaseListenCountLabel = selectedPreviewListenCount > 0
     ? `${selectedPreviewListenCount.toLocaleString()} ${selectedPreviewListenCount === 1 ? "listen" : "listens"}`
     : null;
@@ -2003,12 +2077,12 @@ export function App() {
     if (typeof releaseTrackId !== "number" || !Number.isFinite(releaseTrackId) || releaseTrackId <= 0) {
       setSelectedPreviewRecordingCandidate(null);
       setSelectedPreviewRelatedCandidates([]);
-      setSelectedPreviewRecordingCandidateLoading(false);
       setSelectedPreviewRecordingCandidateError(null);
       return;
     }
     let cancelled = false;
-    setSelectedPreviewRecordingCandidateLoading(true);
+    setSelectedPreviewRecordingCandidate(null);
+    setSelectedPreviewRelatedCandidates([]);
     setSelectedPreviewRecordingCandidateError(null);
     fetchRecordingTrackCandidateByReleaseTrack(releaseTrackId)
       .then(async (payload) => {
@@ -2040,7 +2114,6 @@ export function App() {
         const items = Array.from(itemByKey.values());
         setSelectedPreviewRelatedCandidates(items);
         setSelectedPreviewRecordingCandidate(recordingCandidate);
-        setSelectedPreviewRecordingCandidateLoading(false);
       })
       .catch((error) => {
         if (cancelled) {
@@ -2048,7 +2121,6 @@ export function App() {
         }
         setSelectedPreviewRecordingCandidate(null);
         setSelectedPreviewRelatedCandidates([]);
-        setSelectedPreviewRecordingCandidateLoading(false);
         setSelectedPreviewRecordingCandidateError(formatUiErrorMessage(error, "Recording view could not be loaded."));
       });
     return () => {
@@ -2437,12 +2509,13 @@ export function App() {
       experienceMode === "local"
       || !selectedPreview
       || (selectedPreview.kind !== "track" && selectedPreview.kind !== "album")
-      || spotifyCooldownActive
     ) {
       loadedAlbumTracksAlbumIdRef.current = null;
       setAlbumTrackEntries([]);
       setAlbumTrackEntriesLoading(false);
       setAlbumTrackEntriesError(null);
+      setAlbumTrackEntriesPartial(false);
+      setAlbumTrackSpotifyFetchPending(false);
       return () => {
         cancelled = true;
       };
@@ -2475,11 +2548,27 @@ export function App() {
       setAlbumTrackEntries([]);
       setAlbumTrackEntriesLoading(false);
       setAlbumTrackEntriesError("Album track list is unavailable for this item.");
+      setAlbumTrackEntriesPartial(false);
+      setAlbumTrackSpotifyFetchPending(false);
       return () => {
         cancelled = true;
       };
     }
-    const albumAlreadyLoaded = initialAlbumId && loadedAlbumTracksAlbumIdRef.current === initialAlbumId && albumTrackEntries.length > 0;
+    const shouldForceSpotifyFetch = Boolean(
+      albumTrackSpotifyFetchRequest
+      && !spotifyCooldownActive
+      && (
+        (initialAlbumId && albumTrackSpotifyFetchRequest.albumId === initialAlbumId)
+        || (!initialAlbumId && selectedTrackId && albumTrackSpotifyFetchRequest.trackId === selectedTrackId)
+      ),
+    );
+    const albumCompletionKey = initialAlbumId
+      ? `album:${initialAlbumId}`
+      : selectedTrackId ? `track:${selectedTrackId}` : null;
+    const albumAlreadyLoaded = initialAlbumId
+      && loadedAlbumTracksAlbumIdRef.current === initialAlbumId
+      && albumTrackEntries.length > 0
+      && !shouldForceSpotifyFetch;
     if (albumAlreadyLoaded) {
       setAlbumTrackEntries((current) => current.map((row) => ({
         ...row,
@@ -2493,6 +2582,7 @@ export function App() {
     }
 
     async function loadAlbumTrackEntries() {
+      let scheduledSpotifyCompletion = false;
       setAlbumTrackEntriesLoading(true);
       setAlbumTrackEntriesError(null);
       const controller = new AbortController();
@@ -2508,6 +2598,12 @@ export function App() {
         const activeTrackUri = activePreview.trackUri ?? selectedPreviewReleasePlaybackSourceVersion?.uri ?? null;
         if (activeTrackUri) {
           params.set("track_uri", activeTrackUri);
+        }
+        if (shouldForceSpotifyFetch) {
+          params.set("force_spotify", "true");
+        }
+        if (spotifyCooldownActive && !shouldForceSpotifyFetch) {
+          params.set("local_only", "true");
         }
         const response = await fetch(`${apiBaseUrl}/auth/playback/album-tracks?${params.toString()}`, {
           credentials: "include",
@@ -2534,6 +2630,7 @@ export function App() {
             play_count?: number | null;
             last_played_at?: string | null;
           }>;
+          partial?: boolean | null;
         };
         const resolvedAlbumId = payload.album_id ?? initialAlbumId;
         if (!resolvedAlbumId) {
@@ -2542,9 +2639,29 @@ export function App() {
         const rows = albumTrackRowsFromItems(payload.items ?? [], selectedTrackId);
 
         if (!cancelled) {
+          const isPartial = Boolean(payload.partial);
           setAlbumTrackEntries(rows);
           loadedAlbumTracksAlbumIdRef.current = resolvedAlbumId;
           setAlbumTrackEntriesError(rows.length === 0 ? "No tracks were returned for this album." : null);
+          setAlbumTrackEntriesPartial(isPartial);
+          const completionKey = resolvedAlbumId ? `album:${resolvedAlbumId}` : albumCompletionKey;
+          if (
+            isPartial
+            && activePreview.kind === "track"
+            && !spotifyCooldownActive
+            && !shouldForceSpotifyFetch
+            && completionKey
+            && !albumTrackSpotifyAutoFetchAttemptedRef.current.has(completionKey)
+          ) {
+            albumTrackSpotifyAutoFetchAttemptedRef.current.add(completionKey);
+            scheduledSpotifyCompletion = true;
+            setAlbumTrackSpotifyFetchPending(true);
+            setAlbumTrackSpotifyFetchRequest({
+              albumId: resolvedAlbumId,
+              trackId: selectedTrackId,
+              nonce: Date.now(),
+            });
+          }
         }
       } catch (error) {
         if (!cancelled) {
@@ -2558,6 +2675,12 @@ export function App() {
         window.clearTimeout(timeoutId);
         if (!cancelled) {
           setAlbumTrackEntriesLoading(false);
+          if (shouldForceSpotifyFetch) {
+            setAlbumTrackSpotifyFetchRequest(null);
+          }
+          if (!scheduledSpotifyCompletion) {
+            setAlbumTrackSpotifyFetchPending(false);
+          }
         }
       }
     }
@@ -2580,6 +2703,7 @@ export function App() {
     selectedPreviewDetailView,
     recordingAlbumTracklistOpen,
     spotifyCooldownActive,
+    albumTrackSpotifyFetchRequest,
   ]);
 
   useEffect(() => {
@@ -9755,6 +9879,14 @@ export function App() {
     : null;
   const selectedPreviewCanonicalTrackTitle = selectedPreviewReleaseTrackDetailReady?.release_track.name?.trim() || null;
   const selectedPreviewReleaseSourceVersions = selectedPreviewReleaseTrackDetailReady?.source_versions ?? [];
+  const selectedPreviewCanViewReleaseTrack = selectedPreview?.kind === "track" && (
+    new Set(
+      selectedPreviewReleaseSourceVersions
+        .map((version) => version.spotify_track_id?.trim())
+        .filter((spotifyTrackId): spotifyTrackId is string => Boolean(spotifyTrackId)),
+    ).size > 1
+    || selectedPreviewReleaseSiblingSourceCount > 1
+  );
   const selectedPreviewCurrentSpotifyTrackId = selectedPreview?.kind === "track"
     ? selectedPreview.trackId ?? spotifyTrackIdFromUri(selectedPreview.trackUri)
     : null;
@@ -9823,26 +9955,7 @@ export function App() {
     contextStyle: selectedPreviewContextStyleMembers,
     coverRemix: selectedPreviewCoverRemixMembers,
   };
-  const selectedPreviewHasLoadedRelationRows = selectedPreviewRelationRows.recording.length > 0
-    || selectedPreviewRelationRows.contextStyle.length > 0
-    || selectedPreviewRelationRows.coverRemix.length > 0;
-  const selectedPreviewHasPossibleRelationRows = Boolean(
-    selectedPreview?.kind === "track"
-    && (selectedPreview.hasReleaseTrackSiblings || (selectedPreview.releaseTrackSourceCount ?? 0) > 1),
-  );
-  const selectedPreviewDisplayRelationRows = selectedPreviewRecordingCandidateLoading && selectedPreviewHasPossibleRelationRows && !selectedPreviewHasLoadedRelationRows
-    ? previousRecordingRelationRowsRef.current ?? selectedPreviewRelationRows
-    : selectedPreviewRelationRows;
-
-  useEffect(() => {
-    if (!selectedPreviewHasLoadedRelationRows) {
-      return;
-    }
-    previousRecordingRelationRowsRef.current = selectedPreviewRelationRows;
-  }, [
-    selectedPreviewHasLoadedRelationRows,
-    selectedPreviewRelationRows,
-  ]);
+  const selectedPreviewDisplayRelationRows = selectedPreviewRelationRows;
   const releaseSourceVersionArtistText = (version: ReleaseTrackDetailSourceVersion) => {
     const names = version.artists.map((artist) => artist.name?.trim()).filter(Boolean);
     return names.length > 0 ? names.join(", ") : null;
@@ -11122,6 +11235,18 @@ export function App() {
             albumTrackEntries={albumTrackEntries}
             albumTrackEntriesError={albumTrackEntriesError}
             albumTrackEntriesLoading={albumTrackEntriesLoading}
+            albumTrackFetchFromSpotifyLoading={albumTrackSpotifyFetchPending}
+            albumTrackMoreOnSpotifyUrl={
+              selectedPreview.kind === "track" && spotifyCooldownActive && (albumTrackEntriesPartial || Boolean(albumTrackEntriesError))
+                ? (
+                  selectedPreview.sourceAlbumUrl
+                  || selectedPreview.sourceTrack?.album_url
+                  || spotifyEntityUrl("album", selectedPreviewReleasePlaybackSourceVersion?.album_id ?? albumIdFromPreview(selectedPreview))
+                  || null
+                )
+                : null
+            }
+            albumTrackIsExactKnownLiked={albumTrackIsExactKnownLiked}
             albumTrackIsKnownLiked={albumTrackIsKnownLiked}
             albumTrackLastSortMode={albumTrackLastSortMode}
             albumTrackListRef={albumTrackListRef}
@@ -11181,6 +11306,7 @@ export function App() {
             selectedPreviewArtists={selectedPreviewArtists}
             selectedPreviewCanOpenAlbum={selectedPreviewCanOpenAlbum}
             selectedPreviewCanOpenArtist={selectedPreviewCanOpenArtist}
+            selectedPreviewCanViewReleaseTrack={selectedPreviewCanViewReleaseTrack}
             selectedPreviewCanonicalTrackTitle={selectedPreviewCanonicalTrackTitle}
             selectedPreviewCurrentSpotifyTrackId={selectedPreviewCurrentSpotifyTrackId}
             selectedPreviewDetailView={selectedPreviewDetailView}

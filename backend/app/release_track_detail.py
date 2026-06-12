@@ -42,6 +42,7 @@ class ReleaseTrackDetailSourceVersion(TypedDict):
     spotify_url: str | None
     is_context: bool
     is_playback_choice: bool
+    is_representative_choice: bool
 
 
 class ReleaseTrackDetailPayload(TypedDict):
@@ -297,8 +298,14 @@ def get_release_track_detail(
                 "spotify_url": _spotify_track_url(spotify_track_id),
                 "is_context": bool(normalized_context_id and spotify_track_id == normalized_context_id),
                 "is_playback_choice": False,
+                "is_representative_choice": False,
             }
         )
+
+    representative_choice = next((version for version in versions if _is_usable_source(version)), None)
+    if representative_choice is not None:
+        for version in versions:
+            version["is_representative_choice"] = version["source_track_id"] == representative_choice["source_track_id"]
 
     playback_choice: ReleaseTrackDetailSourceVersion | None = None
     playback_reason: PlaybackReason = "unavailable"

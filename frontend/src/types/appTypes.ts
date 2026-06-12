@@ -193,6 +193,7 @@ export type ReleaseTrackDetailSourceVersion = {
   spotify_url: string | null;
   is_context: boolean;
   is_playback_choice: boolean;
+  is_representative_choice?: boolean;
 };
 
 export type ReleaseTrackDetailResponse = {

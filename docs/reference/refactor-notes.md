@@ -280,12 +280,15 @@ Current playback UI behavior:
   - empty album sections do not render headings
 - Album/track overlay behavior:
   - album title shows year inline and album summary shows loaded track count/runtime
-  - album main artists are derived from majority-of-loaded-track evidence, falling back to album metadata artists before tracklist evidence is available
+  - album main artists are derived from artists present across the loaded album tracklist when possible, falling back to majority/metadata evidence when album-wide evidence is unavailable
+  - album artist names render inline artist images when available
   - album and track overlays split artists into main artist(s) plus `with ...` guests
   - album tracklist header shows track count/runtime instead of `Title`
   - album tracklist has optional `With`, `Tags`, `Preview`, and `Played` columns; the `With` column is removed for albums with no guest artists
   - liked badges render next to track names, while release/recording tags render in `Tags`
+  - release view album-track rows show liked state only for the exact Spotify source track; recording view keeps the aggregate liked fallback across related source versions
   - tracklist can stay mounted while the selected album changes, so rows update instead of disappearing into a loading-only state
+  - partial track-overlay album lists auto-complete from Spotify when cooldown allows; during cooldown they stay local-only and show a `More tracks on Spotify` album link
   - tracklist opens centered on the highlighted/current track when possible and renders a small scrollbar-position marker only when the list can scroll
   - top `with ...` list controls delayed row highlighting and scrolls the first matching row into view
   - row-level `With` artists are clickable but do not trigger hover highlighting
@@ -299,7 +302,9 @@ Current playback UI behavior:
   - track overlays default to recording view on user-facing pages, while Identity Audit/Search/Listen Log backend pages may request release view
   - recording view shows same-recording album appearances separately from broader `Variations`; clicking variation/family cards switches the selected album and representative release track
   - release view shows source-version albums and marks the representative source instead of listing raw source rows as the main UI
-  - the top-right gear menu exposes Spotify and View Release/Recording Track actions; the old bottom switch button is removed
+  - the top-right gear menu exposes Spotify and View Release/Recording Track actions; `View release track` is hidden when there are no separate source versions
+  - track overlay playback uses a compact top-left play/time menu; star/bookmark actions sit beside it, and last-listened/listen-count tags sit at the bottom behind a divider
+  - release view bottom listen count uses the selected source version count; recording view uses the combined source-version count
   - track overlays keep Spotify source track id/URI as playback identity even when release/recording/family evidence is shown
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.

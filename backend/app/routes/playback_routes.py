@@ -292,6 +292,8 @@ async def auth_playback_album_tracks(
     track_id: str | None = None,
     track_uri: str | None = None,
     album_id: str | None = None,
+    force_spotify: bool = False,
+    local_only: bool = False,
 ) -> dict[str, Any]:
     _require_user_id(request)
     track_id_candidate = track_id or _spotify_track_id_from_uri(track_uri)
@@ -313,12 +315,13 @@ async def auth_playback_album_tracks(
                 "items": enrich_album_track_rows_with_release_metadata(cached_items),
                 "source": source,
                 "cached": True,
+                "partial": False,
             }
 
         catalog_items, catalog_complete = _cached_album_track_rows_from_track_catalog(normalized_album_id)
         if len(catalog_items) > len(local_fallback_items):
             local_fallback_items = catalog_items
-        if catalog_complete or (catalog_items and not cached_items):
+        if not force_spotify and (catalog_complete or (catalog_items and not cached_items)):
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
@@ -327,6 +330,18 @@ async def auth_playback_album_tracks(
                 "cached": True,
                 "partial": not catalog_complete,
             }
+
+    if local_only:
+        if normalized_album_id and local_fallback_items:
+            return {
+                "album_id": normalized_album_id,
+                "track_id": normalized_track_id,
+                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "source": "local_partial",
+                "cached": True,
+                "partial": True,
+            }
+        raise HTTPException(status_code=404, detail="Album track list is unavailable for this item.")
 
     try:
         token = _require_token(request)
@@ -370,6 +385,7 @@ async def auth_playback_album_tracks(
             "items": enrich_album_track_rows_with_release_metadata(cached_items),
             "source": source,
             "cached": True,
+            "partial": False,
         }
 
     try:
@@ -391,6 +407,7 @@ async def auth_playback_album_tracks(
         "items": enrich_album_track_rows_with_release_metadata(items),
         "source": "spotify_album_tracks",
         "cached": False,
+        "partial": False,
     }
 
 

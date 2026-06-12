@@ -16,10 +16,10 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- `Add album repair UI and track family relation badges`
+- `Polish track modal album and release views`
 
 Worktree at handoff:
-- clean after committing release-album repair UI plus relation badge/family list fixes
+- clean after committing the track modal album/release-view QA batch
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
@@ -70,6 +70,39 @@ Frontend changes:
 
 Important implementation note:
 - Some backend fixes affect generated recording candidate lookup. If QA appears stale, restart the backend first, then hard refresh the frontend.
+
+## Current Track Modal Album/Release QA Batch
+This latest work is mostly frontend modal behavior plus a small playback album-track route control.
+
+User-facing track modal changes:
+- Track view label changed from `Recording variations` to `Also Appears On:`.
+- Recording-variation rows are cleared on track changes instead of briefly showing the previous track's rows.
+- `D/R/V/C` badges no longer show recording `R` just because duplicate-source evidence exists.
+- Track and album artist headings render inline artist images when known.
+- Last-listened and listen-count tags moved to the bottom behind a divider, with reserved space to avoid delayed layout jump.
+- Track top controls now use a compact play/time `PlaybackActionMenu` at top left with star/bookmark beside it.
+- The old inline `Play now`, `Play next`, and `Add to queue` buttons were removed.
+- Gear menu keeps Spotify/settings actions; `View release track` is hidden when a track has no separate Spotify/source release versions.
+
+Album behavior from track view:
+- If the selected album is only partially known locally, the frontend first shows local database rows, then automatically requests Spotify completion when cooldown allows.
+- During Spotify cooldown, the frontend uses `local_only=true` and shows `More tracks on Spotify` with an album link when local rows are incomplete.
+- Loading copy distinguishes no rows yet (`Fetching Album...`) from partial rows being completed (`Loading Album...`).
+- Backend `/auth/playback/album-tracks` now supports:
+  - `force_spotify=true`: skip early partial DB return and fetch/cache the full Spotify album tracklist.
+  - `local_only=true`: use only local DB evidence and do not call Spotify.
+- Album main artists are derived from album-wide tracklist evidence when possible, so an album opened from a feature track does not keep feature artists as album artists after the full album is fetched.
+
+Release/recording view behavior:
+- Release album `Rep` badges now use stable representative-source metadata instead of following the highlighted/current source album.
+- Release view bottom listen count uses only the currently selected source version's `play_count`.
+- Recording view bottom listen count remains combined across source versions.
+- Release view album-track stars are exact to that Spotify source track.
+- Recording view album-track stars keep the existing aggregate behavior across related source versions.
+
+Backend release detail changes:
+- `ReleaseTrackDetailSourceVersion` now exposes `is_representative_choice`.
+- Representative source selection stays stable while playback/highlight source can change with context.
 
 ## Current Startup-Load Work
 Committed startup-load work changed initial dashboard loading behavior and bundle shape.
@@ -198,8 +231,22 @@ Checks run for the release-album repair UI / relation badge / track-family list 
 Manual/browser QA completed:
 - Identity Audit `Albums -> Repair` dry-run rendered candidates and summary counts without console errors.
 
+Checks run for track modal album/release-view QA batch:
+- `python3 -m unittest backend.tests.test_release_track_detail`
+- `python3 -m py_compile backend/app/routes/playback_routes.py`
+- `npm run build` from `frontend/` after each frontend behavior batch
+- `git diff --check`
+
+Browser smoke checks completed:
+- local Vite frontend loaded with no console errors after album artist/automatic album fetch changes.
+
 Outstanding QA:
-- After the final family-anchor display-filter fix, build and whitespace checks passed, but authenticated browser QA was not rerun.
+- Authenticated end-to-end browser QA was not rerun after the final release-view exact-star change.
+- Good follow-up manual checks:
+  - track with partial local album automatically completes when Spotify is available
+  - cooldown mode shows `More tracks on Spotify`
+  - release view album-track stars are exact-source only
+  - recording view stars/listen counts remain aggregate
 
 ## Known Limitations
 - Frontend bookmark/star behavior is local placeholder UI; bookmark persistence is not implemented.
@@ -235,4 +282,4 @@ Recommended project-level next steps:
 - Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest committed work adds Identity Audit `Albums -> Repair`, fixes related-track badges to concatenate `D/R/V/C`, and adds representative track family lists for variations/covers/remixes while excluding same-recording album appearances. Verification passed with frontend `npm run build` and `git diff --check`; earlier browser QA verified the repair tab dry-run UI, but browser QA was not rerun after the final family-anchor display-filter fix. Next: push if desired, QA representative track family rows in the authenticated browser, review the 28 safe release-album repair candidates before any write run, then continue album/track source-text identity reconciliation through explicit dry-run/apply flows.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest committed work polishes the track modal: top-left play/time menu with star/bookmark, bottom last-listened/listen-count tags, `Also Appears On:`, no stale recording-variation rows, album artist images, automatic partial-album completion via `force_spotify=true`, cooldown local-only album fallback with `More tracks on Spotify`, stable release `Rep` badges, hidden `View release track` gear item when no separate source versions exist, release-view exact listen counts and stars, and recording-view aggregate behavior preserved. Verification passed with `python3 -m unittest backend.tests.test_release_track_detail`, `python3 -m py_compile backend/app/routes/playback_routes.py`, frontend `npm run build`, and `git diff --check`; lightweight browser smoke checks passed earlier in the batch, but authenticated end-to-end QA was not rerun after the final release-view exact-star change. Next: push if desired, QA the track modal release/recording cases in the authenticated browser, then continue album/track source-text identity reconciliation through explicit dry-run/apply flows.

@@ -210,11 +210,15 @@ class ReleaseTrackDetailTests(unittest.TestCase):
         self.assertEqual("context_source", payload["playback"]["reason"])
         self.assertEqual("track-b", payload["playback"]["spotify_track_id"])
         flags = {
-            version["spotify_track_id"]: (version["is_context"], version["is_playback_choice"])
+            version["spotify_track_id"]: (
+                version["is_context"],
+                version["is_playback_choice"],
+                version["is_representative_choice"],
+            )
             for version in payload["source_versions"]
         }
-        self.assertEqual((False, False), flags["track-a"])
-        self.assertEqual((True, True), flags["track-b"])
+        self.assertEqual((False, False, True), flags["track-a"])
+        self.assertEqual((True, True, False), flags["track-b"])
 
     def test_raw_spotify_payload_fills_missing_catalog_album_fields(self) -> None:
         with sqlite_connection(write=True) as connection:
@@ -306,6 +310,8 @@ class ReleaseTrackDetailTests(unittest.TestCase):
         self.assertEqual(first["playback"], second["playback"])
         playback_choices = [version for version in first["source_versions"] if version["is_playback_choice"]]
         self.assertEqual(["track-a"], [version["spotify_track_id"] for version in playback_choices])
+        representative_choices = [version for version in first["source_versions"] if version["is_representative_choice"]]
+        self.assertEqual(["track-a"], [version["spotify_track_id"] for version in representative_choices])
 
     def test_unavailable_playback_when_no_usable_source_exists(self) -> None:
         release_track_id = self._seed_release_track(include_unusable=True)
@@ -319,3 +325,4 @@ class ReleaseTrackDetailTests(unittest.TestCase):
         self.assertIsNone(payload["playback"]["spotify_track_id"])
         self.assertIsNone(payload["playback"]["uri"])
         self.assertFalse(any(version["is_playback_choice"] for version in payload["source_versions"]))
+        self.assertFalse(any(version["is_representative_choice"] for version in payload["source_versions"]))

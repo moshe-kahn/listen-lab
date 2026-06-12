@@ -22,6 +22,7 @@ export function trackRelationTagEntries(input: TrackRelationTagInput): TrackRela
   const isVariationFamily = isTrackFamily && !isCoverRemixFamily;
   const hasLegacySiblingOnly = !isRecordingGroup
     && !isTrackFamily
+    && !hasDuplicateSources
     && Boolean(input.hasReleaseTrackSiblings || Number(input.releaseTrackSourceCount ?? 0) > 1);
 
   return [

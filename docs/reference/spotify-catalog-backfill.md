@@ -54,13 +54,16 @@ Artist identity promotion is separate from catalog backfill. When a Spotify arti
   - Spotify ID tie-break
 
 ## Playback Album-Track Fallback
-The playback route `/auth/playback/album-tracks` can now fetch a Spotify album tracklist when local catalog data is missing or incomplete.
+The playback route `/auth/playback/album-tracks` can fetch a Spotify album tracklist when local catalog data is missing or incomplete.
 
 Behavior:
-- use local album-track/catalog rows when sufficient
-- fall back to Spotify album tracklist fetch when local rows are insufficient
-- cache fetched album tracks/catalog rows for later opens
-- use the same fallback path for the song overlay and homepage album expansion
+- use complete `spotify_album_track` rows from the local ListenLab database when available
+- otherwise use `spotify_track_catalog` rows for that album as a partial local fallback
+- return partial local rows with `partial: true` when the caller has not requested a forced Spotify refresh
+- when the frontend gets `partial: true` for a track overlay and Spotify is not cooling down, call the endpoint again with `force_spotify=true`
+- `force_spotify=true` skips the early partial local return and fetches `/v1/albums/{album_id}/tracks` from Spotify, then caches those rows for later opens
+- `local_only=true` prevents any Spotify request and returns only complete/partial local database evidence; the frontend uses this during Spotify cooldown
+- use the same cached/local fallback path for the song overlay and homepage album expansion
 - preserve album queue context when a track is started from an album row
 
 This fallback is catalog enrichment only. It must not merge, promote, or repair identity rows.
