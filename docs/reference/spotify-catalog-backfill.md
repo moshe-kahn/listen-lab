@@ -68,6 +68,19 @@ Behavior:
 
 This fallback is catalog enrichment only. It must not merge, promote, or repair identity rows.
 
+## History/Spotify Release-Album Repair
+The debug repair path for history-only release albums and Spotify-backed release albums is separate from catalog backfill. It may merge release-album rows only through explicit preview/dry-run/apply flow.
+
+Current safe-equivalence rules:
+- require source-track evidence that the release track belongs on the target Spotify album, or on a different Spotify album catalog row that is equivalent to the target
+- treat Spotify album catalog rows as equivalent when normalized album name matches, and release date plus total track count do not conflict when both sides have values
+- intentionally ignore duration for album equivalence and same-album release-track duplicate repair, because Spotify duration metadata has known drift
+- handle duplicate album-track collisions by retaining the survivor album-track row and deleting the conflicting retired row before deleting the retired release album
+- repoint `album_family`, `album_family_map`, and `release_track_merge_log` references before deleting retired release albums
+- mark affected generated recording clusters dirty after accepted release-album/release-track repoints
+
+This path is still evidence-gated identity repair. Do not move it into automatic catalog backfill.
+
 ## Artist Album Evidence Fallback
 The artist album evidence route `/auth/artist-albums` primarily uses Spotify catalog album and album-track metadata, but it now falls back to internal `album_artist` links when catalog album rows are missing or incomplete.
 

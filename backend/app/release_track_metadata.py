@@ -112,14 +112,12 @@ def release_track_play_history_for_release_track_ids(release_track_ids: list[int
             )
             SELECT
               release_sources.release_track_id,
-              count(DISTINCT plays.id) AS play_count,
-              max(plays.canonical_ended_at) AS last_played_at
+              sum(COALESCE(play_counts.play_count, 0)) AS play_count,
+              min(play_counts.first_played_at) AS first_played_at,
+              max(play_counts.last_played_at) AS last_played_at
             FROM release_sources
-            JOIN v_fact_play_event_with_sources plays
-              ON (
-                plays.spotify_track_id = release_sources.spotify_track_id
-                OR plays.spotify_track_uri = release_sources.spotify_track_uri
-              )
+            JOIN source_track_play_count_cache play_counts
+              ON play_counts.spotify_track_id = release_sources.spotify_track_id
             GROUP BY release_sources.release_track_id
             """,
             normalized_ids,
@@ -127,6 +125,7 @@ def release_track_play_history_for_release_track_ids(release_track_ids: list[int
     return {
         int(row["release_track_id"]): {
             "play_count": int(row["play_count"] or 0),
+            "first_played_at": row["first_played_at"],
             "last_played_at": row["last_played_at"],
         }
         for row in rows
@@ -138,25 +137,23 @@ def play_history_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict
     if not normalized_ids:
         return {}
     placeholders = ",".join("?" for _ in normalized_ids)
-    uri_ids = [f"spotify:track:{track_id}" for track_id in normalized_ids]
-    uri_placeholders = ",".join("?" for _ in uri_ids)
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         rows = connection.execute(
             f"""
             SELECT
-              COALESCE(NULLIF(spotify_track_id, ''), replace(spotify_track_uri, 'spotify:track:', '')) AS spotify_track_id,
-              count(DISTINCT id) AS play_count,
-              max(canonical_ended_at) AS last_played_at
-            FROM v_fact_play_event_with_sources
+              spotify_track_id,
+              play_count,
+              first_played_at,
+              last_played_at
+            FROM source_track_play_count_cache
             WHERE spotify_track_id IN ({placeholders})
-               OR spotify_track_uri IN ({uri_placeholders})
-            GROUP BY COALESCE(NULLIF(spotify_track_id, ''), replace(spotify_track_uri, 'spotify:track:', ''))
             """,
-            (*normalized_ids, *uri_ids),
+            normalized_ids,
         ).fetchall()
     return {
         str(row["spotify_track_id"] or ""): {
             "play_count": int(row["play_count"] or 0),
+            "first_played_at": row["first_played_at"],
             "last_played_at": row["last_played_at"],
         }
         for row in rows
@@ -296,16 +293,27 @@ def enrich_track_rows_with_release_metadata(
     for row in enriched:
         release_track_id = row.get("release_track_id")
         track_id = str(row.get(track_id_key) or "").strip()
+        exact_play_history = play_history_by_track_id.get(track_id)
+        if exact_play_history:
+            row["source_play_count"] = exact_play_history["play_count"]
+            row["source_first_played_at"] = exact_play_history["first_played_at"]
+            row["source_last_played_at"] = exact_play_history["last_played_at"]
+        else:
+            row.setdefault("source_play_count", 0)
+            row.setdefault("source_first_played_at", None)
+            row.setdefault("source_last_played_at", None)
         play_history = (
             play_history_by_release_track_id.get(release_track_id)
             if isinstance(release_track_id, int)
             else None
-        ) or play_history_by_track_id.get(track_id)
+        ) or exact_play_history
         if play_history:
             row["play_count"] = play_history["play_count"]
+            row["first_played_at"] = play_history["first_played_at"]
             row["last_played_at"] = play_history["last_played_at"]
         else:
             row.setdefault("play_count", 0)
+            row.setdefault("first_played_at", None)
             row.setdefault("last_played_at", None)
     return enriched
 

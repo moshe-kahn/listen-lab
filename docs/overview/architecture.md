@@ -73,7 +73,7 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend playback controls and player state presentation
 - frontend queue organizer, preview-resume handling, album play-all controls, and Recent Likes cache/sync UI
 - frontend playback-action menu for overlay and album play controls, with `Play now`, `Play next`, and `Add to queue` actions backed by the ListenLab queue
-- frontend recording/release track views with same-recording album appearances, broader variation/family album cards, source-version album cards in release view, listen counts, liked-state fallback checks, and in-place album tracklist scrolling/highlighting
+- frontend recording/release track views with same-recording album appearances, broader variation/family album cards, source-version album cards in release view, exact-source vs aggregate listen/date semantics, liked-state fallback checks, and in-place album tracklist scrolling/highlighting
 - frontend homepage playback album expansion uses a compact tracklist while keeping the queue visible; repeated Spotify queue cycles are collapsed for display
 - frontend local/full/test mode controls with cached-state indicators
 - frontend tracks-only comparison page for current vs new all-time ranking formulas
@@ -88,6 +88,7 @@ This document is the implementation-oriented technical source of truth for the L
 - backend generic file cache and static Spotify metadata cache helpers extracted under `backend/app/cache/`
 - backend Spotify HTTP, rate-limit, normalization, and lookup helpers extracted into focused `backend/app/spotify_*.py` modules
 - backend encrypted Spotify token persistence and token-backed session restore
+- backend `source_track_play_count_cache` stores derived per-Spotify-track play count, first listened, and last listened values for release-source detail and generated recording candidate aggregation
 - backend PKCE code-challenge handling for Spotify auth flows
 - authenticated `GET /me` snapshot endpoint
 - authenticated `GET /me/progress` timing endpoint for debugging load phases

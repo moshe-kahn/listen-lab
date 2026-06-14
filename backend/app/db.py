@@ -1494,6 +1494,33 @@ CREATE TABLE IF NOT EXISTS generated_recording_track_cluster_dirty (
 CREATE INDEX IF NOT EXISTS idx_generated_recording_track_cluster_dirty_updated
   ON generated_recording_track_cluster_dirty(updated_at);
 """,
+    34: """
+CREATE TABLE IF NOT EXISTS source_track_play_count_cache (
+  spotify_track_id TEXT PRIMARY KEY,
+  play_count INTEGER NOT NULL DEFAULT 0,
+  first_played_at TEXT,
+  last_played_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+INSERT OR REPLACE INTO source_track_play_count_cache (
+  spotify_track_id,
+  play_count,
+  first_played_at,
+  last_played_at,
+  updated_at
+)
+SELECT
+  spotify_track_id,
+  count(*) AS play_count,
+  min(canonical_ended_at) AS first_played_at,
+  max(canonical_ended_at) AS last_played_at,
+  strftime('%Y-%m-%dT%H:%M:%fZ','now') AS updated_at
+FROM fact_play_event
+WHERE spotify_track_id IS NOT NULL
+  AND trim(spotify_track_id) != ''
+GROUP BY spotify_track_id;
+""",
 }
 
 
@@ -5833,14 +5860,6 @@ def merge_conservative_same_album_release_track_duplicates() -> dict[str, int]:
             if len(format_signatures) > 1:
                 continue
 
-            non_null_durations = [
-                int(row["duration_ms"])
-                for row in group_rows
-                if row["duration_ms"] is not None
-            ]
-            if len(non_null_durations) >= 2 and (max(non_null_durations) - min(non_null_durations)) > 2000:
-                continue
-
             winner_row = min(group_rows, key=lambda row: int(row["release_track_id"]))
             winner_release_track_id = int(winner_row["release_track_id"])
             release_album_id = int(winner_row["release_album_id"])
@@ -6057,3 +6076,53 @@ def apply_pending_migrations() -> None:
     for version in pending_versions:
         execute_sql(MIGRATIONS[version])
         set_schema_version(version)
+
+
+def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None = None) -> dict[str, int]:
+    owns_connection = connection is None
+    active_connection = connection or sqlite3.connect(get_sqlite_db_path(), timeout=30)
+    try:
+        active_connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_track_play_count_cache (
+              spotify_track_id TEXT PRIMARY KEY,
+              play_count INTEGER NOT NULL DEFAULT 0,
+              first_played_at TEXT,
+              last_played_at TEXT,
+              updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            )
+            """
+        )
+        active_connection.execute("DELETE FROM source_track_play_count_cache")
+        cursor = active_connection.execute(
+            """
+            INSERT INTO source_track_play_count_cache (
+              spotify_track_id,
+              play_count,
+              first_played_at,
+              last_played_at,
+              updated_at
+            )
+            SELECT
+              spotify_track_id,
+              count(*) AS play_count,
+              min(canonical_ended_at) AS first_played_at,
+              max(canonical_ended_at) AS last_played_at,
+              strftime('%Y-%m-%dT%H:%M:%fZ','now') AS updated_at
+            FROM fact_play_event
+            WHERE spotify_track_id IS NOT NULL
+              AND trim(spotify_track_id) != ''
+            GROUP BY spotify_track_id
+            """
+        )
+        row_count = int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
+        if owns_connection:
+            active_connection.commit()
+        return {"row_count": row_count}
+    except Exception:
+        if owns_connection:
+            active_connection.rollback()
+        raise
+    finally:
+        if owns_connection:
+            active_connection.close()

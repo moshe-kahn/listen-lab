@@ -51,14 +51,14 @@ export function parseTimestampMs(value: string | null | undefined): number | nul
   return parsed.getTime();
 }
 
-export function formatMonthDay(value: string | null | undefined, includeYearWhenPrevious = false): string | null {
+export function formatMonthDay(value: string | null | undefined, includeYear = false): string | null {
   const parsedMs = parseTimestampMs(value);
   if (parsedMs == null) {
     return null;
   }
   const parsed = new Date(parsedMs);
   const monthDay = `${parsed.getMonth() + 1}/${parsed.getDate()}`;
-  if (!includeYearWhenPrevious || parsed.getFullYear() === new Date().getFullYear()) {
+  if (!includeYear) {
     return monthDay;
   }
   return `${monthDay}/${String(parsed.getFullYear()).slice(-2)}`;
@@ -79,11 +79,8 @@ export function formatCompactRelativeAge(value: string | null | undefined): stri
   if (days < 7) {
     return `${clamp(days)}d`;
   }
-  if (days < 60) {
-    return `${clamp(days / 7)}w`;
-  }
   if (days < 365) {
-    return `${clamp(days / 30.4375)}m`;
+    return `${clamp(days / 7)}w`;
   }
   return `${clamp(days / 365.25)}y`;
 }
@@ -111,6 +108,34 @@ export function previewAlbumHeading(preview: PreviewItem): string {
     ?? preview.sourceAlbumYear
     ?? (detailIsYear ? detailText : null);
   return albumYear ? `${albumYear} - ${albumName}` : albumName;
+}
+
+export function derivedAlbumDisplayLabel(preview: PreviewItem | null | undefined): string | null {
+  if (preview?.kind !== "album") {
+    return null;
+  }
+  const text = [
+    preview.label,
+    preview.sourceAlbumName,
+    preview.sourceTrack?.album_name,
+    preview.detail,
+  ].filter(Boolean).join(" ").toLocaleLowerCase();
+  if (!text) {
+    return null;
+  }
+  const soundtrackMarkers = [
+    /\boriginal soundtrack\b/,
+    /\bmotion picture soundtrack\b/,
+    /\boriginal motion picture\b/,
+    /\bmusic from the motion picture\b/,
+    /\bmusic from and inspired by\b/,
+    /\bbande originale\b/,
+    /\bbande originale du film\b/,
+    /\bsoundtrack from\b/,
+    /\bsoundtrack to\b/,
+    /\bost\b/,
+  ];
+  return soundtrackMarkers.some((marker) => marker.test(text)) ? "Soundtrack" : null;
 }
 
 export function recentRangeLabel(range: RecentRange) {

@@ -1,4 +1,4 @@
-import { Fragment, type CSSProperties, type Dispatch, type ReactNode, type Ref, type SetStateAction } from "react";
+import { Fragment, useState, type CSSProperties, type Dispatch, type MouseEvent, type ReactNode, type Ref, type SetStateAction } from "react";
 
 import type {
   AlbumTrackEntry,
@@ -89,6 +89,7 @@ type DetailPreviewModalProps = {
   selectedPreviewAlbumHasGuestArtists: boolean;
   selectedPreviewAlbumMainArtists: TrackArtistEntry[];
   selectedPreviewAlbumSummary: string | null;
+  selectedPreviewAlbumContextTagLabel: string | null;
   selectedPreviewAppearsOnAlbums: ArtistAlbumEntry[];
   selectedPreviewArtistAlbumsForDisplay: ArtistAlbumEntry[];
   selectedPreviewArtistImageUrl: string | null;
@@ -98,13 +99,21 @@ type DetailPreviewModalProps = {
   selectedPreviewCanViewReleaseTrack: boolean;
   selectedPreviewCanonicalTrackTitle: string | null;
   selectedPreviewCurrentSpotifyTrackId: string | null;
+  selectedPreviewCurrentVersionIsSpotifyLiked: boolean;
   selectedPreviewDetailView: "recording" | "release";
   selectedPreviewDisplayRelationRows: RecordingRelationRows;
   selectedPreviewHasReleaseSibling: boolean;
+  selectedPreviewListenedBreakdown: {
+    thisAlbumFirstLabel: string | null;
+    thisAlbumLastLabel: string | null;
+    otherAlbumsFirstLabel: string | null;
+    otherAlbumsLastLabel: string | null;
+  } | null;
+  selectedPreviewListenedRangeLabel: string | null;
   selectedPreviewIsBookmarked: boolean;
   selectedPreviewIsKnownLiked: boolean;
   selectedPreviewIsSharedArtistPage: boolean;
-  selectedPreviewLastListenedLabel: string | null;
+  selectedPreviewListenBreakdown: { thisAlbumCount: number; otherAlbumsCount: number } | null;
   selectedPreviewListenCountLabel: string | null;
   selectedPreviewOtherRecordingMembers: RecordingTrackCandidateMember[];
   selectedPreviewPlaybackTrackUri: string | null;
@@ -193,6 +202,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     selectedPreviewAlbumHasGuestArtists,
     selectedPreviewAlbumMainArtists,
     selectedPreviewAlbumSummary,
+    selectedPreviewAlbumContextTagLabel,
     selectedPreviewAppearsOnAlbums,
     selectedPreviewArtistAlbumsForDisplay,
     selectedPreviewArtistImageUrl,
@@ -202,13 +212,16 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     selectedPreviewCanViewReleaseTrack,
     selectedPreviewCanonicalTrackTitle,
     selectedPreviewCurrentSpotifyTrackId,
+    selectedPreviewCurrentVersionIsSpotifyLiked,
     selectedPreviewDetailView,
     selectedPreviewDisplayRelationRows,
     selectedPreviewHasReleaseSibling,
+    selectedPreviewListenedBreakdown,
+    selectedPreviewListenedRangeLabel,
     selectedPreviewIsBookmarked,
     selectedPreviewIsKnownLiked,
     selectedPreviewIsSharedArtistPage,
-    selectedPreviewLastListenedLabel,
+    selectedPreviewListenBreakdown,
     selectedPreviewListenCountLabel,
     selectedPreviewOtherRecordingMembers,
     selectedPreviewPlaybackTrackUri,
@@ -266,6 +279,63 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
   ].filter((section) => section.rows.length > 0);
 
   const familyListCount = familyListSections.reduce((count, section) => count + section.rows.length, 0);
+  const selectedPreviewIsTrack = selectedPreview?.kind === "track";
+  const canShowListenBreakdown = Boolean(
+    selectedPreviewDetailView === "recording"
+    && selectedPreviewOtherRecordingMembers.length > 0
+    && selectedPreviewListenBreakdown
+    && selectedPreviewListenBreakdown.otherAlbumsCount > 0,
+  );
+  const selectedPreviewTrackArtistHeading = selectedPreview?.kind === "track" && selectedPreviewCanOpenArtist ? (
+    <div className="detail-modal-track-artist-heading detail-modal-meta-with-image">
+      <span className="detail-modal-artist-links">
+        {selectedPreviewTrackMainArtists.map((artist, index) => {
+          const artistName = artist.name?.trim();
+          if (!artistName) {
+            return null;
+          }
+          const artistImageUrl = artist.image_url ?? (index === 0 ? selectedPreviewArtistImageUrl : null);
+          return (
+            <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+              {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+              {artistImageUrl ? (
+                <img alt="" className="detail-modal-inline-artist-image detail-modal-track-heading-artist-image" src={artistImageUrl} />
+              ) : (
+                <span className="detail-modal-inline-artist-image detail-modal-track-heading-artist-image detail-modal-inline-artist-image-fallback" aria-hidden="true">
+                  <span />
+                </span>
+              )}
+              <button
+                className="detail-modal-inline-link"
+                onClick={() => openSelectedTrackArtistPreview(artist)}
+                type="button"
+              >
+                {artistName}
+              </button>
+            </span>
+          );
+        })}
+      </span>
+    </div>
+  ) : null;
+  const [listenBreakdownOpen, setListenBreakdownOpen] = useState(false);
+  const [dateBreakdownOpen, setDateBreakdownOpen] = useState(false);
+  const handleModalClick = (event: MouseEvent<HTMLElement>) => {
+    event.stopPropagation();
+    if (!detailOptionsOpen && !listenBreakdownOpen && !dateBreakdownOpen) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof Element && target.closest(".detail-modal-options")) {
+      return;
+    }
+    if (target instanceof Element && target.closest(".detail-track-action-listen-popover-wrap")) {
+      return;
+    }
+    setDetailOptionsOpen(false);
+    setListenBreakdownOpen(false);
+    setDateBreakdownOpen(false);
+  };
   return selectedPreview ? (
         <div
           aria-modal="true"
@@ -273,150 +343,48 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
           onClick={() => setSelectedPreview(null)}
           role="dialog"
         >
-          <section className="detail-modal" onClick={(event) => event.stopPropagation()}>
-            {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewPlaybackTrackUri ? (
-              <div className="detail-modal-play-menu">
-                <PlaybackActionMenu
-                  ariaLabel={isTrackPlaying(selectedPreviewPlaybackTrackUri) ? "Currently playing in ListenLab" : `Play ${selectedPreview.label} in ListenLab`}
-                  buttonClassName={`secondary-button detail-track-play-menu-button${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-icon-button-playing" : ""}`}
-                  isPlaying={isTrackPlaying(selectedPreviewPlaybackTrackUri)}
-                  placement="overlay-trigger"
-                  onAction={(action) => {
-                    const albumQueue = buildAlbumPlaybackQueue(selectedPreviewPlaybackTrackUri);
-                    return handlePlaybackAction(action, {
-                      trackUri: selectedPreviewPlaybackTrackUri,
-                      optimisticTrack: selectedPreviewTrackOptimisticSummary,
-                      queueCursor: albumQueue?.queueCursor,
-                      queueContext: albumQueue?.queueContext,
-                      queuePlaylistUris: albumQueue?.playlistUris,
-                      queueTracks: albumQueue?.queueTracks,
-                      sourceTrack: selectedPreview?.sourceTrack ?? null,
-                    });
-                  }}
-                >
-                  {isTrackPlaying(selectedPreviewPlaybackTrackUri) ? (
-                    <span className="detail-wave-icon" aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                    </span>
-                  ) : (
-                    <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
-                  )}
-                  <span>{selectedPreviewTrackDurationLabel ?? "?:??"}</span>
-                </PlaybackActionMenu>
+          <section className={`detail-modal${selectedPreview.kind === "track" ? " detail-modal-track-view" : ""}`} onClick={handleModalClick}>
+            {selectedPreview.kind !== "track" ? (
+              <div className="detail-modal-options">
                 <button
-                  aria-label={selectedPreviewIsBookmarked ? "Remove bookmark" : "Bookmark"}
-                  aria-pressed={selectedPreviewIsBookmarked}
-                  className={`secondary-button detail-track-action-button detail-track-bookmark-button${selectedPreviewIsBookmarked ? " detail-track-action-button-active" : ""}`}
-                  onClick={() => {
-                    if (!selectedPreviewStarTrackId) {
-                      return;
-                    }
-                    setLocalBookmarkedTrackById((current) => ({
-                      ...current,
-                      [selectedPreviewStarTrackId]: !selectedPreviewIsBookmarked,
-                    }));
-                  }}
-                  title={selectedPreviewIsBookmarked ? "Saved for later locally. Click to remove bookmark." : "Save for later locally."}
+                  aria-expanded={detailOptionsOpen}
+                  aria-label="Track options"
+                  className="detail-modal-options-button"
+                  onClick={() => setDetailOptionsOpen((current) => !current)}
                   type="button"
                 >
-                  <svg aria-hidden="true" viewBox="0 0 20 20">
-                    <path d="M5 3.5h10v13l-5-3.2-5 3.2v-13Z" />
-                  </svg>
+                  <span aria-hidden="true">⚙</span>
                 </button>
-                <button
-                  aria-label={selectedPreviewIsKnownLiked ? "Liked song" : "Not liked"}
-                  aria-pressed={selectedPreviewIsKnownLiked}
-                  className={`secondary-button detail-track-action-button detail-track-star-button${selectedPreviewIsKnownLiked ? " detail-track-action-button-active" : ""}`}
-                  onClick={() => {
-                    if (!selectedPreviewStarTrackId) {
-                      return;
-                    }
-                    setLocalStarredTrackById((current) => ({
-                      ...current,
-                      [selectedPreviewStarTrackId]: !selectedPreviewIsKnownLiked,
-                    }));
-                  }}
-                  title={selectedPreviewIsKnownLiked ? "Liked locally. Click to unstar." : "Not liked locally. Click to star."}
-                  type="button"
-                >
-                  <span aria-hidden="true">{selectedPreviewIsKnownLiked ? "★" : "☆"}</span>
-                </button>
+                {detailOptionsOpen ? (
+                  <div className="detail-modal-options-menu">
+                    {selectedPreview.url ? (
+                      <a
+                        className="detail-modal-options-item"
+                        href={selectedPreview.url}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        Open in Spotify
+                      </a>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
-            <div className="detail-modal-options">
-              <button
-                aria-expanded={detailOptionsOpen}
-                aria-label="Track options"
-                className="detail-modal-options-button"
-                onClick={() => setDetailOptionsOpen((current) => !current)}
-                type="button"
-              >
-                <span aria-hidden="true">⚙</span>
-              </button>
-              {detailOptionsOpen ? (
-                <div className="detail-modal-options-menu">
-                  {selectedPreview.url ? (
-                    <a
-                      className="detail-modal-options-item"
-                      href={selectedPreview.url}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      Open in Spotify
-                    </a>
-                  ) : null}
-                  {selectedPreview.kind === "track" && (selectedPreviewCanViewReleaseTrack || selectedPreviewDetailView === "release") ? (
-                    <button
-                      className="detail-modal-options-item"
-                      onClick={() => {
-                        setSelectedPreviewDetailView((current) => current === "release" ? "recording" : "release");
-                        setDetailOptionsOpen(false);
-                      }}
-                      type="button"
-                    >
-                      {selectedPreviewDetailView === "release" ? "View recording track" : "View release track"}
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-            <div className="detail-modal-left">
-              {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" ? (
-                <button
-                  aria-label="Open album view"
-                  className="detail-modal-image-button"
-                  onClick={openSelectedTrackAlbumPreview}
-                  type="button"
-                >
-                  {selectedPreview.image ? (
-                    <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
-                  ) : (
-                    <span className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
-                      {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
-                    </span>
-                  )}
-                </button>
-              ) : selectedPreview.image ? (
-                <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
-              ) : (
-                <div className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
-                  {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
-                </div>
-              )}
-              {selectedPreview.kind === "track" && selectedPreviewCanOpenAlbum ? (
-                <button
-                  className="detail-modal-inline-link detail-modal-cover-album-title"
-                  onClick={openSelectedTrackAlbumPreview}
-                  type="button"
-                >
-                  {previewAlbumHeading(selectedPreview)}
-                </button>
-              ) : selectedPreview.kind === "track" || selectedPreview.kind === "album" ? (
-                <p className="detail-modal-cover-album-title">{previewAlbumHeading(selectedPreview)}</p>
-              ) : null}
-            </div>
+            {selectedPreview.kind !== "track" ? (
+              <div className="detail-modal-left">
+                {selectedPreview.image ? (
+                  <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
+                ) : (
+                  <div className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
+                    {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
+                  </div>
+                )}
+                {selectedPreview.kind === "album" ? (
+                  <p className="detail-modal-cover-album-title">{previewAlbumHeading(selectedPreview)}</p>
+                ) : null}
+              </div>
+            ) : null}
             <div className="detail-modal-copy">
               <h2 className={selectedPreview.kind === "track" ? "detail-modal-track-title" : undefined}>
                 {selectedPreview.kind !== "track" && selectedPreviewIsKnownLiked ? <LikedBadge className="detail-liked-badge" /> : null}
@@ -454,32 +422,78 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                   ? selectedPreviewCanonicalTrackTitle
                   : selectedPreview.kind === "album" && selectedPreview.detail ? `${selectedPreview.label} (${selectedPreview.detail})` : selectedPreview.label}
               </h2>
-              {selectedPreview.kind === "track" && selectedPreviewCanOpenArtist ? (
-                <div className="detail-modal-track-artist-heading detail-modal-meta-with-image">
-                  <span className="detail-modal-artist-links">
-                    {selectedPreviewTrackMainArtists.map((artist, index) => {
-                      const artistName = artist.name?.trim();
-                      if (!artistName) {
-                        return null;
+              {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewPlaybackTrackUri ? (
+                <div className="detail-modal-play-menu detail-modal-play-menu-inline">
+                  <PlaybackActionMenu
+                    ariaLabel={isTrackPlaying(selectedPreviewPlaybackTrackUri) ? "Currently playing in ListenLab" : `Play ${selectedPreview.label} in ListenLab`}
+                    buttonClassName={`secondary-button detail-track-play-menu-button${isTrackPlaying(selectedPreviewPlaybackTrackUri) ? " detail-icon-button-playing" : ""}`}
+                    isPlaying={isTrackPlaying(selectedPreviewPlaybackTrackUri)}
+                    placement="overlay-trigger"
+                    onAction={(action) => {
+                      const albumQueue = buildAlbumPlaybackQueue(selectedPreviewPlaybackTrackUri);
+                      return handlePlaybackAction(action, {
+                        trackUri: selectedPreviewPlaybackTrackUri,
+                        optimisticTrack: selectedPreviewTrackOptimisticSummary,
+                        queueCursor: albumQueue?.queueCursor,
+                        queueContext: albumQueue?.queueContext,
+                        queuePlaylistUris: albumQueue?.playlistUris,
+                        queueTracks: albumQueue?.queueTracks,
+                        sourceTrack: selectedPreview?.sourceTrack ?? null,
+                      });
+                    }}
+                  >
+                    {isTrackPlaying(selectedPreviewPlaybackTrackUri) ? (
+                      <span className="detail-wave-icon" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    ) : (
+                      <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
+                    )}
+                    <span>{selectedPreviewTrackDurationLabel ?? "?:??"}</span>
+                  </PlaybackActionMenu>
+                  <button
+                    aria-label={selectedPreviewIsBookmarked ? "Remove bookmark" : "Bookmark"}
+                    aria-pressed={selectedPreviewIsBookmarked}
+                    className={`secondary-button detail-track-action-button detail-track-bookmark-button${selectedPreviewIsBookmarked ? " detail-track-action-button-active" : ""}`}
+                    onClick={() => {
+                      if (!selectedPreviewStarTrackId) {
+                        return;
                       }
-                      const artistImageUrl = artist.image_url ?? (index === 0 ? selectedPreviewArtistImageUrl : null);
-                      return (
-                        <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
-                          {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
-                          {artistImageUrl ? <img alt="" className="detail-modal-inline-artist-image" src={artistImageUrl} /> : null}
-                          <button
-                            className="detail-modal-inline-link"
-                            onClick={() => openSelectedTrackArtistPreview(artist)}
-                            type="button"
-                          >
-                            {artistName}
-                          </button>
-                        </span>
-                      );
-                    })}
-                  </span>
+                      setLocalBookmarkedTrackById((current) => ({
+                        ...current,
+                        [selectedPreviewStarTrackId]: !selectedPreviewIsBookmarked,
+                      }));
+                    }}
+                    title={selectedPreviewIsBookmarked ? "Saved for later locally. Click to remove bookmark." : "Save for later locally."}
+                    type="button"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 20 20">
+                      <path d="M5 3.5h10v13l-5-3.2-5 3.2v-13Z" />
+                    </svg>
+                  </button>
+                  <button
+                    aria-label={selectedPreviewIsKnownLiked ? "Liked song" : "Not liked"}
+                    aria-pressed={selectedPreviewIsKnownLiked}
+                    className={`secondary-button detail-track-action-button detail-track-star-button${selectedPreviewIsKnownLiked ? " detail-track-action-button-active" : ""}`}
+                    onClick={() => {
+                      if (!selectedPreviewStarTrackId) {
+                        return;
+                      }
+                      setLocalStarredTrackById((current) => ({
+                        ...current,
+                        [selectedPreviewStarTrackId]: !selectedPreviewIsKnownLiked,
+                      }));
+                    }}
+                    title={selectedPreviewIsKnownLiked ? "Liked locally. Click to unstar." : "Not liked locally. Click to star."}
+                    type="button"
+                  >
+                    <span aria-hidden="true">{selectedPreviewIsKnownLiked ? "★" : "☆"}</span>
+                  </button>
                 </div>
               ) : null}
+              {selectedPreview.kind === "track" ? selectedPreviewTrackArtistHeading : null}
               {selectedPreview.kind === "album" ? (
                 <div className="detail-modal-album-meta-block">
                   {selectedPreviewAlbumSummary ? (
@@ -635,6 +649,8 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 </>
               ) : null}
             </div>
+            {selectedPreviewIsTrack ? (
+              <div className="detail-modal-track-scroll-area">
             {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.recording.length > 0 ? (
               <div className="detail-modal-recording-variations">
                 <div className="detail-modal-recording-variations-header">
@@ -654,7 +670,6 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                         type="button"
                       >
                         <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">R</span>
                           {albumImageUrl ? (
                             <img alt="" src={albumImageUrl} />
                           ) : (
@@ -746,14 +761,307 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 </div>
               </div>
             ) : null}
-            {selectedPreview.kind === "track" || selectedPreview.kind === "album" ? (
-              <div className={`detail-modal-album-tracks detail-modal-album-tracks-full${selectedPreview.kind === "track" ? " detail-modal-album-tracks-track detail-modal-album-tracks-no-with" : ""}${selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? "" : " detail-modal-album-tracks-no-with"}`}>
+            {selectedPreview.kind === "track" ? (
+              <div className="detail-modal-track-album-panel">
+                {selectedPreviewCanOpenAlbum ? (
+                  <button
+                    className="detail-modal-inline-link detail-modal-cover-album-title detail-modal-track-album-panel-title"
+                    onClick={openSelectedTrackAlbumPreview}
+                    type="button"
+                  >
+                    {previewAlbumHeading(selectedPreview)}
+                  </button>
+                ) : (
+                  <p className="detail-modal-cover-album-title detail-modal-track-album-panel-title">{previewAlbumHeading(selectedPreview)}</p>
+                )}
+                <div className="detail-modal-track-album-panel-art">
+                  {selectedPreviewDetailView === "recording" ? (
+                    <button
+                      aria-label="Open album view"
+                      className="detail-modal-image-button"
+                      onClick={openSelectedTrackAlbumPreview}
+                      type="button"
+                    >
+                      {selectedPreview.image ? (
+                        <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
+                      ) : (
+                        <span className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
+                          {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
+                    </button>
+                  ) : selectedPreview.image ? (
+                    <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
+                  ) : (
+                    <div className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
+                      {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
+                    </div>
+                  )}
+                </div>
+                              <div className={`detail-modal-album-tracks detail-modal-album-tracks-full${selectedPreview.kind === "track" ? " detail-modal-album-tracks-track detail-modal-album-tracks-no-with" : ""}${selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? "" : " detail-modal-album-tracks-no-with"}`}>
+                                <div className="detail-modal-album-header">
+                                  {hasPremiumPlayback ? (
+                                    <PlaybackActionMenu
+                                      ariaLabel="Album playback options"
+                                      buttonClassName="detail-album-play-all-button"
+                                      placement={selectedPreview.kind === "track" ? "overlay-trigger" : "adjacent"}
+                                      onAction={(action) => handleAlbumPlayAll(action)}
+                                    >
+                                      Play all
+                                    </PlaybackActionMenu>
+                                  ) : (
+                                    <span aria-hidden="true" />
+                                  )}
+                                  <span className="detail-modal-album-title-header">{albumTracklistSummaryLabel(albumTrackEntries)}</span>
+                                  {selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? <span className="detail-modal-album-with-header">With</span> : null}
+                                  <span className="detail-modal-album-liked-header">Tags</span>
+                                  {selectedPreview.kind !== "track" ? <span className="detail-modal-album-preview-header">Preview</span> : null}
+                                  <button
+                                    className={`detail-modal-album-last-played-header detail-modal-album-sort-header${albumTrackLastSortMode ? " detail-modal-album-sort-header-active" : ""}`}
+                                    onClick={() => setAlbumTrackLastSortMode((current) => nextLastPlayedSortMode(current))}
+                                    type="button"
+                                  >
+                                    Last
+                                    {albumTrackLastSortMode ? (
+                                      <span aria-hidden="true">{albumTrackLastSortMode === "recent" ? "↓" : "↑"}</span>
+                                    ) : null}
+                                  </button>
+                                </div>
+                                {albumTrackEntriesLoading && albumTrackEntries.length === 0 ? (
+                                  <p className="detail-modal-preview-missing">{albumTrackFetchFromSpotifyLoading ? "Fetching Album..." : "Loading Album..."}</p>
+                                ) : null}
+                                {!albumTrackEntriesLoading && albumTrackEntriesError && !albumTrackMoreOnSpotifyUrl ? (
+                                  <p className="detail-modal-preview-missing">{albumTrackEntriesError}</p>
+                                ) : null}
+                                {!albumTrackEntriesLoading && albumTrackEntriesError && albumTrackMoreOnSpotifyUrl ? (
+                                  <p className="detail-modal-preview-missing">
+                                    <a href={albumTrackMoreOnSpotifyUrl} rel="noreferrer" target="_blank">More tracks on Spotify</a>
+                                  </p>
+                                ) : null}
+                                {!albumTrackEntriesError && albumTrackEntries.length > 0 ? (
+                                  <div className="detail-album-track-list-wrap">
+                                    {selectedAlbumTrackMarkerTop(displayAlbumTrackEntries) ? (
+                                      <span
+                                        className="detail-album-track-scroll-marker"
+                                        style={{ "--detail-album-track-marker-top": selectedAlbumTrackMarkerTop(displayAlbumTrackEntries) } as CSSProperties}
+                                        aria-hidden="true"
+                                      />
+                                    ) : null}
+                                    <ul className={`detail-album-track-list${albumTrackEntriesLoading ? " detail-album-track-list-updating" : ""}`} ref={albumTrackListRef}>
+                                      {displayAlbumTrackEntries.map((track) => {
+                                      const rowTrackUri = track.uri ?? (track.id ? `spotify:track:${track.id}` : null);
+                                      const rowIsCurrentTrack = Boolean(rowTrackUri && currentTrack?.uri === rowTrackUri);
+                                      const rowPlaying = isTrackPlaying(rowTrackUri);
+                                      const rowPreviewPlaying = Boolean(rowTrackUri && previewingTrackUri === rowTrackUri);
+                                      const rowPreviewActive = Boolean(rowPreviewPlaying && rowPlaying);
+                                      const rowPreviewKey = albumTrackPreviewKey(track, rowTrackUri);
+                                      const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
+                                      const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
+                                      const rowHistoryLastPlayedAt = selectedPreviewDetailView === "release"
+                                        ? track.sourceLastPlayedAt === undefined ? track.lastPlayedAt : track.sourceLastPlayedAt
+                                        : track.lastPlayedAt;
+                                      const rowHistoryPlayCount = selectedPreviewDetailView === "release"
+                                        ? track.sourcePlayCount === undefined ? track.playCount : track.sourcePlayCount
+                                        : track.playCount;
+                                      const rowLastPlayed = formatCompactRelativeAge(rowHistoryLastPlayedAt);
+                                      const rowIsUnlistened = !rowHistoryLastPlayedAt && rowHistoryPlayCount <= 0;
+                                      const rowRelationTagsResult = trackRelationTags({
+                                        releaseTrackDuplicateSourceCount: track.releaseTrackDuplicateSourceCount,
+                                        releaseTrackSourceCount: track.releaseTrackSourceCount,
+                                        hasReleaseTrackSiblings: track.hasReleaseTrackSiblings,
+                                        releaseTrackClusterCandidateType: track.releaseTrackClusterCandidateType,
+                                        releaseTrackClusterRelationshipKind: track.releaseTrackClusterRelationshipKind,
+                                      });
+                                      const rowRelationTags = rowRelationTagsResult.text;
+                                      const rowRelationTagsTitle = rowRelationTagsResult.title;
+                                      const rowStarTrackId = track.id ?? spotifyTrackIdFromUri(rowTrackUri);
+                                      const rowMatchesSelectedReleaseTrack = Boolean(
+                                        selectedPreview.kind === "track"
+                                        && (
+                                          (track.releaseTrackId != null && track.releaseTrackId === selectedPreview.releaseTrackId)
+                                          || (rowStarTrackId && selectedPreviewReleaseTrackDetailReady?.source_versions.some((version) => version.spotify_track_id === rowStarTrackId))
+                                        ),
+                                      );
+                                      const rowIsLiked = rowStarTrackId && rowStarTrackId in localStarredTrackById
+                                        ? localStarredTrackById[rowStarTrackId]
+                                        : selectedPreview.kind === "track"
+                                          ? selectedPreviewDetailView === "release"
+                                            ? albumTrackIsExactKnownLiked(track)
+                                            : (rowMatchesSelectedReleaseTrack && selectedPreviewIsKnownLiked) || albumTrackIsExactKnownLiked(track)
+                                          : albumTrackIsKnownLiked(track);
+                                      const mainArtistNames = new Set(
+                                        selectedPreview.kind === "album" || selectedPreview.kind === "track"
+                                          ? selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean)
+                                          : [],
+                                      );
+                                      const rowWithArtists = selectedPreview.kind === "album" || selectedPreview.kind === "track"
+                                        ? artistEntriesForAlbumTrack(track).filter((artist) => {
+                                          const artistName = artist.name?.trim().toLocaleLowerCase();
+                                          return Boolean(artistName && !mainArtistNames.has(artistName));
+                                        })
+                                        : [];
+                                      const rowMatchesHighlightedArtist = Boolean(
+                                        selectedPreview.kind === "album"
+                                        && selectedPreview.albumHighlightArtistNames?.some((artistName) => artistNameMatches(track.artistName, artistName)),
+                                      );
+                                      const rowMatchesHoveredWithArtist = Boolean(
+                                        hoveredAlbumWithArtistName && artistNameMatches(track.artistName, hoveredAlbumWithArtistName),
+                                      );
+                                      const rowBaseDurationMs = (
+                                        track.durationMs
+                                        ?? (rowIsCurrentTrack
+                                          ? (playbackDurationMs > 0 ? playbackDurationMs : currentTrack?.durationMs ?? null)
+                                          : null)
+                                      );
+                                      const rowElapsedMs = rowIsCurrentTrack
+                                        ? (
+                                          rowBaseDurationMs != null
+                                            ? Math.min(Math.max(0, playbackPositionMs), rowBaseDurationMs)
+                                            : Math.max(0, playbackPositionMs)
+                                        )
+                                        : null;
+                                      const rowButtonTimeMs = rowIsCurrentTrack
+                                        ? (
+                                          rowPlaying
+                                            ? rowElapsedMs
+                                            : (rowPausedCurrent ? (pausedTimeFlashOn ? rowElapsedMs : rowBaseDurationMs) : rowBaseDurationMs)
+                                        )
+                                        : rowBaseDurationMs;
+                                      return (
+                                        <Fragment key={track.id ?? track.name}>
+                                          <li className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}${rowMatchesHighlightedArtist || rowMatchesHoveredWithArtist ? " detail-album-track-row-artist-highlighted" : ""}`}>
+                                            {hasPremiumPlayback ? (
+                                              <PlaybackActionMenu
+                                              ariaLabel={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
+                                              buttonClassName={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
+                                              disabled={!rowTrackUri}
+                                              isPlaying={rowPlaying}
+                                              placement="overlay-trigger"
+                                              onAction={(action) => {
+                                                const albumQueue = buildAlbumPlaybackQueue(rowTrackUri);
+                                                return handlePlaybackAction(action, {
+                                                  trackUri: rowTrackUri,
+                                                  optimisticTrack: playerSummaryFromAlbumTrack(track),
+                                                  queueCursor: albumQueue?.queueCursor,
+                                                  queueContext: albumQueue?.queueContext,
+                                                  queuePlaylistUris: albumQueue?.playlistUris,
+                                                  queueTracks: albumQueue?.queueTracks,
+                                                  sourceTrack: track.sourceTrack,
+                                                }).then(() => {
+                                                  if (action === "play_now") {
+                                                    openAlbumTrackPreview(track);
+                                                  }
+                                                });
+                                              }}
+                                            >
+                                              {rowPlaying ? (
+                                                <span className="detail-wave-icon" aria-hidden="true">
+                                                  <span />
+                                                  <span />
+                                                  <span />
+                                                </span>
+                                              ) : (
+                                                <span className="detail-play-icon" aria-hidden="true">{"\u25B6"}</span>
+                                              )}
+                                              <span className={`detail-album-track-play-time${rowPausedCurrent ? " detail-album-track-play-time-flash" : ""}`}>
+                                                {rowButtonTimeMs != null ? formatPlaybackClock(rowButtonTimeMs) : "?:??"}
+                                              </span>
+                                            </PlaybackActionMenu>
+                                          ) : <span aria-hidden="true" />}
+                                          <button
+                                            className="detail-album-track-name-button single-line-ellipsis"
+                                            onClick={() => openAlbumTrackPreview(track)}
+                                            type="button"
+                                          >
+                                            <span className="single-line-ellipsis">{track.name}</span>
+                                          </button>
+                                          {selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? (
+                                            <span className="detail-album-track-with single-line-ellipsis">
+                                              {rowWithArtists.map((artist, index) => {
+                                                const artistName = artist.name?.trim();
+                                                if (!artistName) {
+                                                  return null;
+                                                }
+                                                return (
+                                                  <span className="detail-modal-artist-link-wrap" key={`${artist.artist_id ?? artist.id ?? artistName}-${index}`}>
+                                                    {index > 0 ? <span className="detail-modal-artist-separator">, </span> : null}
+                                                    <button
+                                                      className="detail-modal-inline-link"
+                                                      onClick={() => openAlbumWithArtistPreview(artist)}
+                                                      type="button"
+                                                    >
+                                                      {artistName}
+                                                    </button>
+                                                  </span>
+                                                );
+                                              })}
+                                            </span>
+                                          ) : null}
+                                          <span className="detail-album-track-liked-cell">
+                                            <span className="detail-album-track-badges">
+                                              {rowIsLiked ? <LikedBadge className="detail-album-track-liked-badge" /> : null}
+                                              {rowRelationTags ? (
+                                                <span
+                                                  className="relation-tags-badge detail-album-track-relation-badge"
+                                                  title={rowRelationTagsTitle}
+                                                  aria-label={rowRelationTagsTitle}
+                                                >
+                                                  {rowRelationTags}
+                                                </span>
+                                              ) : null}
+                                            </span>
+                                          </span>
+                                          <div className="detail-album-track-actions">
+                                            {selectedPreview.kind !== "track" && hasPremiumPlayback ? (
+                                              <button
+                                                aria-label={rowPreviewPlaying ? `Stop preview for ${track.name}` : `Preview ${track.name}`}
+                                                className={`detail-album-track-preview-button${rowPreviewActive ? " detail-album-track-preview-button-active" : ""}${rowPreviewPlayed ? " detail-album-track-preview-button-played" : ""}`}
+                                                disabled={!rowTrackUri}
+                                                onClick={() => {
+                                                  void toggleAlbumTrackPreview(track, rowTrackUri);
+                                                }}
+                                                type="button"
+                                              />
+                                            ) : selectedPreview.kind !== "track" ? (
+                                              <span className="detail-album-track-preview-placeholder" aria-hidden="true" />
+                                            ) : null}
+                                            {rowLastPlayed ? (
+                                              <span className="detail-album-track-last-played">{rowLastPlayed}</span>
+                                            ) : rowIsUnlistened ? (
+                                              <span className="detail-album-track-last-played">
+                                                <NewTrackBadge className="detail-album-track-played-new-badge" />
+                                              </span>
+                                            ) : (
+                                              <span className="detail-album-track-last-played">-</span>
+                                            )}
+                                          </div>
+                                        </li>
+                                        {selectedPreview.kind === "track" && rowMatchesSelectedReleaseTrack && (albumTrackFetchFromSpotifyLoading || albumTrackMoreOnSpotifyUrl) ? (
+                                          <li className="detail-album-track-fetch-row">
+                                            {albumTrackFetchFromSpotifyLoading ? (
+                                              <span className="detail-album-track-fetch-status">Fetching Album...</span>
+                                            ) : albumTrackMoreOnSpotifyUrl ? (
+                                              <a className="detail-album-track-fetch-link" href={albumTrackMoreOnSpotifyUrl} rel="noreferrer" target="_blank">More tracks on Spotify</a>
+                                            ) : null}
+                                          </li>
+                                        ) : null}
+                                        </Fragment>
+                                      );
+                                      })}
+                                    </ul>
+                                  </div>
+                                ) : null}
+                              </div>
+                              </div>
+            ) : null}
+            {selectedPreview.kind === "album" ? (
+              <div className={`detail-modal-album-tracks detail-modal-album-tracks-full${selectedPreviewAlbumHasGuestArtists ? "" : " detail-modal-album-tracks-no-with"}`}>
                 <div className="detail-modal-album-header">
                   {hasPremiumPlayback ? (
                     <PlaybackActionMenu
                       ariaLabel="Album playback options"
                       buttonClassName="detail-album-play-all-button"
-                      placement={selectedPreview.kind === "track" ? "overlay-trigger" : "adjacent"}
+                      placement="adjacent"
                       onAction={(action) => handleAlbumPlayAll(action)}
                     >
                       Play all
@@ -762,9 +1070,9 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     <span aria-hidden="true" />
                   )}
                   <span className="detail-modal-album-title-header">{albumTracklistSummaryLabel(albumTrackEntries)}</span>
-                  {selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? <span className="detail-modal-album-with-header">With</span> : null}
+                  {selectedPreviewAlbumHasGuestArtists ? <span className="detail-modal-album-with-header">With</span> : null}
                   <span className="detail-modal-album-liked-header">Tags</span>
-                  {selectedPreview.kind !== "track" ? <span className="detail-modal-album-preview-header">Preview</span> : null}
+                  <span className="detail-modal-album-preview-header">Preview</span>
                   <button
                     className={`detail-modal-album-last-played-header detail-modal-album-sort-header${albumTrackLastSortMode ? " detail-modal-album-sort-header-active" : ""}`}
                     onClick={() => setAlbumTrackLastSortMode((current) => nextLastPlayedSortMode(current))}
@@ -777,7 +1085,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                   </button>
                 </div>
                 {albumTrackEntriesLoading && albumTrackEntries.length === 0 ? (
-                  <p className="detail-modal-preview-missing">Fetching Album...</p>
+                  <p className="detail-modal-preview-missing">{albumTrackFetchFromSpotifyLoading ? "Fetching Album..." : "Loading Album..."}</p>
                 ) : null}
                 {!albumTrackEntriesLoading && albumTrackEntriesError && !albumTrackMoreOnSpotifyUrl ? (
                   <p className="detail-modal-preview-missing">{albumTrackEntriesError}</p>
@@ -806,8 +1114,14 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                       const rowPreviewKey = albumTrackPreviewKey(track, rowTrackUri);
                       const rowPreviewPlayed = previewPlayedTrackKeys.has(rowPreviewKey);
                       const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
-                      const rowLastPlayed = formatCompactRelativeAge(track.lastPlayedAt);
-                      const rowIsUnlistened = !track.lastPlayedAt && track.playCount <= 0;
+                      const rowHistoryLastPlayedAt = selectedPreviewDetailView === "release"
+                        ? track.sourceLastPlayedAt === undefined ? track.lastPlayedAt : track.sourceLastPlayedAt
+                        : track.lastPlayedAt;
+                      const rowHistoryPlayCount = selectedPreviewDetailView === "release"
+                        ? track.sourcePlayCount === undefined ? track.playCount : track.sourcePlayCount
+                        : track.playCount;
+                      const rowLastPlayed = formatCompactRelativeAge(rowHistoryLastPlayedAt);
+                      const rowIsUnlistened = !rowHistoryLastPlayedAt && rowHistoryPlayCount <= 0;
                       const rowRelationTagsResult = trackRelationTags({
                         releaseTrackDuplicateSourceCount: track.releaseTrackDuplicateSourceCount,
                         releaseTrackSourceCount: track.releaseTrackSourceCount,
@@ -827,9 +1141,11 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                       );
                       const rowIsLiked = rowStarTrackId && rowStarTrackId in localStarredTrackById
                         ? localStarredTrackById[rowStarTrackId]
-                        : selectedPreviewDetailView === "release"
-                          ? albumTrackIsExactKnownLiked(track)
-                          : (rowMatchesSelectedReleaseTrack && selectedPreviewIsKnownLiked) || albumTrackIsKnownLiked(track);
+                        : selectedPreview.kind === "track"
+                          ? selectedPreviewDetailView === "release"
+                            ? albumTrackIsExactKnownLiked(track)
+                            : (rowMatchesSelectedReleaseTrack && selectedPreviewIsKnownLiked) || albumTrackIsExactKnownLiked(track)
+                          : albumTrackIsKnownLiked(track);
                       const mainArtistNames = new Set(
                         selectedPreview.kind === "album" || selectedPreview.kind === "track"
                           ? selectedPreviewAlbumMainArtists.map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean)
@@ -980,7 +1296,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                         {selectedPreview.kind === "track" && rowMatchesSelectedReleaseTrack && (albumTrackFetchFromSpotifyLoading || albumTrackMoreOnSpotifyUrl) ? (
                           <li className="detail-album-track-fetch-row">
                             {albumTrackFetchFromSpotifyLoading ? (
-                              <span className="detail-album-track-fetch-status">Loading Album...</span>
+                              <span className="detail-album-track-fetch-status">Fetching Album...</span>
                             ) : albumTrackMoreOnSpotifyUrl ? (
                               <a className="detail-album-track-fetch-link" href={albumTrackMoreOnSpotifyUrl} rel="noreferrer" target="_blank">More tracks on Spotify</a>
                             ) : null}
@@ -994,7 +1310,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 ) : null}
               </div>
             ) : null}
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "release" && selectedPreviewReleaseAlbumVariationCount > 1 ? (
+            {selectedPreview.kind === "track" && selectedPreviewDetailView === "release" && selectedPreviewReleaseSourceVersions.length > 1 ? (
               <div className="detail-modal-recording-variations detail-modal-release-source-albums">
                 <div className="detail-modal-recording-variations-header">
                   <span>Release albums</span>
@@ -1042,34 +1358,6 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                       </button>
                     );
                   })}
-                  {selectedPreviewOtherRecordingMembers.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`release-member-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "release")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">Recording</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
                 </div>
               </div>
             ) : null}
@@ -1108,10 +1396,109 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 ))}
               </div>
             ) : null}
+              </div>
+            ) : null}
             {selectedPreview.kind === "track" ? (
               <div className="detail-modal-bottom-tags" aria-label="Track summary">
-                {selectedPreviewLastListenedLabel ? <span>Last {selectedPreviewLastListenedLabel}</span> : null}
-                {selectedPreviewListenCountLabel ? <span className="detail-track-action-meta-listens">{selectedPreviewListenCountLabel}</span> : null}
+                <div className="detail-modal-options detail-modal-options-bottom">
+                  <button
+                    aria-expanded={detailOptionsOpen}
+                    aria-label="Track options"
+                    className="detail-modal-options-button"
+                    onClick={() => setDetailOptionsOpen((current) => !current)}
+                    type="button"
+                  >
+                    <span aria-hidden="true">⚙</span>
+                  </button>
+                  {detailOptionsOpen ? (
+                    <div className="detail-modal-options-menu">
+                      {selectedPreview.url ? (
+                        <a
+                          className="detail-modal-options-item"
+                          href={selectedPreview.url}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          Open in Spotify
+                        </a>
+                      ) : null}
+                      {selectedPreviewCanViewReleaseTrack || selectedPreviewDetailView === "release" ? (
+                        <button
+                          className="detail-modal-options-item"
+                          onClick={() => {
+                            setSelectedPreviewDetailView((current) => current === "release" ? "recording" : "release");
+                            setDetailOptionsOpen(false);
+                          }}
+                          type="button"
+                        >
+                          {selectedPreviewDetailView === "release" ? "View recording track" : "View release track"}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+                {selectedPreviewCurrentVersionIsSpotifyLiked ? (
+                  <span className="detail-track-bottom-liked-version-badge" title="This Spotify version is liked">
+                    Liked
+                  </span>
+                ) : null}
+                {selectedPreviewAlbumContextTagLabel ? <span>{selectedPreviewAlbumContextTagLabel}</span> : null}
+                {selectedPreviewListenedRangeLabel && selectedPreviewListenedBreakdown ? (
+                  <span className="detail-track-action-listen-popover-wrap">
+                    <button
+                      aria-expanded={dateBreakdownOpen}
+                      aria-label="Show listened date breakdown"
+                      className="detail-track-action-meta-listens"
+                      onClick={() => {
+                        setListenBreakdownOpen(false);
+                        setDateBreakdownOpen((current) => !current);
+                      }}
+                      type="button"
+                    >
+                      Listened {selectedPreviewListenedRangeLabel}
+                    </button>
+                    {dateBreakdownOpen ? (
+                      <span className="detail-track-action-listen-popover" role="status">
+                        <span>
+                          <span>This album:</span>
+                          <strong>{selectedPreviewListenedBreakdown.thisAlbumFirstLabel ?? "-"} - {selectedPreviewListenedBreakdown.thisAlbumLastLabel ?? "-"}</strong>
+                        </span>
+                        <span>
+                          <span>Other albums:</span>
+                          <strong>{selectedPreviewListenedBreakdown.otherAlbumsFirstLabel ?? "-"} - {selectedPreviewListenedBreakdown.otherAlbumsLastLabel ?? "-"}</strong>
+                        </span>
+                      </span>
+                    ) : null}
+                  </span>
+                ) : selectedPreviewListenedRangeLabel ? <span>Listened {selectedPreviewListenedRangeLabel}</span> : null}
+                {selectedPreviewListenCountLabel && canShowListenBreakdown && selectedPreviewListenBreakdown ? (
+                  <span className="detail-track-action-listen-popover-wrap">
+                    <button
+                      aria-expanded={listenBreakdownOpen}
+                      aria-label="Show listen breakdown"
+                      className="detail-track-action-meta-listens"
+                      onClick={() => {
+                        setDateBreakdownOpen(false);
+                        setListenBreakdownOpen((current) => !current);
+                      }}
+                      type="button"
+                    >
+                      {selectedPreviewListenCountLabel}
+                    </button>
+                    {listenBreakdownOpen ? (
+                      <span className="detail-track-action-listen-popover" role="status">
+                        <span>
+                          <span>This album:</span>
+                          <strong>{selectedPreviewListenBreakdown.thisAlbumCount.toLocaleString()}</strong>
+                        </span>
+                        <span>
+                          <span>Other albums:</span>
+                          <strong>{selectedPreviewListenBreakdown.otherAlbumsCount.toLocaleString()}</strong>
+                        </span>
+                      </span>
+                    ) : null}
+                  </span>
+                ) : selectedPreviewListenCountLabel ? <span>{selectedPreviewListenCountLabel}</span> : null}
               </div>
             ) : null}
           </section>

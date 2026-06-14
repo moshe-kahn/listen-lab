@@ -6673,6 +6673,29 @@ def _spotify_album_ids_for_release_album(connection: sqlite3.Connection, release
     return [str(row[0]) for row in rows if row[0]]
 
 
+def _spotify_album_catalog_rows_equivalent(target_row: sqlite3.Row, candidate_row: sqlite3.Row) -> bool:
+    target_name = _normalize_identity_text(target_row["name"])
+    candidate_name = _normalize_identity_text(candidate_row["name"])
+    if not target_name or target_name != candidate_name:
+        return False
+
+    target_release_date = str(target_row["release_date"] or "").strip()
+    candidate_release_date = str(candidate_row["release_date"] or "").strip()
+    if target_release_date and candidate_release_date and target_release_date != candidate_release_date:
+        return False
+
+    target_total_tracks = target_row["total_tracks"]
+    candidate_total_tracks = candidate_row["total_tracks"]
+    if (
+        target_total_tracks is not None
+        and candidate_total_tracks is not None
+        and int(target_total_tracks) != int(candidate_total_tracks)
+    ):
+        return False
+
+    return True
+
+
 def _release_track_has_spotify_album_evidence(
     connection: sqlite3.Connection,
     *,
@@ -6712,7 +6735,48 @@ def _release_track_has_spotify_album_evidence(
         """,
         (spotify_album_id, release_track_id, spotify_album_id, spotify_album_id),
     ).fetchone()
-    return row is not None
+    if row is not None:
+        return True
+
+    target_album = connection.execute(
+        """
+        SELECT name, release_date, total_tracks
+        FROM spotify_album_catalog
+        WHERE spotify_album_id = ?
+        """,
+        (spotify_album_id,),
+    ).fetchone()
+    if target_album is None:
+        return False
+
+    candidate_rows = connection.execute(
+        """
+        SELECT DISTINCT
+          sac.spotify_album_id,
+          sac.name,
+          sac.release_date,
+          sac.total_tracks
+        FROM source_track_map stm
+        JOIN source_track st
+          ON st.id = stm.source_track_id
+        JOIN spotify_track_catalog stc
+          ON stc.spotify_track_id = CASE
+            WHEN st.source_name = 'spotify' THEN st.external_id
+            WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+            WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+            ELSE NULL
+          END
+        JOIN spotify_album_catalog sac
+          ON sac.spotify_album_id = stc.album_id
+        WHERE stm.release_track_id = ?
+          AND stm.status = 'accepted'
+          AND st.source_name IN ('spotify', 'spotify_uri')
+          AND sac.spotify_album_id != ?
+        """,
+        (release_track_id, spotify_album_id),
+    ).fetchall()
+    return any(_spotify_album_catalog_rows_equivalent(target_album, candidate_row) for candidate_row in candidate_rows)
+
 
 
 def _plan_is_safe_history_spotify_album_merge(plan: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -6802,6 +6866,41 @@ def apply_release_album_merge(
             )
         for row in album_track_conflicts:
             connection.execute("DELETE FROM album_track WHERE id = ?", (int(row["album_track_id"]),))
+        for row in release_album_retirements:
+            retired_album_id = int(row["release_album_id"])
+            connection.execute(
+                """
+                UPDATE album_family
+                SET
+                  canonical_release_album_id = ?,
+                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE canonical_release_album_id = ?
+                """,
+                (survivor_id, retired_album_id),
+            )
+            if connection.execute(
+                "SELECT 1 FROM album_family_map WHERE release_album_id = ? LIMIT 1",
+                (survivor_id,),
+            ).fetchone():
+                connection.execute(
+                    "DELETE FROM album_family_map WHERE release_album_id = ?",
+                    (retired_album_id,),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE album_family_map
+                    SET
+                      release_album_id = ?,
+                      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                    WHERE release_album_id = ?
+                    """,
+                    (survivor_id, retired_album_id),
+                )
+            connection.execute(
+                "UPDATE release_track_merge_log SET release_album_id = ? WHERE release_album_id = ?",
+                (survivor_id, retired_album_id),
+            )
         for row in release_album_retirements:
             connection.execute("DELETE FROM release_album WHERE id = ?", (int(row["release_album_id"]),))
         if touched_release_track_ids:

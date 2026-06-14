@@ -301,10 +301,12 @@ Current playback UI behavior:
   - track preview payloads expose top-level release-track metadata copied from the representative `RecentTrack`
   - track overlays default to recording view on user-facing pages, while Identity Audit/Search/Listen Log backend pages may request release view
   - recording view shows same-recording album appearances separately from broader `Variations`; clicking variation/family cards switches the selected album and representative release track
-  - release view shows source-version albums and marks the representative source instead of listing raw source rows as the main UI
-  - the top-right gear menu exposes Spotify and View Release/Recording Track actions; `View release track` is hidden when there are no separate source versions
-  - track overlay playback uses a compact top-left play/time menu; star/bookmark actions sit beside it, and last-listened/listen-count tags sit at the bottom behind a divider
-  - release view bottom listen count uses the selected source version count; recording view uses the combined source-version count
+  - release view shows source-version albums and marks the representative source; selecting a source version keeps star, liked, listened range, listen count, and album-track `Last` exact to that Spotify source version
+  - the bottom gear menu exposes Spotify and View Release/Recording Track actions; `View release track` is hidden when there are no separate source versions
+  - track overlay playback uses a compact top-left play/time menu; star/bookmark actions sit beside it, and liked/context/listened/listen-count tags sit at the bottom behind a divider
+  - recording view combines source-version listen counts and listened dates across generated recording members; release view uses the selected source version only
+  - listened/listen-count breakdown popovers are only clickable in recording view when multiple recording members contribute, and opening one closes the other
+  - album context tags such as `Single`, `Soundtrack`, and `Compilation` appear in the bottom tag row when source album metadata or album-title evidence supports them
   - track overlays keep Spotify source track id/URI as playback identity even when release/recording/family evidence is shown
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.
@@ -312,10 +314,13 @@ Manual QA still required with an active Spotify device/Web Playback SDK session.
 ## Recording Candidate Cache State
 Current backend behavior:
 - SQLite schema versions `32` and `33` add generated recording/track-family cluster tables plus a dirty release-track table.
+- SQLite schema version `34` adds `source_track_play_count_cache`, a derived per-Spotify-track cache of play count, first listened, and last listened.
 - Startup creates the generated candidate cache if it is empty.
 - Source-track map upserts, album-track inserts, and release-track merge repoints mark affected release tracks dirty.
 - Recent-play sync drains a small dirty batch after inserted rows so newly added tracks can join existing generated clusters without a full rebuild.
+- Recent/history projection refreshes `source_track_play_count_cache` after touched fact rows are reloaded.
 - `GET /debug/tracks/recording-track-candidates/by-release/{release_track_id}` returns cached generated candidate items for track overlays and falls back to live candidate generation when needed.
+- Generated recording candidate members include source-derived play counts and first/last listened dates so recording view can aggregate without scanning the fact view in the frontend.
 - The generated tables remain evidence caches only; they do not promote, apply, or mutate canonical identity.
 
 ## Activity and Listen Log UI State

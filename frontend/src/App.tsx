@@ -224,6 +224,7 @@ import {
   formatLoadingStatusDetailed,
   formatLoadingStatusUi,
   formatMonthDay,
+  derivedAlbumDisplayLabel,
   formatPlaylistSummary,
   formatRelativeSyncTime,
   formatUiErrorMessage,
@@ -346,6 +347,21 @@ function collaboratorLabel(artistNames: string | null | undefined, selectedArtis
     .map((name) => name.trim())
     .filter((name) => name && name.toLocaleLowerCase() !== selectedKey);
   return collaborators.length > 0 ? `with ${collaborators.join(", ")}` : null;
+}
+
+function albumContextTagLabel(albumType: string | null | undefined, albumName: string | null | undefined) {
+  const type = String(albumType ?? "").trim().toLocaleLowerCase();
+  const name = String(albumName ?? "").trim().toLocaleLowerCase();
+  if (type === "single") {
+    return "Single";
+  }
+  if (/\b(soundtrack|ost|original score|motion picture|bande originale|bo du film)\b/.test(name)) {
+    return "Soundtrack";
+  }
+  if (type === "compilation") {
+    return "Compilation";
+  }
+  return null;
 }
 
 type LastPlayedSortMode = "recent" | "oldest" | null;
@@ -683,6 +699,7 @@ export function App() {
   } | null>(null);
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
+  const albumTrackRowsCacheRef = useRef<Map<string, { albumId: string; rows: AlbumTrackEntry[]; partial: boolean }>>(new Map());
   const albumTrackSpotifyAutoFetchAttemptedRef = useRef<Set<string>>(new Set());
   const loadedHomeAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const albumTrackListRef = useRef<HTMLUListElement | null>(null);
@@ -907,6 +924,7 @@ export function App() {
     : 0;
   const selectedPreviewAlbumSummary = selectedPreview?.kind === "album"
     ? [
+      derivedAlbumDisplayLabel(selectedPreview),
       selectedPreviewAlbumTrackCount != null ? `${selectedPreviewAlbumTrackCount} tracks` : null,
       selectedPreviewAlbumDurationMs > 0 ? formatDurationMs(selectedPreviewAlbumDurationMs) : null,
     ].filter(Boolean).join(" | ")
@@ -1083,7 +1101,9 @@ export function App() {
     && selectedPreviewReleaseTrackDetail.release_track.id === selectedPreview.releaseTrackId
     ? selectedPreviewReleaseTrackDetail
     : null;
-  const selectedPreviewReleasePlaybackSourceVersion = selectedPreviewReleaseTrackDetailReady?.source_versions.find((version) => version.is_playback_choice) ?? null;
+  const selectedPreviewReleaseSourceVersionsRaw = selectedPreviewReleaseTrackDetailReady?.source_versions ?? [];
+  const selectedPreviewReleaseSourceVersions = selectedPreviewReleaseSourceVersionsRaw;
+  const selectedPreviewReleasePlaybackSourceVersion = selectedPreviewReleaseSourceVersions.find((version) => version.is_playback_choice) ?? null;
   const selectedPreviewReleaseDetailPlaybackUri = selectedPreviewReleaseTrackDetailReady?.playback.reason !== "unavailable"
     ? trackUriWithFallback(
       selectedPreviewReleaseTrackDetailReady?.playback.uri ?? null,
@@ -1119,94 +1139,21 @@ export function App() {
     ? Math.max(0, Math.min(100, (selectedPreviewTrackElapsedMs / selectedPreviewTrackBaseDurationMs) * 100))
     : 0;
   const selectedPreviewStarTrackId = selectedPreview?.kind === "track"
-    ? (
+    ? selectedPreviewDetailView === "release"
+      ? selectedPreviewReleasePlaybackSourceVersion?.spotify_track_id ?? null
+      : (
       selectedPreview.trackId
       ?? spotifyTrackIdFromUri(selectedPreviewPlaybackTrackUri ?? selectedPreview.trackUri)
       ?? selectedPreview.sourceTrack?.track_id
       ?? null
     )
     : null;
-  const selectedPreviewBaseKnownLiked = Boolean(
-    selectedPreview?.kind === "track"
-    && (
-      recentTrackIsKnownLiked(selectedPreview.sourceTrack, selectedPreview.trackId)
-      || (selectedPreviewReleaseTrackDetailReady?.source_versions ?? []).some((version) => Boolean(
-        version.spotify_track_id
-        && (likedTrackIdsForDisplay.has(version.spotify_track_id) || targetedLikedTrackById[version.spotify_track_id])
-      ))
-    ),
-  );
-  const selectedPreviewIsKnownLiked = selectedPreviewStarTrackId && selectedPreviewStarTrackId in localStarredTrackById
-    ? localStarredTrackById[selectedPreviewStarTrackId]
-    : selectedPreviewBaseKnownLiked;
   const selectedPreviewIsBookmarked = Boolean(
     selectedPreviewStarTrackId && localBookmarkedTrackById[selectedPreviewStarTrackId],
   );
-  const selectedPreviewRecordingListenCount = selectedPreview?.kind === "track"
-    ? (selectedPreviewReleaseTrackDetailReady?.source_versions ?? []).reduce((total, version) => total + Math.max(0, Number(version.play_count ?? 0) || 0), 0)
-    : 0;
-  const selectedPreviewReleaseVersionListenCount = selectedPreview?.kind === "track" && selectedPreviewDetailView === "release"
-    ? Math.max(0, Number(selectedPreviewReleasePlaybackSourceVersion?.play_count ?? 0) || 0)
-    : 0;
-  const selectedPreviewListenCount = selectedPreviewDetailView === "release"
-    ? selectedPreviewReleaseVersionListenCount
-    : selectedPreviewRecordingListenCount;
-  const selectedPreviewReleaseListenCountLabel = selectedPreviewListenCount > 0
-    ? `${selectedPreviewListenCount.toLocaleString()} ${selectedPreviewListenCount === 1 ? "listen" : "listens"}`
-    : null;
-  const selectedPreviewListenCountLabel = selectedPreviewReleaseListenCountLabel
-    ?? selectedPreviewCachedSummary?.listenCountLabel
-    ?? null;
   const selectedPreviewTrackDurationLabel = selectedPreviewTrackTotalDisplayMs > 0
     ? formatPlaybackClock(selectedPreviewTrackTotalDisplayMs)
     : selectedPreviewCachedSummary?.durationLabel ?? null;
-  const selectedPreviewLastListenedLabel = selectedPreview?.kind === "track"
-    ? (formatMonthDay(
-      selectedPreviewMatchedAlbumTrack?.lastPlayedAt
-      ?? selectedPreview.sourceTrack?.last_played_at
-      ?? selectedPreview.sourceTrack?.spotify_played_at
-      ?? null,
-      true,
-    ) ?? selectedPreviewCachedSummary?.lastListenedLabel ?? null)
-    : null;
-
-  useEffect(() => {
-    if (!selectedPreviewSummaryCacheKey || selectedPreview?.kind !== "track") {
-      return;
-    }
-    const nextSummary = {
-      durationLabel: selectedPreviewTrackDurationLabel,
-      lastListenedLabel: selectedPreviewLastListenedLabel,
-      listenCountLabel: selectedPreviewReleaseListenCountLabel ?? selectedPreviewCachedSummary?.listenCountLabel ?? null,
-    };
-    if (!nextSummary.durationLabel && !nextSummary.lastListenedLabel && !nextSummary.listenCountLabel) {
-      return;
-    }
-    setTrackSummaryChipCache((current) => {
-      const existing = current[selectedPreviewSummaryCacheKey] ?? {};
-      if (
-        existing.durationLabel === nextSummary.durationLabel
-        && existing.lastListenedLabel === nextSummary.lastListenedLabel
-        && existing.listenCountLabel === nextSummary.listenCountLabel
-      ) {
-        return current;
-      }
-      return {
-        ...current,
-        [selectedPreviewSummaryCacheKey]: {
-          ...existing,
-          ...nextSummary,
-        },
-      };
-    });
-  }, [
-    selectedPreview?.kind,
-    selectedPreviewCachedSummary?.listenCountLabel,
-    selectedPreviewLastListenedLabel,
-    selectedPreviewReleaseListenCountLabel,
-    selectedPreviewSummaryCacheKey,
-    selectedPreviewTrackDurationLabel,
-  ]);
   useEffect(() => {
     if (!selectedPreviewReleaseTrackDetailReady || selectedPreview?.kind !== "track") {
       return;
@@ -1547,7 +1494,10 @@ export function App() {
   const livePlaybackControlTooltip = liveReadOnlyMode
     ? `Playing on ${livePlaybackSnapshot?.device_name ?? "another device"}. Click to control on ListenLab.`
     : undefined;
-  const playerTransportTooltip = previewStatusTooltip ?? livePlaybackControlTooltip;
+  const playerConnectingTooltip = !usingLivePlaybackSnapshot && !playerReady && !playerError
+    ? "Connecting to Spotify player..."
+    : undefined;
+  const playerTransportTooltip = previewStatusTooltip ?? livePlaybackControlTooltip ?? playerConnectingTooltip;
   const listenLabQueueCursor = playerQueueSource === "listenlab" ? playerQueueCursor : null;
   const listenLabQueueHasCursor = listenLabQueueCursor != null && listenLabQueueCursor >= 0;
   const spotifyQueueCurrentIndex = playerQueueSource === "spotify" && playerDisplayTrack
@@ -2081,8 +2031,12 @@ export function App() {
       return;
     }
     let cancelled = false;
-    setSelectedPreviewRecordingCandidate(null);
-    setSelectedPreviewRelatedCandidates([]);
+    setSelectedPreviewRecordingCandidate((current) => (
+      current?.members.some((member) => member.release_track_id === releaseTrackId) ? current : null
+    ));
+    setSelectedPreviewRelatedCandidates((current) => (
+      current.some((item) => item.members.some((member) => member.release_track_id === releaseTrackId)) ? current : []
+    ));
     setSelectedPreviewRecordingCandidateError(null);
     fetchRecordingTrackCandidateByReleaseTrack(releaseTrackId)
       .then(async (payload) => {
@@ -2112,8 +2066,11 @@ export function App() {
           }
         }
         const items = Array.from(itemByKey.values());
+        const hydratedRecordingCandidate = recordingCandidate
+          ? itemByKey.get(recordingCandidate.candidate_key) ?? recordingCandidate
+          : null;
         setSelectedPreviewRelatedCandidates(items);
-        setSelectedPreviewRecordingCandidate(recordingCandidate);
+        setSelectedPreviewRecordingCandidate(hydratedRecordingCandidate);
       })
       .catch((error) => {
         if (cancelled) {
@@ -2565,6 +2522,27 @@ export function App() {
     const albumCompletionKey = initialAlbumId
       ? `album:${initialAlbumId}`
       : selectedTrackId ? `track:${selectedTrackId}` : null;
+    const cachedAlbumTrackRows = !shouldForceSpotifyFetch
+      ? (
+        (initialAlbumId ? albumTrackRowsCacheRef.current.get(`album:${initialAlbumId}`) : null)
+        ?? (selectedTrackId ? albumTrackRowsCacheRef.current.get(`track:${selectedTrackId}`) : null)
+        ?? null
+      )
+      : null;
+    if (cachedAlbumTrackRows && cachedAlbumTrackRows.rows.length > 0) {
+      setAlbumTrackEntries(cachedAlbumTrackRows.rows.map((row) => ({
+        ...row,
+        isSelected: Boolean(selectedTrackId && row.id && selectedTrackId === row.id),
+      })));
+      loadedAlbumTracksAlbumIdRef.current = cachedAlbumTrackRows.albumId;
+      setAlbumTrackEntriesLoading(false);
+      setAlbumTrackEntriesError(null);
+      setAlbumTrackEntriesPartial(cachedAlbumTrackRows.partial);
+      setAlbumTrackSpotifyFetchPending(false);
+      return () => {
+        cancelled = true;
+      };
+    }
     const albumAlreadyLoaded = initialAlbumId
       && loadedAlbumTracksAlbumIdRef.current === initialAlbumId
       && albumTrackEntries.length > 0
@@ -2628,7 +2606,11 @@ export function App() {
             release_track_cluster_candidate_type?: string | null;
             release_track_cluster_relationship_kind?: string | null;
             play_count?: number | null;
+            first_played_at?: string | null;
             last_played_at?: string | null;
+            source_play_count?: number | null;
+            source_first_played_at?: string | null;
+            source_last_played_at?: string | null;
           }>;
           partial?: boolean | null;
         };
@@ -2642,6 +2624,18 @@ export function App() {
           const isPartial = Boolean(payload.partial);
           setAlbumTrackEntries(rows);
           loadedAlbumTracksAlbumIdRef.current = resolvedAlbumId;
+          albumTrackRowsCacheRef.current.set(`album:${resolvedAlbumId}`, {
+            albumId: resolvedAlbumId,
+            rows,
+            partial: isPartial,
+          });
+          if (selectedTrackId) {
+            albumTrackRowsCacheRef.current.set(`track:${selectedTrackId}`, {
+              albumId: resolvedAlbumId,
+              rows,
+              partial: isPartial,
+            });
+          }
           setAlbumTrackEntriesError(rows.length === 0 ? "No tracks were returned for this album." : null);
           setAlbumTrackEntriesPartial(isPartial);
           const completionKey = resolvedAlbumId ? `album:${resolvedAlbumId}` : albumCompletionKey;
@@ -3087,7 +3081,11 @@ export function App() {
       release_track_cluster_candidate_type?: string | null;
       release_track_cluster_relationship_kind?: string | null;
       play_count?: number | null;
+      first_played_at?: string | null;
       last_played_at?: string | null;
+      source_play_count?: number | null;
+      source_first_played_at?: string | null;
+      source_last_played_at?: string | null;
     }>,
     selectedTrackId: string | null,
   ) {
@@ -3142,10 +3140,46 @@ export function App() {
       const normalizedKey = normalizedTrackArtistKey(item.name ?? null, artistNames || null);
       const isTopTrack = Boolean((id && topTrackIds.has(id)) || normalizedTopTrackKeys.has(normalizedKey));
       const sourceTrack = id ? (knownTracksById.get(id) ?? null) : null;
+      const backendFirstPlayedAt = typeof item.first_played_at === "string" && item.first_played_at.trim()
+        ? item.first_played_at
+        : null;
       const backendLastPlayedAt = typeof item.last_played_at === "string" && item.last_played_at.trim()
         ? item.last_played_at
         : null;
+      const hasSourceLastPlayedAt = Object.prototype.hasOwnProperty.call(item, "source_last_played_at");
+      const hasSourcePlayCount = Object.prototype.hasOwnProperty.call(item, "source_play_count");
+      const sourceLastPlayedAt = hasSourceLastPlayedAt
+        ? typeof item.source_last_played_at === "string" && item.source_last_played_at.trim()
+          ? item.source_last_played_at
+          : null
+        : undefined;
+      const sourcePlayCount = hasSourcePlayCount
+        ? typeof item.source_play_count === "number" && Number.isFinite(item.source_play_count)
+          ? Math.max(0, item.source_play_count)
+          : (sourceLastPlayedAt ? 1 : 0)
+        : undefined;
       const lastPlayedAt = backendLastPlayedAt ?? (id ? (latestPlayedAtByTrackId.get(id) ?? null) : null);
+      const playCount = typeof item.play_count === "number" && Number.isFinite(item.play_count) ? Math.max(0, item.play_count) : (lastPlayedAt ? 1 : 0);
+      const sourceTrackWithHistory = sourceTrack
+        ? {
+          ...sourceTrack,
+          first_played_at: backendFirstPlayedAt ?? sourceTrack.first_played_at ?? null,
+          last_played_at: lastPlayedAt ?? sourceTrack.last_played_at ?? null,
+          play_count: playCount || sourceTrack.play_count || null,
+        }
+        : (backendFirstPlayedAt || lastPlayedAt || playCount > 0)
+          ? {
+            track_id: id,
+            track_name: item.name ?? "Unknown track",
+            artist_name: artistNames || null,
+            album_name: null,
+            duration_ms: typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) ? Math.max(0, item.duration_ms) : null,
+            uri: item.uri ?? (id ? `spotify:track:${id}` : null),
+            first_played_at: backendFirstPlayedAt,
+            last_played_at: lastPlayedAt,
+            play_count: playCount,
+          } satisfies RecentTrack
+          : null;
       return {
         id,
         name: item.name ?? "Unknown track",
@@ -3153,9 +3187,11 @@ export function App() {
         durationMs: typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) ? Math.max(0, item.duration_ms) : null,
         artistName: artistNames || null,
         artists: itemArtists,
-        sourceTrack,
+        sourceTrack: sourceTrackWithHistory,
         lastPlayedAt,
-        playCount: typeof item.play_count === "number" && Number.isFinite(item.play_count) ? Math.max(0, item.play_count) : (lastPlayedAt ? 1 : 0),
+        sourceLastPlayedAt,
+        sourcePlayCount,
+        playCount,
         isSelected: Boolean(selectedTrackId && id && selectedTrackId === id),
         isTopTrack,
         releaseTrackId: typeof item.release_track_id === "number" ? item.release_track_id : null,
@@ -9495,7 +9531,6 @@ export function App() {
 
             {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? <p className="empty-copy">Track ended. Checking for the next song...</p> : null}
             {playerError ? <p className="empty-copy">{playerError}</p> : null}
-            {!usingLivePlaybackSnapshot && !playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
           </div>
 
           <aside className="player-recent-column player-queue-column player-home-queue-column" aria-label={playerQueueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
@@ -9878,15 +9913,7 @@ export function App() {
     ? `Grouped with ${selectedPreviewReleaseSiblingSourceCount} source ${selectedPreviewReleaseSiblingSourceCount === 1 ? "version" : "versions"}`
     : null;
   const selectedPreviewCanonicalTrackTitle = selectedPreviewReleaseTrackDetailReady?.release_track.name?.trim() || null;
-  const selectedPreviewReleaseSourceVersions = selectedPreviewReleaseTrackDetailReady?.source_versions ?? [];
-  const selectedPreviewCanViewReleaseTrack = selectedPreview?.kind === "track" && (
-    new Set(
-      selectedPreviewReleaseSourceVersions
-        .map((version) => version.spotify_track_id?.trim())
-        .filter((spotifyTrackId): spotifyTrackId is string => Boolean(spotifyTrackId)),
-    ).size > 1
-    || selectedPreviewReleaseSiblingSourceCount > 1
-  );
+  const selectedPreviewCanViewReleaseTrack = selectedPreview?.kind === "track" && selectedPreviewReleaseSourceVersions.length > 1;
   const selectedPreviewCurrentSpotifyTrackId = selectedPreview?.kind === "track"
     ? selectedPreview.trackId ?? spotifyTrackIdFromUri(selectedPreview.trackUri)
     : null;
@@ -9911,6 +9938,261 @@ export function App() {
   const selectedPreviewOtherRecordingMembers = selectedPreview && selectedPreview.kind === "track"
     ? selectedPreviewRecordingMembers.filter((member) => member.release_track_id !== selectedPreview.releaseTrackId)
     : [];
+  const selectedPreviewCurrentRecordingMember = selectedPreview?.kind === "track"
+    ? selectedPreviewRecordingMembers.find((member) => member.release_track_id === selectedPreview.releaseTrackId) ?? null
+    : null;
+  const selectedPreviewIsReleaseDetailView = selectedPreview?.kind === "track" && selectedPreviewDetailView === "release";
+  const selectedPreviewRecordingStarTrackIds = selectedPreview?.kind === "track"
+    ? Array.from(new Set([
+      selectedPreviewStarTrackId,
+      selectedPreview.trackId,
+      spotifyTrackIdFromUri(selectedPreview.trackUri),
+      selectedPreview.sourceTrack?.track_id,
+      ...selectedPreviewReleaseSourceVersionsRaw.map((version) => version.spotify_track_id ?? null),
+      ...selectedPreviewRecordingMembers.flatMap((member) => member.source_track_ids ?? []),
+      ...selectedPreviewRecordingMembers.flatMap((member) => (member.source_track_uris ?? []).map((uri) => spotifyTrackIdFromUri(uri))),
+    ].map((trackId) => String(trackId ?? "").trim()).filter(Boolean)))
+    : [];
+  const selectedPreviewBaseKnownLiked = Boolean(
+    selectedPreview?.kind === "track"
+    && (
+      (
+        (!selectedPreviewStarTrackId || localStarredTrackById[selectedPreviewStarTrackId] !== false)
+        && recentTrackIsKnownLiked(selectedPreview.sourceTrack, selectedPreview.trackId)
+      )
+      || selectedPreviewRecordingStarTrackIds.some((trackId) => {
+        const localStarred = localStarredTrackById[trackId];
+        if (localStarred != null) {
+          return localStarred;
+        }
+        return likedTrackIdsForDisplay.has(trackId) || Boolean(targetedLikedTrackById[trackId]);
+      })
+    ),
+  );
+  const selectedPreviewCurrentVersionTrackIds = selectedPreview?.kind === "track"
+    ? selectedPreviewIsReleaseDetailView
+      ? Array.from(new Set([
+        selectedPreviewReleasePlaybackSourceVersion?.spotify_track_id ?? null,
+      ].map((trackId) => String(trackId ?? "").trim()).filter(Boolean)))
+      : Array.from(new Set([
+      selectedPreviewStarTrackId,
+      selectedPreviewCurrentSpotifyTrackId,
+      selectedPreview.trackId,
+      spotifyTrackIdFromUri(selectedPreview.trackUri),
+      spotifyTrackIdFromUri(selectedPreviewPlaybackTrackUri),
+      selectedPreviewReleasePlaybackSourceVersion?.spotify_track_id ?? null,
+      selectedPreviewMatchedAlbumTrack?.id ?? null,
+    ].map((trackId) => String(trackId ?? "").trim()).filter(Boolean)))
+    : [];
+  const selectedPreviewCurrentVersionIsSpotifyLiked = selectedPreview?.kind === "track"
+    ? selectedPreviewCurrentVersionTrackIds.some((trackId) => (
+      likedTrackIdsForDisplay.has(trackId)
+      || Boolean(targetedLikedTrackById[trackId])
+      || Boolean(
+        selectedPreview.sourceTrack
+        && selectedPreview.sourceTrack.track_id === trackId
+        && (
+          selectedPreview.sourceTrack.is_liked === true
+          || selectedPreview.sourceTrack.source_label === "liked_cache"
+        ),
+      )
+    ))
+    : false;
+  const selectedPreviewCurrentVersionIsLocallyStarred = selectedPreview?.kind === "track"
+    ? selectedPreviewCurrentVersionTrackIds.some((trackId) => localStarredTrackById[trackId] === true)
+    : false;
+  const selectedPreviewCurrentVersionIsKnownLiked = selectedPreviewCurrentVersionIsLocallyStarred || selectedPreviewCurrentVersionIsSpotifyLiked;
+  const selectedPreviewIsKnownLiked = selectedPreviewIsReleaseDetailView
+    ? selectedPreviewCurrentVersionIsKnownLiked
+    : selectedPreviewBaseKnownLiked;
+  const selectedPreviewAlbumContextTagLabel = selectedPreview?.kind === "track"
+    ? albumContextTagLabel(
+      selectedPreviewReleasePlaybackSourceVersion?.album_type
+        ?? selectedPreview.sourceTrack?.spotify_album_type
+        ?? selectedPreviewCurrentRecordingMember?.album_types?.[0]
+        ?? null,
+      selectedPreviewReleasePlaybackSourceVersion?.album_name
+        ?? selectedPreview.sourceAlbumName
+        ?? selectedPreview.detail
+        ?? selectedPreviewCurrentRecordingMember?.album
+        ?? null,
+    )
+    : null;
+  const selectedPreviewReleaseSourceListenCount = selectedPreview?.kind === "track"
+    ? Math.max(
+      0,
+      Number(
+        selectedPreviewReleaseTrackDetailReady?.listen_counts?.release_track_play_count
+        ?? selectedPreviewReleaseTrackDetailReady?.listen_counts?.source_versions_play_count
+        ?? selectedPreviewReleaseSourceVersions.reduce((total, version) => total + Math.max(0, Number(version.play_count ?? 0) || 0), 0),
+      ) || 0,
+    )
+    : 0;
+  const selectedPreviewRecordingBackendListenCount = selectedPreview?.kind === "track"
+    ? Math.max(0, Number(selectedPreviewRecordingCandidateForCurrent?.listen_counts?.recording_total_play_count ?? 0) || 0)
+    : 0;
+  const selectedPreviewRecordingMemberListenCount = selectedPreview?.kind === "track"
+    ? selectedPreviewRecordingMembers.reduce((total, member) => total + Math.max(0, Number(member.play_count ?? 0) || 0), 0)
+    : 0;
+  const selectedPreviewRecordingListenCount = selectedPreviewRecordingBackendListenCount > 0
+    ? selectedPreviewRecordingBackendListenCount
+    : selectedPreviewRecordingMemberListenCount > 0
+      ? selectedPreviewRecordingMemberListenCount
+      : selectedPreviewReleaseSourceListenCount;
+  const selectedPreviewCurrentSourceVersionListenCount = Math.max(
+    0,
+    Number(
+      selectedPreviewReleasePlaybackSourceVersion?.play_count
+      ?? selectedPreviewReleaseTrackDetailReady?.listen_counts?.playback_source_play_count
+      ?? 0,
+    ) || 0,
+  );
+  const selectedPreviewListenCount = selectedPreviewIsReleaseDetailView
+    ? selectedPreviewCurrentSourceVersionListenCount
+    : selectedPreviewRecordingListenCount;
+  const selectedPreviewThisAlbumListenCount = selectedPreviewIsReleaseDetailView
+    ? selectedPreviewCurrentSourceVersionListenCount
+    : selectedPreviewCurrentSourceVersionListenCount > 0
+      ? selectedPreviewCurrentSourceVersionListenCount
+      : selectedPreviewCurrentRecordingMember
+        ? Math.max(0, Number(selectedPreviewCurrentRecordingMember.play_count ?? 0) || 0)
+        : selectedPreviewReleaseSourceListenCount;
+  const selectedPreviewListenCountLabel = selectedPreviewListenCount > 0
+    ? `${selectedPreviewListenCount.toLocaleString()} ${selectedPreviewListenCount === 1 ? "listen" : "listens"}`
+    : selectedPreviewCachedSummary?.listenCountLabel ?? null;
+  const selectedPreviewListenBreakdown = selectedPreview?.kind === "track" && selectedPreviewListenCount > 0
+    ? selectedPreviewIsReleaseDetailView
+      ? null
+      : {
+      thisAlbumCount: selectedPreviewThisAlbumListenCount,
+      otherAlbumsCount: Math.max(0, selectedPreviewListenCount - selectedPreviewThisAlbumListenCount),
+    }
+    : null;
+  const firstTimestamp = (values: Array<string | null | undefined>) => values.reduce<string | null>((earliest, value) => {
+    const valueMs = parseTimestampMs(value);
+    if (valueMs == null) {
+      return earliest;
+    }
+    const earliestMs = parseTimestampMs(earliest);
+    return earliestMs == null || valueMs < earliestMs ? value ?? null : earliest;
+  }, null);
+  const lastTimestamp = (values: Array<string | null | undefined>) => values.reduce<string | null>((latest, value) => {
+    const valueMs = parseTimestampMs(value);
+    if (valueMs == null) {
+      return latest;
+    }
+    const latestMs = parseTimestampMs(latest);
+    return latestMs == null || valueMs > latestMs ? value ?? null : latest;
+  }, null);
+  const selectedPreviewOtherRecordingMembersForBreakdown = selectedPreview?.kind === "track"
+    ? selectedPreviewRecordingMembers.filter((member) => member.release_track_id !== selectedPreview.releaseTrackId)
+    : [];
+  const selectedPreviewOtherReleaseSourceVersionsForBreakdown = selectedPreview?.kind === "track"
+    ? selectedPreviewReleaseSourceVersions.filter((version) => (
+      version.spotify_track_id
+      && version.spotify_track_id !== selectedPreviewReleasePlaybackSourceVersion?.spotify_track_id
+      && version.spotify_track_id !== selectedPreviewCurrentSpotifyTrackId
+    ))
+    : [];
+  const selectedPreviewThisAlbumFirstListenedAt = selectedPreview?.kind === "track"
+    ? selectedPreviewIsReleaseDetailView
+      ? selectedPreviewReleasePlaybackSourceVersion?.first_played_at ?? null
+      : firstTimestamp([
+        selectedPreviewReleasePlaybackSourceVersion?.first_played_at,
+        selectedPreviewMatchedAlbumTrack?.sourceTrack?.first_played_at,
+        selectedPreview.sourceTrack?.first_played_at,
+        selectedPreviewCurrentRecordingMember?.first_played_at,
+      ])
+    : null;
+  const selectedPreviewThisAlbumLastListenedAt = selectedPreview?.kind === "track"
+    ? selectedPreviewIsReleaseDetailView
+      ? selectedPreviewReleasePlaybackSourceVersion?.last_played_at ?? null
+      : lastTimestamp([
+        selectedPreviewReleasePlaybackSourceVersion?.last_played_at,
+        selectedPreviewMatchedAlbumTrack?.lastPlayedAt,
+        selectedPreviewMatchedAlbumTrack?.sourceTrack?.last_played_at,
+        selectedPreview.sourceTrack?.last_played_at,
+        selectedPreview.sourceTrack?.spotify_played_at,
+        selectedPreviewCurrentRecordingMember?.last_played_at,
+      ])
+    : null;
+  const selectedPreviewOtherAlbumFirstListenedAt = selectedPreviewIsReleaseDetailView
+    ? firstTimestamp(selectedPreviewOtherReleaseSourceVersionsForBreakdown.map((version) => version.first_played_at))
+    : firstTimestamp(selectedPreviewOtherRecordingMembersForBreakdown.map((member) => member.first_played_at));
+  const selectedPreviewOtherAlbumLastListenedAt = selectedPreviewIsReleaseDetailView
+    ? lastTimestamp(selectedPreviewOtherReleaseSourceVersionsForBreakdown.map((version) => version.last_played_at))
+    : lastTimestamp(selectedPreviewOtherRecordingMembersForBreakdown.map((member) => member.last_played_at));
+  const selectedPreviewHasOtherAlbumsForBottomBreakdown = selectedPreviewIsReleaseDetailView
+    ? false
+    : selectedPreviewOtherRecordingMembersForBreakdown.length > 0;
+  const selectedPreviewAllFirstListenedAt = selectedPreviewIsReleaseDetailView
+    ? selectedPreviewThisAlbumFirstListenedAt
+    : firstTimestamp([
+      selectedPreviewThisAlbumFirstListenedAt,
+      selectedPreviewOtherAlbumFirstListenedAt,
+    ]);
+  const selectedPreviewAllLastListenedAt = selectedPreviewIsReleaseDetailView
+    ? selectedPreviewThisAlbumLastListenedAt
+    : lastTimestamp([
+      selectedPreviewThisAlbumLastListenedAt,
+      selectedPreviewOtherAlbumLastListenedAt,
+    ]);
+  const selectedPreviewFirstListenedLabel = selectedPreview?.kind === "track"
+    ? formatMonthDay(selectedPreviewAllFirstListenedAt, true)
+    : null;
+  const selectedPreviewLastListenedLabel = selectedPreview?.kind === "track"
+    ? (formatMonthDay(selectedPreviewAllLastListenedAt, true) ?? selectedPreviewCachedSummary?.lastListenedLabel ?? null)
+    : null;
+  const selectedPreviewListenedRangeLabel = selectedPreviewFirstListenedLabel && selectedPreviewLastListenedLabel
+    ? `${selectedPreviewFirstListenedLabel} - ${selectedPreviewLastListenedLabel}`
+    : selectedPreviewFirstListenedLabel ?? selectedPreviewLastListenedLabel;
+  const selectedPreviewListenedBreakdown = selectedPreview?.kind === "track" && selectedPreviewHasOtherAlbumsForBottomBreakdown && (selectedPreviewOtherAlbumFirstListenedAt || selectedPreviewOtherAlbumLastListenedAt)
+    ? {
+      thisAlbumFirstLabel: formatMonthDay(selectedPreviewThisAlbumFirstListenedAt, true),
+      thisAlbumLastLabel: formatMonthDay(selectedPreviewThisAlbumLastListenedAt, true),
+      otherAlbumsFirstLabel: formatMonthDay(selectedPreviewOtherAlbumFirstListenedAt, true),
+      otherAlbumsLastLabel: formatMonthDay(selectedPreviewOtherAlbumLastListenedAt, true),
+    }
+    : null;
+
+  useEffect(() => {
+    if (!selectedPreviewSummaryCacheKey || selectedPreview?.kind !== "track") {
+      return;
+    }
+    const nextSummary = {
+      durationLabel: selectedPreviewTrackDurationLabel,
+      lastListenedLabel: selectedPreviewLastListenedLabel,
+      listenCountLabel: selectedPreviewListenCountLabel ?? selectedPreviewCachedSummary?.listenCountLabel ?? null,
+    };
+    if (!nextSummary.durationLabel && !nextSummary.lastListenedLabel && !nextSummary.listenCountLabel) {
+      return;
+    }
+    setTrackSummaryChipCache((current) => {
+      const existing = current[selectedPreviewSummaryCacheKey] ?? {};
+      if (
+        existing.durationLabel === nextSummary.durationLabel
+        && existing.lastListenedLabel === nextSummary.lastListenedLabel
+        && existing.listenCountLabel === nextSummary.listenCountLabel
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        [selectedPreviewSummaryCacheKey]: {
+          ...existing,
+          ...nextSummary,
+        },
+      };
+    });
+  }, [
+    selectedPreview?.kind,
+    selectedPreviewCachedSummary?.listenCountLabel,
+    selectedPreviewLastListenedLabel,
+    selectedPreviewListenCountLabel,
+    selectedPreviewSummaryCacheKey,
+    selectedPreviewTrackDurationLabel,
+  ]);
+
   const selectedPreviewRecordingVariationCount = selectedPreviewOtherRecordingMembers.length;
   const selectedPreviewReleaseAlbumVariationCount = selectedPreviewReleaseSourceVersions.length + selectedPreviewOtherRecordingMembers.length;
   const selectedPreviewReleaseSourceVersionNeedsArrows = selectedPreviewReleaseAlbumVariationCount > 3;
@@ -10706,7 +10988,6 @@ export function App() {
                             <p className="empty-copy">Track ended. Checking for the next song...</p>
                           ) : null}
                           {playerError ? <p className="empty-copy">{playerError}</p> : null}
-                          {!usingLivePlaybackSnapshot && !playerReady && !playerError ? <p className="empty-copy">Connecting to Spotify player...</p> : null}
                         </div>
 
                         <aside className="player-recent-column player-queue-column" aria-label={playerQueueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
@@ -11300,6 +11581,7 @@ export function App() {
             selectedPreviewAlbumHasGuestArtists={selectedPreviewAlbumHasGuestArtists}
             selectedPreviewAlbumMainArtists={selectedPreviewAlbumMainArtists}
             selectedPreviewAlbumSummary={selectedPreviewAlbumSummary}
+            selectedPreviewAlbumContextTagLabel={selectedPreviewAlbumContextTagLabel}
             selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbums}
             selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForDisplay}
             selectedPreviewArtistImageUrl={selectedPreviewArtistImageUrl}
@@ -11309,13 +11591,16 @@ export function App() {
             selectedPreviewCanViewReleaseTrack={selectedPreviewCanViewReleaseTrack}
             selectedPreviewCanonicalTrackTitle={selectedPreviewCanonicalTrackTitle}
             selectedPreviewCurrentSpotifyTrackId={selectedPreviewCurrentSpotifyTrackId}
+            selectedPreviewCurrentVersionIsSpotifyLiked={selectedPreviewCurrentVersionIsSpotifyLiked}
             selectedPreviewDetailView={selectedPreviewDetailView}
             selectedPreviewDisplayRelationRows={selectedPreviewDisplayRelationRows}
             selectedPreviewHasReleaseSibling={selectedPreviewHasReleaseSibling}
+            selectedPreviewListenedBreakdown={selectedPreviewListenedBreakdown}
+            selectedPreviewListenedRangeLabel={selectedPreviewListenedRangeLabel}
             selectedPreviewIsBookmarked={selectedPreviewIsBookmarked}
             selectedPreviewIsKnownLiked={selectedPreviewIsKnownLiked}
             selectedPreviewIsSharedArtistPage={selectedPreviewIsSharedArtistPage}
-            selectedPreviewLastListenedLabel={selectedPreviewLastListenedLabel}
+            selectedPreviewListenBreakdown={selectedPreviewListenBreakdown}
             selectedPreviewListenCountLabel={selectedPreviewListenCountLabel}
             selectedPreviewOtherRecordingMembers={selectedPreviewOtherRecordingMembers}
             selectedPreviewPlaybackTrackUri={selectedPreviewPlaybackTrackUri}

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend.app.db import apply_pending_migrations, ensure_sqlite_db, sqlite_connection
+from backend.app.db import apply_pending_migrations, ensure_sqlite_db, refresh_source_track_play_count_cache, sqlite_connection
 from backend.app.main import app
 from backend.app.recording_track_candidates import (
     RecordingTrackCandidateMember,
@@ -49,6 +49,7 @@ def _member(
         "source_track_ids": source_track_ids or [f"spotify-{release_track_id}"],
         "source_track_db_ids": source_track_db_ids or [release_track_id],
         "source_track_uris": [f"spotify:track:spotify-{release_track_id}"] if source_track_uris is None else source_track_uris,
+        "play_count": 0,
         "isrc": isrc,
         "isrc_values": [isrc] if isrc else [],
         "duration_ms": duration_ms,
@@ -578,6 +579,68 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
         lookup_item = get_recording_track_candidate_for_release_track(album_release_track_id)
         self.assertIsNotNone(lookup_item)
         self.assertEqual(item["candidate_key"], lookup_item["candidate_key"])
+
+    def test_query_sums_member_play_counts_from_source_tracks(self) -> None:
+        first_release_track_id = self._seed_release_track(
+            title="Counted Song",
+            artist="Counted Artist",
+            album="Counted Album",
+            spotify_id="counted-album",
+            isrc="USCOUNTED1",
+            duration_ms=180_000,
+        )
+        second_release_track_id = self._seed_release_track(
+            title="Counted Song",
+            artist="Counted Artist",
+            album="Counted Song - Single",
+            spotify_id="counted-single",
+            isrc="USCOUNTED1",
+            duration_ms=180_500,
+        )
+        with sqlite_connection(write=True) as connection:
+            for index in range(20):
+                connection.execute(
+                    """
+                    INSERT INTO fact_play_event (
+                      canonical_ended_at, spotify_track_id, timing_source, matched_state
+                    ) VALUES (?, 'counted-album', 'test', 'matched')
+                    """,
+                    (f"2026-01-01T00:{index:02d}:00Z",),
+                )
+            for index in range(9):
+                connection.execute(
+                    """
+                    INSERT INTO fact_play_event (
+                      canonical_ended_at, spotify_track_id, timing_source, matched_state
+                    ) VALUES (?, 'counted-single', 'test', 'matched')
+                    """,
+                    (f"2026-01-02T00:{index:02d}:00Z",),
+                )
+        refresh_source_track_play_count_cache()
+
+        item = get_recording_track_candidate_for_release_track(first_release_track_id)
+
+        self.assertIsNotNone(item)
+        counts_by_release_track_id = {
+            member["release_track_id"]: member["play_count"]
+            for member in item["members"]
+        }
+        self.assertEqual(20, counts_by_release_track_id[first_release_track_id])
+        self.assertEqual(9, counts_by_release_track_id[second_release_track_id])
+        self.assertEqual(29, sum(counts_by_release_track_id.values()))
+        dates_by_release_track_id = {
+            member["release_track_id"]: (member["first_played_at"], member["last_played_at"])
+            for member in item["members"]
+        }
+        self.assertEqual(("2026-01-01T00:00:00Z", "2026-01-01T00:19:00Z"), dates_by_release_track_id[first_release_track_id])
+        self.assertEqual(("2026-01-02T00:00:00Z", "2026-01-02T00:08:00Z"), dates_by_release_track_id[second_release_track_id])
+        self.assertEqual(
+            {
+                "recording_total_play_count": 29,
+                "recording_member_count": 2,
+            },
+            item["listen_counts"],
+        )
 
     def test_release_metadata_marks_recording_candidate_members_with_rt_badge_flag(self) -> None:
         self._seed_release_track(

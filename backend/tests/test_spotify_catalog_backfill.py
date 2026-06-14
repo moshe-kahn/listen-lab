@@ -8025,6 +8025,10 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             connection.execute("INSERT INTO source_track_map (source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')", (source_track_id, track_id))
             connection.execute("INSERT INTO spotify_track_catalog (spotify_track_id, name, album_id, fetched_at, last_status) VALUES (?, ?, ?, ?, ?)", ("spotify-track-a", "Track A", "spotify-album-a", "2026-05-01T00:00:00Z", "ok"))
             connection.execute("INSERT INTO spotify_album_catalog (spotify_album_id, name, fetched_at, last_status) VALUES (?, ?, ?, ?)", ("spotify-album-a", "Album A", "2026-05-01T00:00:00Z", "ok"))
+            connection.execute("INSERT INTO album_family (primary_name, normalized_name, canonical_release_album_id) VALUES (?, ?, ?)", ("Album A", "album a", duplicate_id))
+            family_id = int(connection.execute("SELECT id FROM album_family WHERE canonical_release_album_id = ?", (duplicate_id,)).fetchone()[0])
+            connection.execute("INSERT INTO album_family_map (release_album_id, album_family_id, match_method, confidence, status, explanation) VALUES (?, ?, 'seed', 1.0, 'accepted', 'seed')", (duplicate_id, family_id))
+            merge_log_id = int(connection.execute("INSERT INTO release_track_merge_log (obsolete_release_track_id, canonical_release_track_id, release_album_id, match_method, confidence, status) VALUES (?, ?, ?, 'seed', 1.0, 'accepted')", (track_id, track_id, duplicate_id)).lastrowid)
             connection.commit()
 
         dry_run = repair_safe_history_spotify_release_album_duplicates(dry_run=True)
@@ -8040,6 +8044,9 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
             self.assertEqual(1, connection.execute("SELECT count(*) FROM album_track WHERE release_album_id = ? AND release_track_id = ?", (survivor_id, track_id)).fetchone()[0])
             self.assertEqual(0, connection.execute("SELECT count(*) FROM album_track WHERE release_album_id = ?", (duplicate_id,)).fetchone()[0])
             self.assertEqual(survivor_id, connection.execute("SELECT release_album_id FROM source_album_map WHERE source_album_id = ?", (history_source_album_id,)).fetchone()[0])
+            self.assertEqual(survivor_id, connection.execute("SELECT canonical_release_album_id FROM album_family WHERE id = ?", (family_id,)).fetchone()[0])
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM album_family_map WHERE release_album_id = ?", (duplicate_id,)).fetchone()[0])
+            self.assertEqual(survivor_id, connection.execute("SELECT release_album_id FROM release_track_merge_log WHERE id = ?", (merge_log_id,)).fetchone()[0])
 
     def test_safe_history_spotify_album_repair_blocks_extra_track_without_album_evidence(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -8068,6 +8075,44 @@ class SpotifyCatalogBackfillTests(unittest.TestCase):
         self.assertEqual(0, applied["applied_count"])
         with closing(sqlite3.connect(self.db_path)) as connection:
             self.assertEqual(1, connection.execute("SELECT count(*) FROM release_album WHERE id = ?", (duplicate_id,)).fetchone()[0])
+
+    def test_safe_history_spotify_album_repair_allows_equivalent_spotify_album_id_without_duration(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_id = int(connection.execute("INSERT INTO artist (canonical_name) VALUES (?)", ("Artist A",)).lastrowid)
+            survivor_id = int(connection.execute("INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)", ("Album A", "album a")).lastrowid)
+            duplicate_id = int(connection.execute("INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)", ("Album A", "album a")).lastrowid)
+            shared_track_id = int(connection.execute("INSERT INTO release_track (primary_name, normalized_name, duration_ms) VALUES (?, ?, ?)", ("Track A", "track a", 100000)).lastrowid)
+            equivalent_track_id = int(connection.execute("INSERT INTO release_track (primary_name, normalized_name, duration_ms) VALUES (?, ?, ?)", ("Track B", "track b", 999999)).lastrowid)
+            spotify_source_album_id = int(connection.execute("INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?)", ("spotify", "spotify-album-a", "spotify:album:spotify-album-a", "Album A", "{}")).lastrowid)
+            history_source_album_id = int(connection.execute("INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw, raw_payload_json) VALUES (?, ?, ?, ?, ?)", ("history_raw", "history-album-a", None, "Album A", "{}")).lastrowid)
+            shared_source_track_id = int(connection.execute("INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw) VALUES (?, ?, ?, ?)", ("spotify", "spotify-track-a", "spotify:track:spotify-track-a", "Track A")).lastrowid)
+            equivalent_source_track_id = int(connection.execute("INSERT INTO source_track (source_name, external_id, external_uri, source_name_raw) VALUES (?, ?, ?, ?)", ("spotify", "spotify-track-b", "spotify:track:spotify-track-b", "Track B")).lastrowid)
+            for album_id in (survivor_id, duplicate_id):
+                connection.execute("INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)", (album_id, artist_id))
+                connection.execute("INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)", (album_id, shared_track_id))
+            connection.execute("INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)", (duplicate_id, equivalent_track_id))
+            connection.execute("INSERT INTO source_album_map (source_album_id, release_album_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')", (spotify_source_album_id, survivor_id))
+            connection.execute("INSERT INTO source_album_map (source_album_id, release_album_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'history_text', 0.8, 'accepted', 0, 'seed')", (history_source_album_id, duplicate_id))
+            connection.execute("INSERT INTO source_track_map (source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')", (shared_source_track_id, shared_track_id))
+            connection.execute("INSERT INTO source_track_map (source_track_id, release_track_id, match_method, confidence, status, is_user_confirmed, explanation) VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'seed')", (equivalent_source_track_id, equivalent_track_id))
+            connection.execute("INSERT INTO spotify_track_catalog (spotify_track_id, name, duration_ms, album_id, fetched_at, last_status) VALUES (?, ?, ?, ?, ?, ?)", ("spotify-track-a", "Track A", 100000, "spotify-album-a", "2026-05-01T00:00:00Z", "ok"))
+            connection.execute("INSERT INTO spotify_track_catalog (spotify_track_id, name, duration_ms, album_id, fetched_at, last_status) VALUES (?, ?, ?, ?, ?, ?)", ("spotify-track-b", "Track B", 999999, "spotify-album-equivalent", "2026-05-01T00:00:00Z", "ok"))
+            connection.execute("INSERT INTO spotify_album_catalog (spotify_album_id, name, release_date, total_tracks, fetched_at, last_status) VALUES (?, ?, ?, ?, ?, ?)", ("spotify-album-a", "Album A", "2020-01-01", 10, "2026-05-01T00:00:00Z", "ok"))
+            connection.execute("INSERT INTO spotify_album_catalog (spotify_album_id, name, release_date, total_tracks, fetched_at, last_status) VALUES (?, ?, ?, ?, ?, ?)", ("spotify-album-equivalent", "Album A", "2020-01-01", 10, "2026-05-01T00:00:00Z", "ok"))
+            connection.commit()
+
+        dry_run = repair_safe_history_spotify_release_album_duplicates(dry_run=True)
+
+        self.assertEqual(1, dry_run["candidate_count"])
+        self.assertEqual(1, dry_run["safe_candidate_count"])
+        self.assertEqual([], dry_run["items"][0]["blocked_reasons"])
+
+        applied = repair_safe_history_spotify_release_album_duplicates(dry_run=False)
+
+        self.assertEqual(1, applied["applied_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(0, connection.execute("SELECT count(*) FROM release_album WHERE id = ?", (duplicate_id,)).fetchone()[0])
+            self.assertEqual(1, connection.execute("SELECT count(*) FROM album_track WHERE release_album_id = ? AND release_track_id = ?", (survivor_id, equivalent_track_id)).fetchone()[0])
 
     def test_search_tracks_not_backfilled_and_backfilled(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:

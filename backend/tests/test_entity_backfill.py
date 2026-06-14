@@ -1311,6 +1311,49 @@ class EntityBackfillTests(unittest.TestCase):
             merge_logs,
         )
 
+    def test_merge_conservative_same_album_release_track_duplicates_ignores_duration_mismatch(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_id = int(
+                connection.execute(
+                    "INSERT INTO artist (canonical_name, sort_name) VALUES (?, ?)",
+                    ("Artist Duration", "artist duration"),
+                ).lastrowid
+            )
+            album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES (?, ?)",
+                    ("Album Duration", "album duration"),
+                ).lastrowid
+            )
+            winner_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name, duration_ms) VALUES (?, ?, ?)",
+                    ("Song Duration", "song duration", 180000),
+                ).lastrowid
+            )
+            loser_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name, duration_ms) VALUES (?, ?, ?)",
+                    ("Song Duration", "song duration", 240000),
+                ).lastrowid
+            )
+            for release_track_id in (winner_track_id, loser_track_id):
+                connection.execute(
+                    "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                    (release_track_id, artist_id),
+                )
+                connection.execute(
+                    "INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)",
+                    (album_id, release_track_id),
+                )
+            connection.commit()
+
+        result = merge_conservative_same_album_release_track_duplicates()
+
+        self.assertEqual(1, result["groups_considered"])
+        self.assertEqual(1, result["groups_merged"])
+        self.assertEqual(1, result["release_tracks_deleted"])
+
     def test_merge_conservative_same_album_release_track_duplicates_merges_same_album_variant_titles(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
             artist_id = int(

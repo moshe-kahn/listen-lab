@@ -101,11 +101,28 @@ class RecordingTrackCandidateMember(TypedDict):
     source_track_ids: list[str]
     source_track_db_ids: list[int]
     source_track_uris: list[str]
+    play_count: int
+    first_played_at: str | None
+    last_played_at: str | None
     isrc: str | None
     isrc_values: list[str]
     duration_ms: int | None
     duration_values_ms: list[int]
     evidence: dict[str, Any]
+
+
+def _member_play_count(member: dict[str, Any]) -> int:
+    try:
+        return max(0, int(member.get("play_count") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _candidate_listen_counts(members: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "recording_total_play_count": sum(_member_play_count(member) for member in members),
+        "recording_member_count": len(members),
+    }
 
 
 def _normalize_text(value: Any) -> str:
@@ -628,6 +645,7 @@ def classify_recording_track_candidate_group(
             "source_track_id": representative_source_track_id,
             "reason": representative_reason,
         },
+        "listen_counts": _candidate_listen_counts(sorted_members),
         "members": sorted_members,
         "why_grouped": why_grouped,
         "why_review": sorted(set(why_review)),
@@ -662,6 +680,9 @@ def _candidate_member_from_row(row: sqlite3.Row) -> RecordingTrackCandidateMembe
         "source_track_ids": source_track_ids,
         "source_track_db_ids": _split_int_aggregate(row["source_track_db_ids"]),
         "source_track_uris": _split_aggregate(row["source_track_uris"]),
+        "play_count": int(row["play_count"] or 0),
+        "first_played_at": str(row["first_played_at"]) if row["first_played_at"] else None,
+        "last_played_at": str(row["last_played_at"]) if row["last_played_at"] else None,
         "isrc": isrcs[0] if len(isrcs) == 1 else None,
         "isrc_values": isrcs,
         "duration_ms": duration_ms,
@@ -751,6 +772,14 @@ def _candidate_source_rows(
           ) ordered
           GROUP BY ordered.release_track_id
         ),
+        source_play_counts AS (
+          SELECT
+            spotify_track_id,
+            play_count,
+            first_played_at,
+            last_played_at
+          FROM source_track_play_count_cache
+        ),
         source_refs AS (
           SELECT
             ordered.release_track_id,
@@ -762,7 +791,10 @@ def _candidate_source_rows(
             group_concat(ordered.catalog_album_id, '|') AS catalog_album_ids,
             group_concat(ordered.catalog_album_image_url, '|') AS catalog_album_image_urls,
             group_concat(ordered.catalog_release_date, '|') AS catalog_release_dates,
-            group_concat(ordered.catalog_album_type, '|') AS catalog_album_types
+            group_concat(ordered.catalog_album_type, '|') AS catalog_album_types,
+            sum(ordered.play_count) AS play_count,
+            min(ordered.first_played_at) AS first_played_at,
+            max(ordered.last_played_at) AS last_played_at
           FROM (
             SELECT
               stm.release_track_id,
@@ -829,7 +861,10 @@ def _candidate_source_rows(
                   THEN json_extract(st.raw_payload_json, '$.track.album.album_type')
                   ELSE NULL
                 END
-              ) AS catalog_album_type
+              ) AS catalog_album_type,
+              COALESCE(spc.play_count, 0) AS play_count,
+              spc.first_played_at AS first_played_at,
+              spc.last_played_at AS last_played_at
             FROM source_track_map stm
             JOIN source_track st ON st.id = stm.source_track_id
             LEFT JOIN spotify_track_catalog stc ON stc.spotify_track_id = CASE
@@ -846,6 +881,12 @@ def _candidate_source_rows(
                 ELSE NULL
               END
             )
+            LEFT JOIN source_play_counts spc ON spc.spotify_track_id = CASE
+              WHEN st.source_name = 'spotify' THEN st.external_id
+              WHEN st.source_name = 'spotify_uri' THEN replace(st.external_id, 'spotify:track:', '')
+              WHEN st.external_uri LIKE 'spotify:track:%' THEN replace(st.external_uri, 'spotify:track:', '')
+              ELSE st.external_id
+            END
             WHERE stm.status = 'accepted'
               AND st.source_name IN ('spotify', 'spotify_uri')
             ORDER BY stm.release_track_id, st.id
@@ -868,6 +909,9 @@ def _candidate_source_rows(
           COALESCE(sr.source_track_db_ids, '') AS source_track_db_ids,
           COALESCE(sr.source_track_ids, '') AS source_track_ids,
           COALESCE(sr.source_track_uris, '') AS source_track_uris,
+          COALESCE(sr.play_count, 0) AS play_count,
+          sr.first_played_at AS first_played_at,
+          sr.last_played_at AS last_played_at,
           COALESCE(sr.isrcs, '') AS isrcs,
           COALESCE(sr.duration_values_ms, '') AS duration_values_ms
         FROM release_track rt
@@ -908,6 +952,9 @@ def _hydrate_candidate_items_with_current_member_metadata(items: list[dict[str, 
         "source_track_ids",
         "source_track_db_ids",
         "source_track_uris",
+        "play_count",
+        "first_played_at",
+        "last_played_at",
         "isrc",
         "isrc_values",
         "duration_ms",
@@ -922,6 +969,9 @@ def _hydrate_candidate_items_with_current_member_metadata(items: list[dict[str, 
                 continue
             for field in display_fields:
                 member[field] = current_member[field]
+        members = item.get("members", [])
+        if isinstance(members, list):
+            item["listen_counts"] = _candidate_listen_counts([member for member in members if isinstance(member, dict)])
     return items
 
 

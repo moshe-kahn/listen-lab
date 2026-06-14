@@ -16,10 +16,10 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- `Polish track modal album and release views`
+- `Refine track detail source history`
 
 Worktree at handoff:
-- clean after committing the track modal album/release-view QA batch
+- clean after committing the track detail source-history and In Rainbows release-album merge batch
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
@@ -95,14 +95,36 @@ Album behavior from track view:
 
 Release/recording view behavior:
 - Release album `Rep` badges now use stable representative-source metadata instead of following the highlighted/current source album.
-- Release view bottom listen count uses only the currently selected source version's `play_count`.
-- Recording view bottom listen count remains combined across source versions.
+- Release view bottom listened/date/listen-count tags use only the currently selected Spotify source version.
+- Recording view bottom listened/date/listen-count tags combine source versions across the current generated recording group, and only show click breakdown popovers when more than one recording member contributes.
 - Release view album-track stars are exact to that Spotify source track.
-- Recording view album-track stars keep the existing aggregate behavior across related source versions.
+- Recording view album-track stars keep aggregate behavior across related source versions.
+- The bottom tag order is now `Liked`, album-context tag such as `Single`/`Soundtrack`/`Compilation`, listened range, then listen count.
+- Album tracklist `Last` uses week units for sub-year ages instead of month units.
+- Playback home no longer shows a `Connecting to Spotify player...` status line; disabled/connecting controls expose that state through the hover tooltip.
 
 Backend release detail changes:
 - `ReleaseTrackDetailSourceVersion` now exposes `is_representative_choice`.
 - Representative source selection stays stable while playback/highlight source can change with context.
+- `ReleaseTrackDetailSourceVersion` also exposes album type/release date/total tracks plus first/last/listen-count source history from the source-track play-count cache.
+
+## Current Source-History And In Rainbows Merge Batch
+Backend changes in this batch:
+- SQLite schema version `34` adds `source_track_play_count_cache` with `spotify_track_id`, `play_count`, `first_played_at`, and `last_played_at`.
+- Recent/history projection refreshes that cache after touched facts are reloaded, so track overlays do not recompute source-version counts from the fact view on every album open.
+- Release-track metadata enrichment reads source exact history from `source_track_play_count_cache`, then still provides aggregate release-track history for recording view.
+- Generated recording candidate members now include `play_count`, `first_played_at`, and `last_played_at`, plus candidate-level listen-count totals for recording view.
+- Same-album release-track duplicate merging no longer treats duration mismatch as a hard blocker, because Spotify duration data has known drift.
+- Safe history/Spotify release-album repair accepts equivalent Spotify album IDs when normalized album name matches and release date/track count do not conflict; duration is intentionally ignored.
+- `apply_release_album_merge` now repoints/deletes album-family and release-track merge-log references before deleting retired release albums.
+
+Local DB repair already applied for `Radiohead - In Rainbows`:
+- Merged duplicate release albums `5` and `2830` into survivor `5`.
+- Ran conservative same-album release-track duplicate merge and regenerated dirty recording clusters.
+- `15 Step` is now one release track on album `5` with two Spotify source versions:
+  - `4oXg7xT4ksBxHTx8PcmSXw`: 26 listens, first `2019-01-01T01:56:07Z`, last `2026-06-14T01:59:51.376000Z`
+  - `6dsq7Nt5mIFzvm5kIYNORy`: 5 listens, first `2020-11-16T21:49:40Z`, last `2020-12-05T01:23:18Z`
+- Both Spotify source albums are catalog-equivalent `In Rainbows` rows with release date `2007-12-28` and `10` tracks.
 
 ## Current Startup-Load Work
 Committed startup-load work changed initial dashboard loading behavior and bundle shape.
@@ -237,22 +259,33 @@ Checks run for track modal album/release-view QA batch:
 - `npm run build` from `frontend/` after each frontend behavior batch
 - `git diff --check`
 
+Checks run for the current source-history / In Rainbows merge batch:
+- `python3 -m unittest backend.tests.test_release_track_detail.ReleaseTrackDetailTests.test_valid_release_track_route_returns_stable_shape backend.tests.test_release_track_detail.ReleaseTrackDetailTests.test_equivalent_spotify_album_source_versions_remain_separate_release_sources`
+- `python3 -m unittest backend.tests.test_spotify_catalog_backfill.SpotifyCatalogBackfillTests.test_safe_history_spotify_album_repair_applies_duplicate_track_collision backend.tests.test_spotify_catalog_backfill.SpotifyCatalogBackfillTests.test_safe_history_spotify_album_repair_allows_equivalent_spotify_album_id_without_duration`
+- `python3 -m unittest backend.tests.test_entity_backfill.EntityBackfillTests.test_merge_conservative_same_album_release_track_duplicates_merges_safe_case backend.tests.test_entity_backfill.EntityBackfillTests.test_merge_conservative_same_album_release_track_duplicates_ignores_duration_mismatch backend.tests.test_entity_backfill.EntityBackfillTests.test_merge_conservative_same_album_release_track_duplicates_merges_same_album_variant_titles backend.tests.test_entity_backfill.EntityBackfillTests.test_merge_conservative_same_album_release_track_duplicates_skips_mono_stereo_split`
+- `python3 -m unittest backend.tests.test_recording_track_candidates.RecordingTrackCandidateEndpointTests.test_query_sums_member_play_counts_from_source_tracks`
+- `python3 -m py_compile backend/app/spotify_catalog_backfill.py backend/app/db.py backend/app/release_track_metadata.py backend/app/release_track_detail.py`
+- `npm run build` from `frontend/`
+
 Browser smoke checks completed:
 - local Vite frontend loaded with no console errors after album artist/automatic album fetch changes.
 
 Outstanding QA:
-- Authenticated end-to-end browser QA was not rerun after the final release-view exact-star change.
+- Authenticated end-to-end browser QA was not rerun after the final source-history cache and release-view exact-history changes.
 - Good follow-up manual checks:
   - track with partial local album automatically completes when Spotify is available
   - cooldown mode shows `More tracks on Spotify`
   - release view album-track stars are exact-source only
-  - recording view stars/listen counts remain aggregate
+  - release view listened/listen-count tags are exact-source only
+  - recording view stars/listened/listen counts remain aggregate
+  - `Radiohead - 15 Step` on `In Rainbows` no longer shows the same album as an extra recording appearance
 
 ## Known Limitations
 - Frontend bookmark/star behavior is local placeholder UI; bookmark persistence is not implemented.
 - Source/text album and track reconciliation are not broadly implemented.
 - Catalog album-track promotion exists as a targeted script, not as automatic catalog backfill behavior.
 - Generated recording/track-family clusters are caches only; no durable `recording_track` promotion exists.
+- `source_track_play_count_cache` is a derived cache; if old local data looks stale, run a projection/refresh path before debugging frontend counts.
 - Frontend still lacks focused tests for overlay/tracklist workflows.
 - Artist group/member modeling remains intentionally out of scope. Future musician/member graph work is tracked as low-priority future work in `docs/overview/roadmap.md`.
 
@@ -260,8 +293,8 @@ Outstanding QA:
 Recommended project-level next steps:
 
 1. Push this branch after the commit if remote backup/review is desired.
-2. If desired, run the release-album history/Spotify repair write path only after reviewing the 28 safe candidates from the dry-run.
-3. Re-run authenticated browser QA for representative track pages that should show alternate versions/covers/family rows.
+2. Re-run authenticated browser QA for representative track pages that should show exact release-source rows and aggregate recording rows.
+3. If desired, run the release-album history/Spotify repair write path only after reviewing the 28 safe candidates from the dry-run.
 4. Continue source/text identity reconciliation for albums and tracks:
    - album duplicate repair beyond the safe history/Spotify merge path
    - track duplicate repair using title + artist + album + duration/ISRC/context evidence
@@ -282,4 +315,4 @@ Recommended project-level next steps:
 - Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest committed work polishes the track modal: top-left play/time menu with star/bookmark, bottom last-listened/listen-count tags, `Also Appears On:`, no stale recording-variation rows, album artist images, automatic partial-album completion via `force_spotify=true`, cooldown local-only album fallback with `More tracks on Spotify`, stable release `Rep` badges, hidden `View release track` gear item when no separate source versions exist, release-view exact listen counts and stars, and recording-view aggregate behavior preserved. Verification passed with `python3 -m unittest backend.tests.test_release_track_detail`, `python3 -m py_compile backend/app/routes/playback_routes.py`, frontend `npm run build`, and `git diff --check`; lightweight browser smoke checks passed earlier in the batch, but authenticated end-to-end QA was not rerun after the final release-view exact-star change. Next: push if desired, QA the track modal release/recording cases in the authenticated browser, then continue album/track source-text identity reconciliation through explicit dry-run/apply flows.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest work polishes track detail release/recording semantics: release view uses exact source-version star/liked/listened/listen-count/history, recording view aggregates generated recording members, clickable listen/date breakdowns appear only when multiple recording members contribute, album context tags include `Single`/`Soundtrack`/`Compilation`, and playback-home connecting state is tooltip-only. Backend now has `source_track_play_count_cache` and uses it for source-version history, generated recording candidate counts, and faster album tracklist metadata. The local DB has already merged duplicate `Radiohead - In Rainbows` release albums `5`/`2830` into `5`; `15 Step` is one release track with two Spotify source versions. Verification for the batch included focused backend unittest cases, `py_compile`, and frontend `npm run build`; run `git diff --check` and a final focused test pass before committing if this doc update has not already been committed. Next: authenticated browser QA for release-source exactness and recording aggregate behavior, then continue album/track source-text identity reconciliation through explicit dry-run/apply flows.

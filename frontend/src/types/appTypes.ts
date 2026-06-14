@@ -184,16 +184,21 @@ export type ReleaseTrackDetailSourceVersion = {
   album_id: string | null;
   album_name: string | null;
   album_image_url: string | null;
+  album_type?: string | null;
+  album_release_date?: string | null;
   album_release_year?: string | null;
+  album_total_tracks?: number | null;
   duration_ms: number | null;
   explicit: boolean | null;
   playable: boolean | null;
   play_count?: number | null;
+  first_played_at?: string | null;
   last_played_at?: string | null;
   spotify_url: string | null;
   is_context: boolean;
   is_playback_choice: boolean;
   is_representative_choice?: boolean;
+  source_version_count?: number;
 };
 
 export type ReleaseTrackDetailResponse = {
@@ -216,6 +221,11 @@ export type ReleaseTrackDetailResponse = {
     spotify_track_id: string | null;
     uri: string | null;
     reason: "context_source" | "preferred_playable_source" | "unavailable";
+  };
+  listen_counts?: {
+    release_track_play_count: number;
+    playback_source_play_count: number;
+    source_versions_play_count: number;
   };
   source_versions: ReleaseTrackDetailSourceVersion[];
 };
@@ -517,6 +527,9 @@ export type RecordingTrackCandidateMember = {
   source_track_ids: string[];
   source_track_db_ids?: number[];
   source_track_uris?: string[];
+  play_count?: number;
+  first_played_at?: string | null;
+  last_played_at?: string | null;
   isrc: string | null;
   isrc_values?: string[];
   duration_ms: number | null;
@@ -534,6 +547,10 @@ export type RecordingTrackCandidateItem = {
   relationship_strength: string;
   evidence_bucket?: string;
   representative: RecordingTrackCandidateRepresentative;
+  listen_counts?: {
+    recording_total_play_count: number;
+    recording_member_count: number;
+  };
   members: RecordingTrackCandidateMember[];
   why_grouped: string[];
   why_review: string[];
@@ -1794,6 +1811,8 @@ export type AlbumTrackEntry = {
   artists?: TrackArtistEntry[];
   sourceTrack: RecentTrack | null;
   lastPlayedAt: string | null;
+  sourceLastPlayedAt?: string | null;
+  sourcePlayCount?: number;
   playCount: number;
   isSelected: boolean;
   isTopTrack: boolean;

@@ -129,6 +129,15 @@ Current rule:
 - Spotify track ID remains necessary for playback and source/version provenance.
 - Activity `Listened` grouping now prefers `release_track_id`.
 - `release_track.duration_ms` may be filled from accepted Spotify source catalog metadata. `duration_source`, `duration_confidence`, and `duration_evidence_json` indicate whether the value came from agreeing catalog evidence or an uncertain accepted-mapping conflict. When already-accepted same-release source mappings disagree on duration, manual review can keep the release join and use a representative duration because Spotify duration metadata can drift from playback reality; that representative value is not authoritative playback length.
+- Release view uses exact Spotify source-track history and liked/star state; recording view may aggregate across generated recording members.
+
+### Source track play-count cache
+A derived SQLite cache keyed by Spotify track ID, storing play count plus first/last listened timestamps from `fact_play_event`.
+
+Current rule:
+- The cache is refreshed by the play-event projection path after touched fact rows are reloaded.
+- It supports fast release-source history, album-track `Last` values in release view, and generated recording candidate member counts.
+- It is not canonical history; `fact_play_event` remains the source of truth.
 
 ### Generated recording cluster
 A SQLite cache of read-only recording/track-family candidate groups derived from release-track evidence.

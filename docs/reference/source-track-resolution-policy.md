@@ -232,6 +232,7 @@ Review rules:
 - same playback length despite Spotify metadata drift can still be same release track
 - one-to-two second differences are weak evidence and should not dominate title/artist/release-context agreement
 - larger differences require review, but should not automatically split candidates that share normalized title and compatible artist/release evidence
+- same-album duplicate release-track repair may ignore catalog duration differences when title, artist, and release context agree, because duration drift has already been observed in Spotify source rows
 - if source mappings are already accepted into the same release track and manual review explains the drift, keep the release join and use a representative duration instead of reopening identity
 - representative durations chosen from conflicting catalog values must be marked uncertain; do not treat the longest or shortest source duration as authoritative without stronger playback evidence
 - consistent duration differences across many sibling tracks may indicate systematic provider metadata drift

@@ -9,6 +9,7 @@ from backend.app.db import (
     _ensure_source_track_mapping_with_connection,
     _resolve_release_track_id_for_local_backfill_with_connection,
     get_sqlite_db_path,
+    refresh_source_track_play_count_cache,
 )
 from backend.app.play_event_matcher import MatchPair, match_recent_history_rows
 
@@ -1167,6 +1168,7 @@ def reconcile_fact_play_events_for_ingest_run(
 
         for fact_id in sorted(set(touched_fact_ids)):
             _reload_fact_from_sources(connection, fact_id=fact_id)
+        play_count_cache_summary = refresh_source_track_play_count_cache(connection)
         projector_ms = (datetime.now(UTC) - projector_started).total_seconds() * 1000
 
         commit_started = datetime.now(UTC)
@@ -1186,6 +1188,7 @@ def reconcile_fact_play_events_for_ingest_run(
             "skipped_history_episode_count": skipped_history_episode_count,
             "skipped_history_unidentifiable_count": skipped_history_unidentifiable_count,
             "facts_touched_count": len(set(touched_fact_ids)),
+            "play_count_cache_row_count": play_count_cache_summary["row_count"],
             "candidate_collect_ms": candidate_collect_ms,
             "matcher_ms": matcher_ms,
             "projector_ms": projector_ms,

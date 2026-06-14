@@ -33,11 +33,15 @@ class ReleaseTrackDetailSourceVersion(TypedDict):
     album_id: str | None
     album_name: str | None
     album_image_url: str | None
+    album_type: str | None
+    album_release_date: str | None
     album_release_year: str | None
+    album_total_tracks: int | None
     duration_ms: int | None
     explicit: bool | None
     playable: bool | None
     play_count: int
+    first_played_at: str | None
     last_played_at: str | None
     spotify_url: str | None
     is_context: bool
@@ -49,6 +53,7 @@ class ReleaseTrackDetailPayload(TypedDict):
     release_track: dict[str, Any]
     display: dict[str, Any]
     playback: dict[str, Any]
+    listen_counts: dict[str, int]
     source_versions: list[ReleaseTrackDetailSourceVersion]
 
 
@@ -191,12 +196,10 @@ def get_release_track_detail(
             WITH source_play_counts AS (
               SELECT
                 spotify_track_id,
-                count(*) AS play_count,
-                max(canonical_ended_at) AS last_played_at
-              FROM fact_play_event
-              WHERE spotify_track_id IS NOT NULL
-                AND trim(spotify_track_id) != ''
-              GROUP BY spotify_track_id
+                play_count,
+                first_played_at,
+                last_played_at
+              FROM source_track_play_count_cache
             )
             SELECT
               st.id AS source_track_id,
@@ -215,13 +218,17 @@ def get_release_track_detail(
               json_extract(st.raw_payload_json, '$.track.album.id') AS raw_album_id,
               json_extract(st.raw_payload_json, '$.track.album.name') AS raw_album_name,
               json_extract(st.raw_payload_json, '$.track.album.images') AS raw_album_images_json,
+              json_extract(st.raw_payload_json, '$.track.album.album_type') AS raw_album_type,
               json_extract(st.raw_payload_json, '$.track.album.release_date') AS raw_album_release_date,
               json_extract(st.raw_payload_json, '$.track.artists') AS raw_artists_json,
               stc.last_status AS catalog_last_status,
               sac.name AS catalog_album_name,
+              sac.album_type AS catalog_album_type,
               sac.images_json AS catalog_album_images_json,
               sac.release_date AS catalog_album_release_date,
+              sac.total_tracks AS catalog_album_total_tracks,
               COALESCE(spc.play_count, 0) AS play_count,
+              spc.first_played_at AS first_played_at,
               spc.last_played_at AS last_played_at
             FROM source_track_map stm
             JOIN source_track st
@@ -285,15 +292,19 @@ def get_release_track_detail(
                 "album_id": _first_text(row["catalog_album_id"], row["raw_album_id"]),
                 "album_name": _first_text(row["catalog_album_name"], row["raw_album_name"]),
                 "album_image_url": _first_album_image_url(album_images_json),
+                "album_type": _first_text(row["catalog_album_type"], row["raw_album_type"]),
+                "album_release_date": str(album_release_date) if album_release_date else None,
                 "album_release_year": (
                     str(album_release_date)[:4]
                     if album_release_date and str(album_release_date)[:4].isdigit()
                     else None
                 ),
+                "album_total_tracks": _optional_int(row["catalog_album_total_tracks"]),
                 "duration_ms": _optional_int(row["catalog_duration_ms"]) or _optional_int(row["raw_duration_ms"]),
                 "explicit": _optional_bool(row["catalog_explicit"] if row["catalog_explicit"] is not None else row["raw_explicit"]),
                 "playable": None,
                 "play_count": int(row["play_count"] or 0),
+                "first_played_at": str(row["first_played_at"]) if row["first_played_at"] else None,
                 "last_played_at": str(row["last_played_at"]) if row["last_played_at"] else None,
                 "spotify_url": _spotify_track_url(spotify_track_id),
                 "is_context": bool(normalized_context_id and spotify_track_id == normalized_context_id),
@@ -325,6 +336,8 @@ def get_release_track_detail(
     release_name = str(release_row["primary_name"] or "")
     display_title = display_source["name"] or release_name
     display_artist_name = _artist_name(display_source["artists"]) or _artist_name(canonical_artists)
+    release_track_play_count = sum(int(version["play_count"] or 0) for version in versions)
+    playback_source_play_count = int(playback_choice["play_count"] or 0) if playback_choice else 0
 
     return {
         "release_track": {
@@ -346,6 +359,11 @@ def get_release_track_detail(
             "spotify_track_id": playback_choice["spotify_track_id"] if playback_choice else None,
             "uri": playback_choice["uri"] if playback_choice else None,
             "reason": playback_reason,
+        },
+        "listen_counts": {
+            "release_track_play_count": release_track_play_count,
+            "playback_source_play_count": playback_source_play_count,
+            "source_versions_play_count": release_track_play_count,
         },
         "source_versions": versions,
     }

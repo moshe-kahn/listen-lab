@@ -8,9 +8,10 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend.app.db import apply_pending_migrations, ensure_sqlite_db, sqlite_connection
+from backend.app.db import apply_pending_migrations, ensure_sqlite_db, refresh_source_track_play_count_cache, sqlite_connection
 from backend.app.main import app
 from backend.app.release_track_detail import get_release_track_detail
+from backend.app.release_track_metadata import release_track_metadata_for_spotify_ids
 
 
 class ReleaseTrackDetailTests(unittest.TestCase):
@@ -186,6 +187,7 @@ class ReleaseTrackDetailTests(unittest.TestCase):
                     ("2026-05-24T12:10:00Z", "track-b"),
                 ],
             )
+        refresh_source_track_play_count_cache()
         with patch("backend.app.routes.playback_routes._require_local_data_session", return_value="user-1"):
             response = TestClient(app).get(f"/tracks/release-track/{release_track_id}")
 
@@ -200,8 +202,46 @@ class ReleaseTrackDetailTests(unittest.TestCase):
         self.assertEqual(2, len(body["source_versions"]))
         play_counts = {version["spotify_track_id"]: version["play_count"] for version in body["source_versions"]}
         self.assertEqual({"track-a": 2, "track-b": 1}, play_counts)
+        first_played = {version["spotify_track_id"]: version["first_played_at"] for version in body["source_versions"]}
+        self.assertEqual({"track-a": "2026-05-24T12:00:00Z", "track-b": "2026-05-24T12:10:00Z"}, first_played)
+        last_played = {version["spotify_track_id"]: version["last_played_at"] for version in body["source_versions"]}
+        self.assertEqual({"track-a": "2026-05-24T12:05:00Z", "track-b": "2026-05-24T12:10:00Z"}, last_played)
+        self.assertEqual(
+            {
+                "release_track_play_count": 3,
+                "playback_source_play_count": 2,
+                "source_versions_play_count": 3,
+            },
+            body["listen_counts"],
+        )
         release_years = {version["spotify_track_id"]: version["album_release_year"] for version in body["source_versions"]}
         self.assertEqual({"track-a": "2020", "track-b": "2021"}, release_years)
+
+    def test_equivalent_spotify_album_source_versions_remain_separate_release_sources(self) -> None:
+        self._seed_release_track()
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                "UPDATE spotify_album_catalog SET name = ?, release_date = ?, total_tracks = ? WHERE spotify_album_id = ?",
+                ("Album A", "2020-01-01", 10, "album-a"),
+            )
+            connection.execute(
+                "UPDATE spotify_album_catalog SET name = ?, release_date = ?, total_tracks = ? WHERE spotify_album_id = ?",
+                ("Album A", "2020-01-01", 10, "album-b"),
+            )
+
+        metadata = release_track_metadata_for_spotify_ids(["track-a", "track-b"])
+
+        self.assertEqual(2, metadata["track-a"]["release_track_duplicate_source_count"])
+        self.assertEqual(2, metadata["track-b"]["release_track_duplicate_source_count"])
+        self.assertTrue(metadata["track-a"]["has_release_track_siblings"])
+        self.assertTrue(metadata["track-b"]["has_release_track_siblings"])
+
+        payload = get_release_track_detail(metadata["track-a"]["release_track_id"])
+        album_details = {
+            version["spotify_track_id"]: (version["album_release_date"], version["album_total_tracks"])
+            for version in payload["source_versions"]
+        }
+        self.assertEqual({"track-a": ("2020-01-01", 10), "track-b": ("2020-01-01", 10)}, album_details)
 
     def test_context_spotify_track_id_is_selected_when_it_belongs(self) -> None:
         release_track_id = self._seed_release_track()
