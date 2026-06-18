@@ -66,6 +66,7 @@ export type RecentTrack = {
   estimated_played_ms?: number | null;
   estimated_played_seconds?: number | null;
   estimated_completion_ratio?: number | null;
+  activity_completion_markers?: Array<{ ratio: number; count: number }>;
   completed_play_count?: number | null;
   filtered_play_count?: number | null;
   play_count?: number | null;
@@ -807,6 +808,28 @@ export type ArtistDuplicateAuditResponse = {
     similar_same_album_groups: number;
     composite_credit_groups?: number;
   };
+};
+
+export type ArtistPromotionSkipLogItem = {
+  id: number;
+  reason: string;
+  normalized_name: string;
+  artist_id: number | null;
+  release_album_id: number | null;
+  release_track_id: number | null;
+  provider_artist_ids: number[];
+  text_only_artist_ids: number[];
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+export type ArtistPromotionSkipLogResponse = {
+  summary: {
+    total: number;
+    reason_counts: Record<string, number>;
+  };
+  items: ArtistPromotionSkipLogItem[];
 };
 
 export type ArtistDuplicateRepairResponse = {
@@ -1612,7 +1635,7 @@ export type SectionKey =
   | "recent"
   | "likes";
 
-export type RecentPlayFilter = "listened" | "liked" | "all" | "skipped";
+export type RecentCompletionFilter = "listened" | "all" | "skipped";
 
 export type DashboardListCardProps = {
   href?: string | null;
@@ -1633,6 +1656,7 @@ export type DashboardListCardProps = {
   releaseTrackClusterRelationshipKind?: string | null;
   secondaryBadgeText?: string | null;
   completionRatio?: number | null;
+  completionMarkers?: Array<{ ratio: number; count: number }>;
   trackUri?: string | null;
   previewTrack?: RecentTrack | null;
   primaryClamp?: "single-line-ellipsis" | "two-line-clamp";
@@ -1813,6 +1837,9 @@ export type AlbumTrackEntry = {
   lastPlayedAt: string | null;
   sourceLastPlayedAt?: string | null;
   sourcePlayCount?: number;
+  recordingLastPlayedAt?: string | null;
+  recordingPlayCount?: number;
+  recordingHistoryAvailable?: boolean;
   playCount: number;
   isSelected: boolean;
   isTopTrack: boolean;
@@ -1858,6 +1885,9 @@ export type PlaybackActionRequest = PopupTrackPlaybackOptions & {
 
 export type RecordingRelationRows = {
   recording: RecordingTrackCandidateMember[];
-  contextStyle: RecordingTrackCandidateMember[];
-  coverRemix: RecordingTrackCandidateMember[];
+  songFamily: Array<{
+    member: RecordingTrackCandidateMember;
+    badge: "Original" | "Cover" | "Remix" | "Version" | "Rework" | "Sibling Cover" | "Sibling Remix";
+    originalArtists: TrackArtistEntry[];
+  }>;
 };

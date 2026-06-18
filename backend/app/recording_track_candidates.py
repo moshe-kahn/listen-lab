@@ -700,7 +700,7 @@ def _candidate_source_rows(
     connection: sqlite3.Connection,
     *,
     release_track_ids: set[int] | None = None,
-    artist_signatures: set[str] | None = None,
+    artist_ids: set[int] | None = None,
 ) -> list[sqlite3.Row]:
     params: list[Any] = []
     where_parts: list[str] = []
@@ -710,12 +710,19 @@ def _candidate_source_rows(
             return []
         where_parts.append(f"rt.id IN ({','.join('?' for _ in target_ids)})")
         params.extend(target_ids)
-    if artist_signatures is not None:
-        target_signatures = sorted({signature for signature in artist_signatures if signature})
-        if not target_signatures:
+    if artist_ids is not None:
+        target_artist_ids = sorted({int(artist_id) for artist_id in artist_ids if int(artist_id) > 0})
+        if not target_artist_ids:
             return []
-        where_parts.append(f"COALESCE(pa.artist_signature, '') IN ({','.join('?' for _ in target_signatures)})")
-        params.extend(target_signatures)
+        where_parts.append(
+            "EXISTS ("
+            "SELECT 1 FROM track_artist scoped_ta "
+            "WHERE scoped_ta.release_track_id = rt.id "
+            "AND scoped_ta.role = 'primary' "
+            f"AND scoped_ta.artist_id IN ({','.join('?' for _ in target_artist_ids)})"
+            ")"
+        )
+        params.extend(target_artist_ids)
     where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
     return connection.execute(
         f"""
@@ -745,6 +752,15 @@ def _candidate_source_rows(
           ) ordered
           GROUP BY ordered.release_track_id
         ),
+        unique_catalog_albums_by_name AS (
+          SELECT
+            lower(trim(name)) AS normalized_name,
+            max(spotify_album_id) AS spotify_album_id
+          FROM spotify_album_catalog
+          WHERE NULLIF(trim(name), '') IS NOT NULL
+          GROUP BY lower(trim(name))
+          HAVING count(*) = 1
+        ),
         release_albums AS (
           SELECT
             ordered.release_track_id,
@@ -759,15 +775,19 @@ def _candidate_source_rows(
               at.release_track_id,
               at.release_album_id,
               ra.primary_name AS album_name,
-              sam_source.external_id AS spotify_album_id,
-              json_extract(sac.images_json, '$[0].url') AS album_image_url,
-              sac.release_date AS album_release_date,
-              sac.album_type AS album_type
+              COALESCE(sam_source.external_id, name_catalog.spotify_album_id) AS spotify_album_id,
+              json_extract(COALESCE(sac.images_json, name_catalog.images_json), '$[0].url') AS album_image_url,
+              COALESCE(sac.release_date, name_catalog.release_date) AS album_release_date,
+              COALESCE(sac.album_type, name_catalog.album_type) AS album_type
             FROM album_track at
             JOIN release_album ra ON ra.id = at.release_album_id
             LEFT JOIN source_album_map sam ON sam.release_album_id = ra.id AND sam.status = 'accepted'
             LEFT JOIN source_album sam_source ON sam_source.id = sam.source_album_id AND sam_source.source_name = 'spotify'
             LEFT JOIN spotify_album_catalog sac ON sac.spotify_album_id = sam_source.external_id
+            LEFT JOIN unique_catalog_albums_by_name unique_name
+              ON unique_name.normalized_name = lower(trim(ra.primary_name))
+            LEFT JOIN spotify_album_catalog name_catalog
+              ON name_catalog.spotify_album_id = unique_name.spotify_album_id
             ORDER BY at.release_track_id, ra.release_year, ra.id
           ) ordered
           GROUP BY ordered.release_track_id
@@ -1007,6 +1027,7 @@ def _item_duration_delta_ms(item: dict[str, Any]) -> int | None:
 def _build_candidate_items_from_rows(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     grouped: dict[str, list[RecordingTrackCandidateMember]] = {}
     isrc_grouped: dict[str, list[RecordingTrackCandidateMember]] = {}
+    base_title_grouped: dict[str, list[RecordingTrackCandidateMember]] = {}
     for row in rows:
         member = _candidate_member_from_row(row)
         base_title = member["evidence"]["normalized_title"]
@@ -1014,6 +1035,7 @@ def _build_candidate_items_from_rows(rows: list[sqlite3.Row]) -> list[dict[str, 
         if not base_title or not artist_key:
             continue
         grouped.setdefault(f"{artist_key}|{base_title}", []).append(member)
+        base_title_grouped.setdefault(base_title, []).append(member)
         for isrc in member["isrc_values"]:
             isrc_grouped.setdefault(f"isrc:{isrc}", []).append(member)
 
@@ -1038,6 +1060,47 @@ def _build_candidate_items_from_rows(rows: list[sqlite3.Row]) -> list[dict[str, 
 
     for key, members in grouped.items():
         add_candidate(key, members)
+
+    for base_title, members in base_title_grouped.items():
+        remaining = list(members)
+        while remaining:
+            component = [remaining.pop(0)]
+            component_artist_ids = {
+                str(artist.get("artist_id") or "")
+                for artist in component[0].get("artists", [])
+                if artist.get("artist_id")
+            }
+            component_artist_names = {
+                _normalize_text(artist.get("name"))
+                for artist in component[0].get("artists", [])
+                if _normalize_text(artist.get("name"))
+            }
+            changed = True
+            while changed:
+                changed = False
+                for member in list(remaining):
+                    member_artist_ids = {
+                        str(artist.get("artist_id") or "")
+                        for artist in member.get("artists", [])
+                        if artist.get("artist_id")
+                    }
+                    member_artist_names = {
+                        _normalize_text(artist.get("name"))
+                        for artist in member.get("artists", [])
+                        if _normalize_text(artist.get("name"))
+                    }
+                    if not (component_artist_ids & member_artist_ids or component_artist_names & member_artist_names):
+                        continue
+                    remaining.remove(member)
+                    component.append(member)
+                    component_artist_ids.update(member_artist_ids)
+                    component_artist_names.update(member_artist_names)
+                    changed = True
+            artist_signatures = {_normalize_text(member["artist"]) for member in component}
+            variant_signatures = {_component_signature(_variant_components(member["title"])) for member in component}
+            if len(artist_signatures) > 1 and len(variant_signatures) > 1:
+                family_key = f"family:{base_title}:{'|'.join(sorted(component_artist_names))}"
+                add_candidate(family_key, component)
 
     items.sort(key=lambda item: (item["candidate_type"], item["safety_status"], item["candidate_key"]))
     return items
@@ -1300,12 +1363,17 @@ def refresh_generated_recording_track_clusters_for_release_tracks(
             return {"refreshed": False, "cluster_count": 0, "member_count": 0, "reason": "missing_tables"}
 
         target_rows = _candidate_source_rows(connection, release_track_ids=set(target_ids))
-        artist_signatures = {str(row["artist"] or "") for row in target_rows if str(row["artist"] or "")}
-        if not artist_signatures:
+        artist_ids = {
+            int(artist["artist_id"])
+            for row in target_rows
+            for artist in _artist_entries_from_json(row["artists_json"])
+            if str(artist.get("artist_id") or "").isdigit()
+        }
+        if not artist_ids:
             clear_generated_recording_track_cluster_dirty_with_connection(connection, target_ids)
             return {"refreshed": True, "cluster_count": 0, "member_count": 0, "generated_at": generated_at}
 
-        rows = _candidate_source_rows(connection, artist_signatures=artist_signatures)
+        rows = _candidate_source_rows(connection, artist_ids=artist_ids)
         scoped_release_track_ids = {
             int(row["release_track_id"])
             for row in rows

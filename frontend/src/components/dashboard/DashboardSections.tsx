@@ -6,7 +6,7 @@ import type {
   ExperienceMode,
   ProfileResponse,
   RankMovementFilter,
-  RecentPlayFilter,
+  RecentCompletionFilter,
   RecentRange,
   TrackRankingMode,
 } from "../../types/appTypes";
@@ -37,6 +37,7 @@ function RouteChunkFallback() {
 }
 
 type DashboardSectionsProps = {
+  activityPreviewTracks: any;
   albumCatalogLookupEnqueueError: any;
   albumCatalogLookupEnqueueLoading: any;
   albumCatalogLookupEnqueueResult: any;
@@ -127,7 +128,9 @@ type DashboardSectionsProps = {
   quickUnavailableCopy: any;
   rankMovementFilter: RankMovementFilter;
   recentDebugSourceFilter: any;
-  recentPlayFilter: RecentPlayFilter;
+  recentCompletionFilter: RecentCompletionFilter;
+  recentLikedOnly: boolean;
+  recentTaggedOnly: boolean;
   recentRange: RecentRange;
   recentUnavailableCopy: any;
   refreshRecentSection: any;
@@ -175,7 +178,9 @@ type DashboardSectionsProps = {
   setOpenDebugSessions: any;
   setOpenDebugTracks: any;
   setRecentDebugSourceFilter: any;
-  setRecentPlayFilter: any;
+  setRecentCompletionFilter: any;
+  setRecentLikedOnly: any;
+  setRecentTaggedOnly: any;
   setSearchLookupEntityType: any;
   setSearchLookupQueueStatus: any;
   setSearchLookupSort: any;
@@ -211,6 +216,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
     allTimeTrackIdCount,
     analysisMode,
     appPage,
+    activityPreviewTracks,
     cachedLikedTracks,
     catalogBackfillAlbumTracklistPolicy,
     catalogBackfillCoverage,
@@ -288,7 +294,9 @@ export function DashboardSections(props: DashboardSectionsProps) {
     quickUnavailableCopy,
     rankMovementFilter,
     recentDebugSourceFilter,
-    recentPlayFilter,
+    recentCompletionFilter,
+    recentLikedOnly,
+    recentTaggedOnly,
     recentRange,
     recentUnavailableCopy,
     refreshRecentSection,
@@ -336,7 +344,9 @@ export function DashboardSections(props: DashboardSectionsProps) {
     setOpenDebugSessions,
     setOpenDebugTracks,
     setRecentDebugSourceFilter,
-    setRecentPlayFilter,
+    setRecentCompletionFilter,
+    setRecentLikedOnly,
+    setRecentTaggedOnly,
     setSearchLookupEntityType,
     setSearchLookupQueueStatus,
     setSearchLookupSort,
@@ -521,19 +531,32 @@ export function DashboardSections(props: DashboardSectionsProps) {
                       <div className="track-ranking-toggle recent-play-filter-toggle" role="group" aria-label="Recently played filter">
                         {[
                           ["listened", "Completed"],
-                          ["liked", "Liked"],
                           ["all", "All"],
                         ].map(([value, label]) => (
                           <button
-                            className={`track-ranking-chip${recentPlayFilter === value ? " track-ranking-chip-active" : ""}`}
+                            className={`track-ranking-chip${recentCompletionFilter === value ? " track-ranking-chip-active" : ""}`}
                             key={value}
-                            onClick={() => setRecentPlayFilter(value as RecentPlayFilter)}
+                            onClick={() => setRecentCompletionFilter(value as RecentCompletionFilter)}
                             type="button"
                           >
                             {label}
                           </button>
                         ))}
                       </div>
+                      <button
+                        className={`track-ranking-chip activity-filter-toggle-chip${recentLikedOnly ? " track-ranking-chip-active" : ""}`}
+                        onClick={() => setRecentLikedOnly((current: boolean) => !current)}
+                        type="button"
+                      >
+                        Liked
+                      </button>
+                      <button
+                        className={`track-ranking-chip activity-filter-toggle-chip${recentTaggedOnly ? " track-ranking-chip-active" : ""}`}
+                        onClick={() => setRecentTaggedOnly((current: boolean) => !current)}
+                        type="button"
+                      >
+                        Tagged
+                      </button>
                     </div>
                     <button className="secondary-button inline-reload-button listen-log-button" onClick={openListeningLogPage} type="button">
                       Listen Log
@@ -675,7 +698,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 )}
                 previewItemsLeft={previewItems(profile.recent_tracks)}
                 previewItemsRight={previewItems(likedTracksForActivity)}
-                collapsedPreviewItems={previewItems(collapseRecentPreviewTracks(profile.recent_tracks))}
+                collapsedPreviewItems={previewItems(collapseRecentPreviewTracks(activityPreviewTracks))}
                 isOpen={openSections.recent}
                 toggleSection={toggleSection}
                 onSelectPreview={setSelectedPreview}

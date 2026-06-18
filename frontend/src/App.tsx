@@ -11,7 +11,7 @@ import type {
   LikedTracksResponse,
   ReleaseTrackMetadataItem,
   RecentArchiveResponse,
-  RecentPlayFilter,
+  RecentCompletionFilter,
   ListeningLogResponse,
   MergedTrackSourceFilter,
   RecentDebugSourceFilter,
@@ -509,7 +509,9 @@ export function App() {
   const [pendingSeekMs, setPendingSeekMs] = useState<number | null>(null);
   const [liveControlOverrideUntilMs, setLiveControlOverrideUntilMs] = useState<number | null>(null);
   const [recentRange, setRecentRange] = useState<RecentRange>("short_term");
-  const [recentPlayFilter, setRecentPlayFilter] = useState<RecentPlayFilter>("listened");
+  const [recentCompletionFilter, setRecentCompletionFilter] = useState<RecentCompletionFilter>("listened");
+  const [recentLikedOnly, setRecentLikedOnly] = useState(false);
+  const [recentTaggedOnly, setRecentTaggedOnly] = useState(false);
   const [trackRankingMode, setTrackRankingMode] = useState<TrackRankingMode>("plays");
   const [trackRankingRefreshPending, setTrackRankingRefreshPending] = useState(false);
   const [appPage, setAppPage] = useState<AppPage>("dashboard");
@@ -858,6 +860,10 @@ export function App() {
     return Boolean(spotifyTrackId && (likedTrackIdsForDisplay.has(spotifyTrackId) || targetedLikedTrackById[spotifyTrackId]));
   };
   const albumTrackIsKnownLiked = (track: AlbumTrackEntry) => {
+    const spotifyTrackId = track.id ?? spotifyTrackIdFromUri(track.uri);
+    if (spotifyTrackId && localStarredTrackById[spotifyTrackId] === true) {
+      return true;
+    }
     if (recentTrackIsKnownLiked(track.sourceTrack, track.id)) {
       return true;
     }
@@ -869,6 +875,9 @@ export function App() {
   };
   const albumTrackIsExactKnownLiked = (track: AlbumTrackEntry) => {
     const spotifyTrackId = track.id ?? spotifyTrackIdFromUri(track.uri);
+    if (spotifyTrackId && localStarredTrackById[spotifyTrackId] === true) {
+      return true;
+    }
     if (track.sourceTrack?.is_liked === true && (!spotifyTrackId || track.sourceTrack.track_id === spotifyTrackId)) {
       return true;
     }
@@ -2056,12 +2065,26 @@ export function App() {
         if (cancelled) {
           return;
         }
-        const itemByKey = new Map<string, RecordingTrackCandidateItem>();
-        for (const item of baseItems) {
-          itemByKey.set(item.candidate_key, item);
+        const initialItems = [
+          ...baseItems,
+          ...siblingPayloads.flatMap((siblingPayload) => siblingPayload?.items ?? []),
+        ];
+        const alreadyFetchedReleaseTrackIds = new Set([releaseTrackId, ...siblingReleaseTrackIds]);
+        const familyReleaseTrackIds = Array.from(new Set(
+          initialItems
+            .filter((item) => item.candidate_type === "track_family_candidate")
+            .flatMap((item) => item.members.map((member) => member.release_track_id))
+            .filter((memberReleaseTrackId) => !alreadyFetchedReleaseTrackIds.has(memberReleaseTrackId)),
+        ));
+        const familyMemberPayloads = await Promise.all(
+          familyReleaseTrackIds.map((memberReleaseTrackId) => fetchRecordingTrackCandidateByReleaseTrack(memberReleaseTrackId).catch(() => null)),
+        );
+        if (cancelled) {
+          return;
         }
-        for (const siblingPayload of siblingPayloads) {
-          for (const item of siblingPayload?.items ?? []) {
+        const itemByKey = new Map<string, RecordingTrackCandidateItem>();
+        for (const payloadItems of [baseItems, ...siblingPayloads.map((payload) => payload?.items ?? []), ...familyMemberPayloads.map((payload) => payload?.items ?? [])]) {
+          for (const item of payloadItems) {
             itemByKey.set(item.candidate_key, item);
           }
         }
@@ -2522,12 +2545,15 @@ export function App() {
     const albumCompletionKey = initialAlbumId
       ? `album:${initialAlbumId}`
       : selectedTrackId ? `track:${selectedTrackId}` : null;
-    const cachedAlbumTrackRows = !shouldForceSpotifyFetch
+    const cachedAlbumTrackRowsCandidate = !shouldForceSpotifyFetch
       ? (
         (initialAlbumId ? albumTrackRowsCacheRef.current.get(`album:${initialAlbumId}`) : null)
         ?? (selectedTrackId ? albumTrackRowsCacheRef.current.get(`track:${selectedTrackId}`) : null)
         ?? null
       )
+      : null;
+    const cachedAlbumTrackRows = cachedAlbumTrackRowsCandidate?.rows.every((row) => row.recordingHistoryAvailable === true)
+      ? cachedAlbumTrackRowsCandidate
       : null;
     if (cachedAlbumTrackRows && cachedAlbumTrackRows.rows.length > 0) {
       setAlbumTrackEntries(cachedAlbumTrackRows.rows.map((row) => ({
@@ -2546,6 +2572,7 @@ export function App() {
     const albumAlreadyLoaded = initialAlbumId
       && loadedAlbumTracksAlbumIdRef.current === initialAlbumId
       && albumTrackEntries.length > 0
+      && albumTrackEntries.every((row) => row.recordingHistoryAvailable === true)
       && !shouldForceSpotifyFetch;
     if (albumAlreadyLoaded) {
       setAlbumTrackEntries((current) => current.map((row) => ({
@@ -2573,6 +2600,7 @@ export function App() {
         if (selectedTrackId) {
           params.set("track_id", selectedTrackId);
         }
+        params.set("promote_identity", "true");
         const activeTrackUri = activePreview.trackUri ?? selectedPreviewReleasePlaybackSourceVersion?.uri ?? null;
         if (activeTrackUri) {
           params.set("track_uri", activeTrackUri);
@@ -2611,6 +2639,9 @@ export function App() {
             source_play_count?: number | null;
             source_first_played_at?: string | null;
             source_last_played_at?: string | null;
+            recording_play_count?: number | null;
+            recording_first_played_at?: string | null;
+            recording_last_played_at?: string | null;
           }>;
           partial?: boolean | null;
         };
@@ -3086,6 +3117,9 @@ export function App() {
       source_play_count?: number | null;
       source_first_played_at?: string | null;
       source_last_played_at?: string | null;
+      recording_play_count?: number | null;
+      recording_first_played_at?: string | null;
+      recording_last_played_at?: string | null;
     }>,
     selectedTrackId: string | null,
   ) {
@@ -3160,6 +3194,14 @@ export function App() {
         : undefined;
       const lastPlayedAt = backendLastPlayedAt ?? (id ? (latestPlayedAtByTrackId.get(id) ?? null) : null);
       const playCount = typeof item.play_count === "number" && Number.isFinite(item.play_count) ? Math.max(0, item.play_count) : (lastPlayedAt ? 1 : 0);
+      const recordingLastPlayedAt = typeof item.recording_last_played_at === "string" && item.recording_last_played_at.trim()
+        ? item.recording_last_played_at
+        : lastPlayedAt;
+      const recordingPlayCount = typeof item.recording_play_count === "number" && Number.isFinite(item.recording_play_count)
+        ? Math.max(0, item.recording_play_count)
+        : playCount;
+      const recordingHistoryAvailable = Object.prototype.hasOwnProperty.call(item, "recording_last_played_at")
+        && Object.prototype.hasOwnProperty.call(item, "recording_play_count");
       const sourceTrackWithHistory = sourceTrack
         ? {
           ...sourceTrack,
@@ -3191,6 +3233,9 @@ export function App() {
         lastPlayedAt,
         sourceLastPlayedAt,
         sourcePlayCount,
+        recordingLastPlayedAt,
+        recordingPlayCount,
+        recordingHistoryAvailable,
         playCount,
         isSelected: Boolean(selectedTrackId && id && selectedTrackId === id),
         isTopTrack,
@@ -6591,9 +6636,9 @@ export function App() {
     return (
       <DashboardTrackColumn
         section={section}
-        items={section === "recent" ? filterAndDedupeRecentTracksForActivity(items, recentPlayFilter, items.length, likedTrackIdsForDisplay, likedReleaseTrackIdsForDisplay) : items}
+        items={section === "recent" ? filterAndDedupeRecentTracksForActivity(items, recentCompletionFilter, items.length, likedTrackIdsForDisplay, likedReleaseTrackIdsForDisplay, { likedOnly: recentLikedOnly, taggedOnly: recentTaggedOnly }) : items}
         available={available}
-        emptyCopy={section === "recent" && recentPlayFilter !== "all" ? `No ${recentPlayFilter} songs in this recent window.` : emptyCopy}
+        emptyCopy={section === "recent" && (recentCompletionFilter !== "all" || recentLikedOnly || recentTaggedOnly) ? "No songs match these activity filters." : emptyCopy}
         unavailableCopy={unavailableCopy}
         unavailableAction={unavailableAction}
         paged={section === "recent" ? false : paged}
@@ -10200,42 +10245,93 @@ export function App() {
     ...(selectedPreview?.kind === "track" && selectedPreview.releaseTrackId ? [selectedPreview.releaseTrackId] : []),
     ...selectedPreviewOtherRecordingMembers.map((member) => member.release_track_id),
   ]);
-  const familyContextRelationshipKinds = new Set([
-    "live",
-    "demo",
-    "acoustic",
-    "instrumental",
-    "alternate_take",
-    "structural_segment",
-    "radio_edit",
-  ]);
-  const familyCoverRemixRelationshipKinds = new Set([
-    "remix",
-    "rework",
-    "derived_version",
-    "mix",
-    "rerecording",
-  ]);
+  const selectedPreviewRecordingRepresentativeByReleaseTrackId = new Map<number, RecordingTrackCandidateMember>();
+  for (const candidate of selectedPreviewRelatedCandidates) {
+    if (candidate.candidate_type !== "recording_track_candidate") {
+      continue;
+    }
+    const representative = candidate.members.find(
+      (member) => member.release_track_id === candidate.representative.release_track_id,
+    ) ?? candidate.members[0];
+    if (!representative) {
+      continue;
+    }
+    for (const member of candidate.members) {
+      selectedPreviewRecordingRepresentativeByReleaseTrackId.set(member.release_track_id, representative);
+    }
+  }
+  type SongFamilyKind = "Original" | "Cover" | "Remix" | "Version" | "Rework";
+  const songFamilyKind = (
+    member: RecordingTrackCandidateMember,
+    original: RecordingTrackCandidateMember,
+    relationshipKind: string,
+  ): SongFamilyKind => {
+    if (member.release_track_id === original.release_track_id) {
+      return "Original";
+    }
+    const normalizedTitle = member.title.toLocaleLowerCase();
+    if (relationshipKind === "remix" || relationshipKind === "mix" || /\bremix\b/.test(normalizedTitle)) {
+      return "Remix";
+    }
+    if (relationshipKind === "rework" || /\brework\b/.test(normalizedTitle)) {
+      return "Rework";
+    }
+    if (/\bcover\b/.test(normalizedTitle)) {
+      return "Cover";
+    }
+    const originalArtistNames = new Set(
+      (original.artists ?? []).map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
+    );
+    const memberArtistNames = new Set(
+      (member.artists ?? []).map((artist) => artist.name?.trim().toLocaleLowerCase()).filter(Boolean),
+    );
+    const keepsOriginalArtist = Array.from(originalArtistNames).some((name) => memberArtistNames.has(name));
+    const addsArtist = Array.from(memberArtistNames).some((name) => !originalArtistNames.has(name));
+    if (keepsOriginalArtist && addsArtist) {
+      return "Rework";
+    }
+    if (!keepsOriginalArtist && memberArtistNames.size > 0) {
+      return "Cover";
+    }
+    return "Version";
+  };
   const selectedPreviewFamilyRelationMembers = selectedPreview && selectedPreview.kind === "track"
     ? selectedPreviewRelatedCandidatesForCurrent
       .filter((candidate) => candidate.candidate_type === "track_family_candidate")
-      .flatMap((candidate) => candidate.members.map((member) => ({
-        member,
-        relationshipKind: candidate.relationship_kind,
-      })))
+      .flatMap((candidate) => {
+        const rawOriginal = candidate.members.find(
+          (member) => member.release_track_id === candidate.representative.release_track_id,
+        ) ?? candidate.members[0];
+        if (!rawOriginal) {
+          return [];
+        }
+        const original = selectedPreviewRecordingRepresentativeByReleaseTrackId.get(rawOriginal.release_track_id) ?? rawOriginal;
+        const currentRawMember = candidate.members.find((member) => selectedPreviewRelationAnchorReleaseTrackIds.has(member.release_track_id));
+        const currentMember = currentRawMember
+          ? selectedPreviewRecordingRepresentativeByReleaseTrackId.get(currentRawMember.release_track_id) ?? currentRawMember
+          : null;
+        const currentKind = currentMember ? songFamilyKind(currentMember, original, candidate.relationship_kind) : null;
+        return candidate.members.map((rawMember) => {
+          const member = selectedPreviewRecordingRepresentativeByReleaseTrackId.get(rawMember.release_track_id) ?? rawMember;
+          const kind = songFamilyKind(member, original, candidate.relationship_kind);
+          const badge = kind === "Cover" && currentKind === "Cover"
+            ? "Sibling Cover" as const
+            : kind === "Remix" && currentKind === "Remix"
+              ? "Sibling Remix" as const
+              : kind;
+          return {
+            member,
+            badge,
+            originalArtists: original.artists ?? [],
+          };
+        });
+      })
       .filter((item) => !selectedPreviewAlreadyShownRelationReleaseTrackIds.has(item.member.release_track_id))
       .filter((item, index, members) => members.findIndex((candidate) => candidate.member.release_track_id === item.member.release_track_id) === index)
     : [];
-  const selectedPreviewContextStyleMembers = selectedPreviewFamilyRelationMembers
-    .filter((item) => familyContextRelationshipKinds.has(item.relationshipKind))
-    .map((item) => item.member);
-  const selectedPreviewCoverRemixMembers = selectedPreviewFamilyRelationMembers
-    .filter((item) => familyCoverRemixRelationshipKinds.has(item.relationshipKind) || !familyContextRelationshipKinds.has(item.relationshipKind))
-    .map((item) => item.member);
   const selectedPreviewRelationRows = {
     recording: selectedPreviewOtherRecordingMembers,
-    contextStyle: selectedPreviewContextStyleMembers,
-    coverRemix: selectedPreviewCoverRemixMembers,
+    songFamily: selectedPreviewFamilyRelationMembers,
   };
   const selectedPreviewDisplayRelationRows = selectedPreviewRelationRows;
   const releaseSourceVersionArtistText = (version: ReleaseTrackDetailSourceVersion) => {
@@ -11348,6 +11444,7 @@ export function App() {
               </div>
             </nav>
             <DashboardSections
+              activityPreviewTracks={filterAndDedupeRecentTracksForActivity(profile.recent_tracks, recentCompletionFilter, profile.recent_tracks.length, likedTrackIdsForDisplay, likedReleaseTrackIdsForDisplay, { likedOnly: recentLikedOnly, taggedOnly: recentTaggedOnly })}
               albumCatalogLookupEnqueueError={albumCatalogLookupEnqueueError}
               albumCatalogLookupEnqueueLoading={albumCatalogLookupEnqueueLoading}
               albumCatalogLookupEnqueueResult={albumCatalogLookupEnqueueResult}
@@ -11438,7 +11535,9 @@ export function App() {
               quickUnavailableCopy={quickUnavailableCopy}
               rankMovementFilter={rankMovementFilter}
               recentDebugSourceFilter={recentDebugSourceFilter}
-              recentPlayFilter={recentPlayFilter}
+              recentCompletionFilter={recentCompletionFilter}
+              recentLikedOnly={recentLikedOnly}
+              recentTaggedOnly={recentTaggedOnly}
               recentRange={recentRange}
               recentUnavailableCopy={recentUnavailableCopy}
               refreshRecentSection={refreshRecentSection}
@@ -11486,7 +11585,9 @@ export function App() {
               setOpenDebugSessions={setOpenDebugSessions}
               setOpenDebugTracks={setOpenDebugTracks}
               setRecentDebugSourceFilter={setRecentDebugSourceFilter}
-              setRecentPlayFilter={setRecentPlayFilter}
+              setRecentCompletionFilter={setRecentCompletionFilter}
+              setRecentLikedOnly={setRecentLikedOnly}
+              setRecentTaggedOnly={setRecentTaggedOnly}
               setSearchLookupEntityType={setSearchLookupEntityType}
               setSearchLookupQueueStatus={setSearchLookupQueueStatus}
               setSearchLookupSort={setSearchLookupSort}
@@ -11541,7 +11642,6 @@ export function App() {
             currentTrack={currentTrack}
             detailOptionsOpen={detailOptionsOpen}
             displayAlbumTrackEntries={displayAlbumTrackEntries}
-            familyCoverRemixRelationshipKinds={familyCoverRemixRelationshipKinds}
             formatCompactRelativeAge={formatCompactRelativeAge}
             formatPlaybackClock={formatPlaybackClock}
             handleAlbumPlayAll={handleAlbumPlayAll}

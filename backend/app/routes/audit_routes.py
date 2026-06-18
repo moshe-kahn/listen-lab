@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from backend.app.auth.session import _require_local_data_session
+from backend.app.db import query_artist_promotion_skip_log
 from backend.app.artist_identity_repair import (
     build_duplicate_artist_audit,
     repair_composite_artist_credits,
@@ -45,6 +46,12 @@ router = APIRouter(tags=["identity-audit"])
 async def debug_artists_duplicate_audit(request: Request) -> dict[str, Any]:
     _require_local_data_session(request)
     return build_duplicate_artist_audit()
+
+
+@router.get("/debug/artists/promotion-skips")
+async def debug_artists_promotion_skips(request: Request, limit: int = 100) -> dict[str, Any]:
+    _require_local_data_session(request)
+    return query_artist_promotion_skip_log(limit=limit)
 
 
 @router.post("/debug/artists/duplicate-repair")

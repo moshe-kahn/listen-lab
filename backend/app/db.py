@@ -1521,6 +1521,25 @@ WHERE spotify_track_id IS NOT NULL
   AND trim(spotify_track_id) != ''
 GROUP BY spotify_track_id;
 """,
+    35: """
+CREATE TABLE IF NOT EXISTS artist_promotion_skip_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  signature_key TEXT NOT NULL UNIQUE,
+  reason TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  artist_id INTEGER,
+  release_album_id INTEGER,
+  release_track_id INTEGER,
+  provider_artist_ids_json TEXT,
+  text_only_artist_ids_json TEXT,
+  occurrence_count INTEGER NOT NULL DEFAULT 1,
+  first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_artist_promotion_skip_log_seen
+  ON artist_promotion_skip_log(last_seen_at DESC);
+""",
 }
 
 
@@ -4175,6 +4194,158 @@ def _create_artist_with_connection(
     return int(cursor.lastrowid)
 
 
+def _artist_promotion_skip_signature(
+    *,
+    reason: str,
+    normalized_name: str,
+    artist_id: int | None,
+    release_album_id: int | None,
+    release_track_id: int | None,
+    provider_artist_ids: list[int],
+    text_only_artist_ids: list[int],
+) -> str:
+    payload = {
+        "artist_id": artist_id,
+        "normalized_name": normalized_name,
+        "provider_artist_ids": provider_artist_ids,
+        "reason": reason,
+        "release_album_id": release_album_id,
+        "release_track_id": release_track_id,
+        "text_only_artist_ids": text_only_artist_ids,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _sorted_int_list(values: list[int] | tuple[int, ...] | None) -> list[int]:
+    return sorted({int(value) for value in values or [] if value is not None})
+
+
+def record_artist_promotion_skip(
+    connection: sqlite3.Connection,
+    *,
+    reason: str,
+    normalized_name: str,
+    artist_id: int | None = None,
+    release_album_id: int | None = None,
+    release_track_id: int | None = None,
+    provider_artist_ids: list[int] | tuple[int, ...] | None = None,
+    text_only_artist_ids: list[int] | tuple[int, ...] | None = None,
+) -> None:
+    normalized_provider_ids = _sorted_int_list(provider_artist_ids)
+    normalized_text_ids = _sorted_int_list(text_only_artist_ids)
+    signature_key = _artist_promotion_skip_signature(
+        reason=reason,
+        normalized_name=normalized_name,
+        artist_id=artist_id,
+        release_album_id=release_album_id,
+        release_track_id=release_track_id,
+        provider_artist_ids=normalized_provider_ids,
+        text_only_artist_ids=normalized_text_ids,
+    )
+    connection.execute(
+        """
+        INSERT INTO artist_promotion_skip_log (
+          signature_key,
+          reason,
+          normalized_name,
+          artist_id,
+          release_album_id,
+          release_track_id,
+          provider_artist_ids_json,
+          text_only_artist_ids_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(signature_key) DO UPDATE SET
+          occurrence_count = artist_promotion_skip_log.occurrence_count + 1,
+          last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        """,
+        (
+            signature_key,
+            reason,
+            normalized_name,
+            artist_id,
+            release_album_id,
+            release_track_id,
+            json.dumps(normalized_provider_ids),
+            json.dumps(normalized_text_ids),
+        ),
+    )
+
+
+def _json_int_list(value: str | None) -> list[int]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [int(item) for item in decoded if isinstance(item, int)]
+
+
+def query_artist_promotion_skip_log(limit: int = 100) -> dict[str, Any]:
+    safe_limit = max(1, min(int(limit), 500))
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              id,
+              reason,
+              normalized_name,
+              artist_id,
+              release_album_id,
+              release_track_id,
+              provider_artist_ids_json,
+              text_only_artist_ids_json,
+              occurrence_count,
+              first_seen_at,
+              last_seen_at
+            FROM artist_promotion_skip_log
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        reason_rows = connection.execute(
+            """
+            SELECT reason, sum(occurrence_count) AS count
+            FROM artist_promotion_skip_log
+            GROUP BY reason
+            ORDER BY count DESC, reason ASC
+            """
+        ).fetchall()
+        total = connection.execute(
+            """
+            SELECT COALESCE(sum(occurrence_count), 0) AS total
+            FROM artist_promotion_skip_log
+            """
+        ).fetchone()
+
+    return {
+        "summary": {
+            "total": int(total["total"] or 0) if total else 0,
+            "reason_counts": {str(row["reason"]): int(row["count"] or 0) for row in reason_rows},
+        },
+        "items": [
+            {
+                "id": int(row["id"]),
+                "reason": row["reason"],
+                "normalized_name": row["normalized_name"],
+                "artist_id": row["artist_id"],
+                "release_album_id": row["release_album_id"],
+                "release_track_id": row["release_track_id"],
+                "provider_artist_ids": _json_int_list(row["provider_artist_ids_json"]),
+                "text_only_artist_ids": _json_int_list(row["text_only_artist_ids_json"]),
+                "occurrence_count": int(row["occurrence_count"] or 0),
+                "first_seen_at": row["first_seen_at"],
+                "last_seen_at": row["last_seen_at"],
+            }
+            for row in rows
+        ],
+    }
+
+
 def _find_safe_text_only_artist_for_spotify_promotion(
     connection: sqlite3.Connection,
     *,
@@ -4222,6 +4393,15 @@ def _find_safe_text_only_artist_for_spotify_promotion(
             normalized_name,
             provider_artist_ids,
             text_only_artist_ids,
+        )
+        record_artist_promotion_skip(
+            connection,
+            reason="provider_backed_name_collision",
+            normalized_name=normalized_name,
+            release_album_id=release_album_id,
+            release_track_id=release_track_id,
+            provider_artist_ids=provider_artist_ids,
+            text_only_artist_ids=text_only_artist_ids,
         )
         return None
     if len(text_only_artist_ids) == 1:
@@ -4293,12 +4473,29 @@ def _find_safe_text_only_artist_for_spotify_promotion(
             release_album_id,
             release_track_id,
         )
+        record_artist_promotion_skip(
+            connection,
+            reason="missing_album_track_evidence",
+            normalized_name=normalized_name,
+            artist_id=artist_id,
+            release_album_id=release_album_id,
+            release_track_id=release_track_id,
+            text_only_artist_ids=[artist_id],
+        )
         return None
     if len(text_only_artist_ids) > 1:
         logger.warning(
             "event=spotify_artist_text_promotion_skipped reason=ambiguous_text_only_artist normalized_name=%s artist_ids=%s",
             normalized_name,
             text_only_artist_ids,
+        )
+        record_artist_promotion_skip(
+            connection,
+            reason="ambiguous_text_only_artist",
+            normalized_name=normalized_name,
+            release_album_id=release_album_id,
+            release_track_id=release_track_id,
+            text_only_artist_ids=text_only_artist_ids,
         )
     return None
 

@@ -27,6 +27,7 @@ export function DashboardListCard({
   releaseTrackClusterRelationshipKind,
   secondaryBadgeText,
   completionRatio,
+  completionMarkers,
   trackUri,
   previewTrack,
   primaryClamp = "single-line-ellipsis",
@@ -95,14 +96,6 @@ export function DashboardListCard({
             >
               {tertiaryValue}
             </p>
-            {typeof completionRatio === "number" ? (
-              <span className="card-completion" aria-hidden="true">
-                <span
-                  className="card-completion-fill"
-                  style={{ width: `${Math.round(Math.max(0, Math.min(1, completionRatio)) * 100)}%` }}
-                />
-              </span>
-            ) : null}
           </div>
         </div>
         {hasTopRightContent ? (
@@ -125,6 +118,26 @@ export function DashboardListCard({
             ) : null}
             {metricText ? <div className="card-metric">{metricText}</div> : null}
           </div>
+        ) : null}
+        {typeof completionRatio === "number" ? (
+          <span className="card-completion" aria-hidden="true">
+            <span
+              className="card-completion-fill"
+              style={{ width: `${Math.round(Math.max(0, Math.min(1, completionRatio)) * 100)}%` }}
+            />
+            {completionMarkers?.map((marker) => {
+              const markerPercent = Math.round(Math.max(0, Math.min(1, marker.ratio)) * 100);
+              return (
+                <span
+                  className={`card-completion-marker${marker.count > 1 ? " card-completion-marker-counted" : ""}`}
+                  key={`${markerPercent}-${marker.count}`}
+                  style={{ left: `${markerPercent}%` }}
+                >
+                  {marker.count > 1 ? <span className="card-completion-marker-count">x{marker.count}</span> : null}
+                </span>
+              );
+            })}
+          </span>
         ) : null}
       </div>
     </button>

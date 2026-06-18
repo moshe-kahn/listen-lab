@@ -15,6 +15,7 @@ from backend.app.recording_track_candidates import (
     RecordingTrackCandidateMember,
     classify_recording_track_candidate_group,
     get_recording_track_candidate_for_release_track,
+    get_recording_track_candidates_for_release_track,
     query_recording_track_candidates,
     rebuild_generated_recording_track_clusters,
     summarize_recording_track_candidates,
@@ -579,6 +580,75 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
         lookup_item = get_recording_track_candidate_for_release_track(album_release_track_id)
         self.assertIsNotNone(lookup_item)
         self.assertEqual(item["candidate_key"], lookup_item["candidate_key"])
+
+    def test_shared_primary_artist_connects_attributed_version_to_original_family(self) -> None:
+        original_id = self._seed_release_track(
+            title="Connected Song",
+            artist="Shared Artist",
+            album="Original Album",
+            spotify_id="connected-original",
+            isrc=None,
+            duration_ms=290_000,
+        )
+        version_id = self._seed_release_track(
+            title="Connected Song - Guest Version",
+            artist="Shared Artist",
+            album="Guest Version Single",
+            spotify_id="connected-version",
+            isrc=None,
+            duration_ms=230_000,
+        )
+        with sqlite_connection(write=True) as connection:
+            guest_artist_id = int(
+                connection.execute(
+                    "INSERT INTO artist (canonical_name, sort_name) VALUES ('Guest Artist', 'guest artist')"
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 1)",
+                (version_id, guest_artist_id),
+            )
+
+        rebuild_generated_recording_track_clusters()
+        candidates = get_recording_track_candidates_for_release_track(original_id)
+        family = next(item for item in candidates if item["candidate_type"] == "track_family_candidate")
+
+        self.assertEqual("derived_version", family["relationship_kind"])
+        self.assertEqual({original_id, version_id}, {member["release_track_id"] for member in family["members"]})
+
+    def test_unique_cached_album_name_hydrates_missing_release_album_art(self) -> None:
+        first_id = self._seed_release_track(
+            title="Artwork Song",
+            artist="Artwork Artist",
+            album="Artwork Album",
+            spotify_id="artwork-one",
+            isrc=None,
+            duration_ms=210_000,
+        )
+        self._seed_release_track(
+            title="Artwork Song",
+            artist="Artwork Artist",
+            album="Artwork Single",
+            spotify_id="artwork-two",
+            isrc=None,
+            duration_ms=210_000,
+        )
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, album_type, release_date, images_json, fetched_at, last_status
+                ) VALUES (?, ?, 'album', '2024-01-02', ?, '2026-06-17T00:00:00Z', 'ok')
+                """,
+                ("artwork-album-id", "Artwork Album", json.dumps([{"url": "https://images.example/artwork.jpg"}])),
+            )
+
+        rebuild_generated_recording_track_clusters()
+        candidate = get_recording_track_candidate_for_release_track(first_id)
+        first_member = next(member for member in candidate["members"] if member["release_track_id"] == first_id)
+
+        self.assertEqual(["artwork-album-id"], first_member["spotify_album_ids"])
+        self.assertEqual(["https://images.example/artwork.jpg"], first_member["album_image_urls"])
 
     def test_query_sums_member_play_counts_from_source_tracks(self) -> None:
         first_release_track_id = self._seed_release_track(

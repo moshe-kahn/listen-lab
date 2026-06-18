@@ -6,6 +6,7 @@ import type {
   ArtistCompositeCreditCleanupResponse,
   ArtistDuplicateAuditResponse,
   ArtistDuplicateRepairResponse,
+  ArtistPromotionSkipLogResponse,
   CatalogBackfillCoverageResponse,
   CatalogBackfillEnqueueResponse,
   CatalogBackfillQueueReasonFilter,
@@ -664,6 +665,29 @@ export async function fetchArtistDuplicateAudit(): Promise<ArtistDuplicateAuditR
       throw new Error(`Artist Duplicate Audit (${response.status}): ${detail}`);
     }
     return (await response.json()) as ArtistDuplicateAuditResponse;
+  }
+
+export async function fetchArtistPromotionSkips(limit: number = 100): Promise<ArtistPromotionSkipLogResponse> {
+    const response = await fetch(
+      `${apiBaseUrl}/debug/artists/promotion-skips?limit=${encodeURIComponent(String(limit))}`,
+      { credentials: "include" },
+    );
+    if (!response.ok) {
+      let detail = "Failed to load artist promotion skips.";
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore invalid error payloads
+      }
+      if (response.status === 401) {
+        detail = "Not authenticated with Spotify for this browser session.";
+      }
+      throw new Error(`Artist Promotion Skips (${response.status}): ${detail}`);
+    }
+    return (await response.json()) as ArtistPromotionSkipLogResponse;
   }
 
 export async function repairArtistDuplicates(dryRun: boolean = true): Promise<ArtistDuplicateRepairResponse> {

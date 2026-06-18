@@ -376,6 +376,7 @@ def promote_catalog_album_tracks_to_identity(
                 spotify_track_id = str(row["spotify_track_id"] or "").strip()
                 if not spotify_track_id:
                     continue
+                identity_was_missing = row["release_track_id"] is None
                 release_track_id = _ensure_source_track_mapping_with_connection(
                     connection,
                     source_name="spotify",
@@ -389,7 +390,6 @@ def promote_catalog_album_tracks_to_identity(
                     create_confidence=0.72,
                     create_explanation=f"Promoted from cached Spotify album tracklist for album {album_id}",
                 )
-                touched_release_track_ids.add(release_track_id)
                 _ensure_track_artist_links(
                     connection,
                     release_track_id=release_track_id,
@@ -406,7 +406,9 @@ def promote_catalog_album_tracks_to_identity(
                     """,
                     (release_album_id, release_track_id),
                 )
-                if int(cursor.rowcount or 0) > 0:
+                album_link_created = int(cursor.rowcount or 0) > 0
+                if identity_was_missing or album_link_created:
+                    touched_release_track_ids.add(release_track_id)
                     mark_generated_recording_track_clusters_dirty_with_connection(
                         connection,
                         [release_track_id],

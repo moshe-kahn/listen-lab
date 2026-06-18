@@ -74,18 +74,22 @@ async def debug_listening_log(
     user_id = _require_local_data_session(request)
     if force_recent_sync:
         token_row = refresh_access_token_if_needed(user_id)
-        await maybe_sync_spotify_recent(
+        recent_sync_summary = await maybe_sync_spotify_recent(
             str(token_row["access_token"]),
             source_ref="listen_log_reload",
             force=True,
             limit=50,
+            raise_on_error=False,
         )
     payload = query_listening_log(
         limit=limit,
         offset=offset,
         source_filter=source_filter if source_filter in {"all", "api", "history", "both"} else "all",
     )
-    return dict(payload)
+    result = dict(payload)
+    if force_recent_sync:
+        result["recent_sync_summary"] = recent_sync_summary
+    return result
 
 
 @router.get("/debug/activity/release-track-coverage")

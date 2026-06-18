@@ -18,6 +18,7 @@ import { NewTrackBadge } from "../common/NewTrackBadge";
 import { ReleaseSiblingBadge } from "../common/ReleaseSiblingBadge";
 import { PlaybackActionMenu, type PlaybackAction } from "../playback/PlaybackActionMenu";
 import { trackRelationTags } from "../../utils/trackRelationTags";
+import { TrackRelationList } from "./TrackRelationList";
 
 type AlbumPlaybackQueue = {
   playlistUris: string[];
@@ -49,7 +50,6 @@ type DetailPreviewModalProps = {
   currentTrack: PlayerTrackSummary | null;
   detailOptionsOpen: boolean;
   displayAlbumTrackEntries: AlbumTrackEntry[];
-  familyCoverRemixRelationshipKinds: Set<string>;
   formatCompactRelativeAge: (value: string | null | undefined) => string | null;
   formatPlaybackClock: (positionMs: number) => string;
   handleAlbumPlayAll: (action?: PlaybackAction) => Promise<void>;
@@ -162,7 +162,6 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     currentTrack,
     detailOptionsOpen,
     displayAlbumTrackEntries,
-    familyCoverRemixRelationshipKinds,
     formatCompactRelativeAge,
     formatPlaybackClock,
     handleAlbumPlayAll,
@@ -249,36 +248,6 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     variationSubtitleFromTitle,
   } = props;
 
-  const recordingMemberArtistText = (member: RecordingTrackCandidateMember) => {
-    const structuredNames = member.artists
-      ?.map((artist) => artist.name?.trim())
-      .filter(Boolean);
-    if (structuredNames?.length) {
-      return structuredNames.join(", ");
-    }
-    return String(member.artist ?? "")
-      .split("|")
-      .map((name) => name.trim())
-      .filter(Boolean)
-      .join(", ");
-  };
-
-  const familyListSections = [
-    {
-      key: "variations",
-      title: "Variations",
-      tag: "V",
-      rows: selectedPreviewDisplayRelationRows.contextStyle,
-    },
-    {
-      key: "covers-remixes",
-      title: "Covers / remixes / family",
-      tag: "C",
-      rows: selectedPreviewDisplayRelationRows.coverRemix,
-    },
-  ].filter((section) => section.rows.length > 0);
-
-  const familyListCount = familyListSections.reduce((count, section) => count + section.rows.length, 0);
   const selectedPreviewIsTrack = selectedPreview?.kind === "track";
   const canShowListenBreakdown = Boolean(
     selectedPreviewDetailView === "recording"
@@ -649,116 +618,19 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 </>
               ) : null}
             </div>
-            {selectedPreviewIsTrack ? (
+            {selectedPreviewIsTrack || selectedPreview.kind === "album" ? (
               <div className="detail-modal-track-scroll-area">
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.recording.length > 0 ? (
+            {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.songFamily.length > 0 ? (
               <div className="detail-modal-recording-variations">
                 <div className="detail-modal-recording-variations-header">
-                  <span>Also Appears On:</span>
+                  <span>Song Family</span>
                 </div>
-                <div className="detail-modal-recording-variation-strip">
-                  {selectedPreviewDisplayRelationRows.recording.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`recording-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.contextStyle.length > 0 ? (
-              <div className="detail-modal-recording-variations">
-                <div className="detail-modal-recording-variations-header">
-                  <span>Variations</span>
-                </div>
-                <div className="detail-modal-recording-variation-strip">
-                  {selectedPreviewDisplayRelationRows.contextStyle.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`family-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">V</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-            {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.coverRemix.length > 0 ? (
-              <div className="detail-modal-recording-variations">
-                <div className="detail-modal-recording-variations-header">
-                  <span>Covers / remixes</span>
-                </div>
-                <div className="detail-modal-recording-variation-strip">
-                  {selectedPreviewDisplayRelationRows.coverRemix.map((member) => {
-                    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-                    const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
-                    const subtitle = variationSubtitleFromTitle(member.title);
-                    return (
-                      <button
-                        className="detail-modal-recording-variation-cover"
-                        key={`cover-remix-cover-${member.release_track_id}`}
-                        onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
-                        title={title}
-                        type="button"
-                      >
-                        <span className="detail-modal-recording-variation-art">
-                          <span className="detail-modal-recording-variation-kind">C</span>
-                          {albumImageUrl ? (
-                            <img alt="" src={albumImageUrl} />
-                          ) : (
-                            <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
-                          )}
-                        </span>
-                        <span className="detail-modal-recording-variation-copy">
-                          {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
-                          <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
-                          <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
+                <TrackRelationList
+                  albumImageForMember={recordingMemberAlbumImageUrl}
+                  onOpenRelatedTrack={(member) => openRecordingCandidateReleaseTrack(member, "recording")}
+                  relatedTracks={selectedPreviewDisplayRelationRows.songFamily}
+                  releaseYearForMember={recordingMemberReleaseYear}
+                />
               </div>
             ) : null}
             {selectedPreview.kind === "track" ? (
@@ -859,10 +731,10 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                       const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                                       const rowHistoryLastPlayedAt = selectedPreviewDetailView === "release"
                                         ? track.sourceLastPlayedAt === undefined ? track.lastPlayedAt : track.sourceLastPlayedAt
-                                        : track.lastPlayedAt;
+                                        : track.recordingLastPlayedAt === undefined ? track.lastPlayedAt : track.recordingLastPlayedAt;
                                       const rowHistoryPlayCount = selectedPreviewDetailView === "release"
                                         ? track.sourcePlayCount === undefined ? track.playCount : track.sourcePlayCount
-                                        : track.playCount;
+                                        : track.recordingPlayCount === undefined ? track.playCount : track.recordingPlayCount;
                                       const rowLastPlayed = formatCompactRelativeAge(rowHistoryLastPlayedAt);
                                       const rowIsUnlistened = !rowHistoryLastPlayedAt && rowHistoryPlayCount <= 0;
                                       const rowRelationTagsResult = trackRelationTags({
@@ -1052,6 +924,49 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                   </div>
                                 ) : null}
                               </div>
+                              {selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.recording.length > 0 ? (
+                                <details
+                                  className="detail-modal-also-appears"
+                                  key={`also-appears-${selectedPreview.releaseTrackId ?? selectedPreview.trackId ?? selectedPreview.label}`}
+                                >
+                                  <summary className="detail-modal-also-appears-bar">
+                                    <span>Also Appears On</span>
+                                    <span className="detail-modal-also-appears-count">{selectedPreviewDisplayRelationRows.recording.length}</span>
+                                    <span className="detail-modal-also-appears-chevron" aria-hidden="true">⌄</span>
+                                  </summary>
+                                  <div className="detail-modal-also-appears-content">
+                                    <div className="detail-modal-recording-variation-strip">
+                                      {selectedPreviewDisplayRelationRows.recording.map((member) => {
+                                        const albumImageUrl = recordingMemberAlbumImageUrl(member);
+                                        const title = [recordingMemberReleaseYear(member), member.album || "Unknown album"].filter(Boolean).join(" · ");
+                                        const subtitle = variationSubtitleFromTitle(member.title);
+                                        return (
+                                          <button
+                                            className="detail-modal-recording-variation-cover"
+                                            key={`recording-cover-${member.release_track_id}`}
+                                            onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
+                                            title={title}
+                                            type="button"
+                                          >
+                                            <span className="detail-modal-recording-variation-art">
+                                              {albumImageUrl ? (
+                                                <img alt="" src={albumImageUrl} />
+                                              ) : (
+                                                <span className="detail-modal-recording-variation-fallback" aria-hidden="true">{(member.album || member.title || "?").slice(0, 1).toUpperCase()}</span>
+                                              )}
+                                            </span>
+                                            <span className="detail-modal-recording-variation-copy">
+                                              {subtitle ? <span className="detail-modal-recording-variation-subtitle">{subtitle}</span> : null}
+                                              <span className="detail-modal-recording-variation-album">{member.album || "Unknown album"}</span>
+                                              <span className="detail-modal-recording-variation-year">{recordingMemberReleaseYear(member)}</span>
+                                            </span>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                </details>
+                              ) : null}
                               </div>
             ) : null}
             {selectedPreview.kind === "album" ? (
@@ -1359,41 +1274,6 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     );
                   })}
                 </div>
-              </div>
-            ) : null}
-            {selectedPreview.kind === "track" && familyListCount > 0 ? (
-              <div className="detail-modal-family-list">
-                <div className="detail-modal-recording-variations-header">
-                  <span>Related family tracks</span>
-                  <span className="detail-modal-family-count">{familyListCount}</span>
-                </div>
-                {familyListSections.map((section) => (
-                  <div className="detail-modal-family-section" key={`family-list-${section.key}`}>
-                    <span className="detail-modal-family-section-title">{section.title}</span>
-                    <div className="detail-modal-family-rows">
-                      {section.rows.map((member) => {
-                        const artistText = recordingMemberArtistText(member);
-                        const albumYear = recordingMemberReleaseYear(member);
-                        return (
-                          <button
-                            className="detail-modal-family-row"
-                            key={`family-list-${section.key}-${member.release_track_id}`}
-                            onClick={() => openRecordingCandidateReleaseTrack(member, "recording")}
-                            type="button"
-                          >
-                            <span className="relation-tags-badge detail-modal-family-tag">{section.tag}</span>
-                            <span className="detail-modal-family-row-copy">
-                              <strong>{member.title || "Unknown track"}</strong>
-                              <span>
-                                {[artistText || null, member.album || null, albumYear].filter(Boolean).join(" · ")}
-                              </span>
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
               </div>
             ) : null}
               </div>

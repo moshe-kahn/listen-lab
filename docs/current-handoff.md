@@ -19,10 +19,39 @@ Latest feature commit:
 - `Refine track detail source history`
 
 Worktree at handoff:
-- clean after committing the track detail source-history and In Rainbows release-album merge batch
+- dirty and staged-ready after the combined Activity/recent-sync, artist-promotion audit, and track relationship/album promotion batch
+- do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in the commit
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
+
+## Current Uncommitted Batch
+Activity and recent-sync changes:
+- Activity completion filtering is now `Completed` / `All`, with independent `Liked` and `Tagged` toggles.
+- Grouped Activity rows render completion markers on the progress bar; repeated identical completion points show a count.
+- Listen Log forced refresh treats Spotify recent-sync failure as best effort and returns the failure summary while preserving local log results.
+
+Artist identity observability:
+- SQLite schema version `35` adds `artist_promotion_skip_log`.
+- blocked text-to-provider artist promotions record stable reason/context signatures and roll up occurrence counts.
+- Identity Audit `Artists` is split into `Promotion Skips` and `Duplicate Repair` focused components.
+
+Track relationship and album behavior:
+- same-title groups with overlapping primary artists can form Track Family candidates across credited-artist signature changes.
+- unique cached Spotify album names hydrate missing recording-member artwork when no explicit source-album map exists.
+- family rows collapse multiple release appearances to the representative recording.
+- track modal uses `Song Family` with `Original`, `Cover`, `Remix`, `Version`, `Rework`, `Sibling Cover`, and `Sibling Remix` badges.
+- `Also Appears On` is a collapsible bottom bar inside the album box.
+- local stars remain visible across album track rows.
+- a complete track-overlay album fetch explicitly requests conservative catalog identity promotion; newly promoted release appearances refresh generated recording clusters without canonical merges.
+- album-track payloads now expose generated recording-group history separately from exact source/release history; recording view uses the aggregate values.
+- stale frontend album-row caches without recording-history fields are invalidated.
+
+Local BITCRUSH / PARALYSIS GHOSTS state:
+- BITCRUSH Spotify album `6LU67HlNUaukF21Tr6ymuD` is cached with the correct three tracks: `BITCRUSH`, `MOUNTAIN LION // ADORE`, and `PARALYSIS GHOSTS`.
+- promoted BITCRUSH `PARALYSIS GHOSTS` release track `30567` joins recording candidate `13220` with release tracks `28598` and `30525`.
+- direct metadata enrichment returns recording history of 3 listens, latest `2026-06-17T15:35:32.011000Z`, while exact BITCRUSH-source history remains zero.
+- unresolved user QA: after the latest restart, BITCRUSH reportedly displayed the wrong tracks even though `_cached_album_track_rows('6LU67HlNUaukF21Tr6ymuD')` returned the correct three rows. First next-session task is to capture the visible wrong rows and trace frontend selected album id/cache state.
 
 ## Latest Album/Recording Identity Work
 This handoff follows a focused QA cycle around track, album, artist, and recording variation previews.
@@ -212,6 +241,13 @@ Remaining broader source/text identity work:
 Do not broaden automatic repair to similar names, stylization variants, or multiple provider-backed rows without an explicit review/apply design.
 
 ## Tests And Verification
+Checks run for the current uncommitted batch:
+- `python3 -m unittest backend.tests.test_artist_promotion_skip_log backend.tests.test_spotify_recent_sync backend.tests.test_catalog_identity_promotion backend.tests.test_recording_track_candidates backend.tests.test_artist_identity_repair`
+  - `Ran 66 tests ... OK`
+- `python3 -m py_compile backend/app/db.py backend/app/catalog_identity_promotion.py backend/app/recording_track_candidates.py backend/app/release_track_metadata.py backend/app/routes/admin_routes.py backend/app/routes/audit_routes.py backend/app/routes/playback_routes.py backend/app/spotify_recent_sync.py`
+- `npm run build` from `frontend/`
+- `git diff --check`
+
 Checks run and passed before the latest commit:
 - `python3 -m unittest backend.tests.test_artist_identity_repair backend.tests.test_entity_backfill backend.tests.test_artist_album_evidence`
   - `Ran 62 tests ... OK`
@@ -283,7 +319,7 @@ Outstanding QA:
 ## Known Limitations
 - Frontend bookmark/star behavior is local placeholder UI; bookmark persistence is not implemented.
 - Source/text album and track reconciliation are not broadly implemented.
-- Catalog album-track promotion exists as a targeted script, not as automatic catalog backfill behavior.
+- Catalog backfill remains enrichment-only; complete album tracklists opened from a track overlay can now opt into the separate conservative catalog identity-promotion workflow.
 - Generated recording/track-family clusters are caches only; no durable `recording_track` promotion exists.
 - `source_track_play_count_cache` is a derived cache; if old local data looks stale, run a projection/refresh path before debugging frontend counts.
 - Frontend still lacks focused tests for overlay/tracklist workflows.
@@ -292,15 +328,16 @@ Outstanding QA:
 ## Recommended Next Task
 Recommended project-level next steps:
 
-1. Push this branch after the commit if remote backup/review is desired.
-2. Re-run authenticated browser QA for representative track pages that should show exact release-source rows and aggregate recording rows.
-3. If desired, run the release-album history/Spotify repair write path only after reviewing the 28 safe candidates from the dry-run.
-4. Continue source/text identity reconciliation for albums and tracks:
+1. Reproduce the reported BITCRUSH wrong-track display and capture the visible rows plus selected preview/source album ids; the backend cache currently returns the correct three tracks.
+2. Re-run authenticated browser QA for exact release-source rows, aggregate recording rows, `Song Family`, and the collapsible `Also Appears On` album footer.
+3. Push this branch after the commit if remote backup/review is desired.
+4. If desired, run the release-album history/Spotify repair write path only after reviewing the 28 safe candidates from the dry-run.
+5. Continue source/text identity reconciliation for albums and tracks:
    - album duplicate repair beyond the safe history/Spotify merge path
    - track duplicate repair using title + artist + album + duration/ISRC/context evidence
    - promote only through explicit dry-run/apply flows, not automatic broad mutation
-5. Extract more detail modal/preview logic out of `frontend/src/App.tsx` before adding new UI surface.
-6. Add focused frontend tests for modal navigation regressions:
+6. Extract more detail modal/preview logic out of `frontend/src/App.tsx` before adding new UI surface.
+7. Add focused frontend tests for modal navigation regressions:
    - track -> album -> artist -> album
    - recording variation A -> variation B -> A
    - album heading year/name formatting
@@ -315,4 +352,4 @@ Recommended project-level next steps:
 - Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest work polishes track detail release/recording semantics: release view uses exact source-version star/liked/listened/listen-count/history, recording view aggregates generated recording members, clickable listen/date breakdowns appear only when multiple recording members contribute, album context tags include `Single`/`Soundtrack`/`Compilation`, and playback-home connecting state is tooltip-only. Backend now has `source_track_play_count_cache` and uses it for source-version history, generated recording candidate counts, and faster album tracklist metadata. The local DB has already merged duplicate `Radiohead - In Rainbows` release albums `5`/`2830` into `5`; `15 Step` is one release track with two Spotify source versions. Verification for the batch included focused backend unittest cases, `py_compile`, and frontend `npm run build`; run `git diff --check` and a final focused test pass before committing if this doc update has not already been committed. Next: authenticated browser QA for release-source exactness and recording aggregate behavior, then continue album/track source-text identity reconciliation through explicit dry-run/apply flows.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. The current batch adds Activity completion markers and independent filters, best-effort Listen Log recent sync, artist-promotion skip telemetry/UI, cross-credit Track Family candidates, `Song Family` relationship badges, a collapsible album-box `Also Appears On` footer, explicit track-overlay catalog identity promotion, and separate recording-group album-row history. Focused backend tests (66), `py_compile`, frontend build, and `git diff --check` passed. The unresolved first task is the user report that BITCRUSH shows the wrong tracks: direct backend inspection of Spotify album `6LU67HlNUaukF21Tr6ymuD` still returns `BITCRUSH`, `MOUNTAIN LION // ADORE`, and `PARALYSIS GHOSTS`, so capture the visible frontend rows and selected preview/source album ids before changing identity data.

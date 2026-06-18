@@ -1,5 +1,5 @@
 import { useState, type Dispatch, type SetStateAction } from "react";
-import type { PreviewItem, RecentDebugSourceFilter, RecentPlayFilter, RecentTrack } from "../../types/appTypes";
+import type { PreviewItem, RecentCompletionFilter, RecentDebugSourceFilter, RecentTrack } from "../../types/appTypes";
 import {
   DEBUG_GAP_MARKER_MAX_MS,
   DEBUG_GAP_MARKER_MIN_MS,
@@ -74,7 +74,7 @@ export function RecentDebugPage({
   onBack,
   onSelectPreview,
 }: RecentDebugPageProps) {
-  const [listenLogPlayFilter, setListenLogPlayFilter] = useState<RecentPlayFilter>("listened");
+  const [listenLogPlayFilter, setListenLogPlayFilter] = useState<RecentCompletionFilter>("listened");
 
   if (!hasProfile) {
     return null;
@@ -230,7 +230,7 @@ export function RecentDebugPage({
           className={`track-ranking-chip${listenLogPlayFilter === value ? " track-ranking-chip-active" : ""}`}
           key={value}
           onClick={() => {
-            setListenLogPlayFilter(value as RecentPlayFilter);
+            setListenLogPlayFilter(value as RecentCompletionFilter);
             setOpenDebugSessions({});
             setOpenDebugTracks({});
           }}

@@ -326,10 +326,11 @@ Current backend behavior:
 ## Activity and Listen Log UI State
 Current recent-listening behavior:
 - Activity recent list scrolls instead of paginating.
-- Activity shows progress bars for listened amount.
-- Activity filter options are `Listened` and `All`; default is `Listened`.
-- `Listened` means at least 65% of the track was played.
-- Activity applies the filter before repeat/dedupe counting.
+- Activity shows progress bars plus per-play completion markers; repeated plays at the same completion percentage collapse into a counted marker.
+- Activity completion filter options are `Completed` and `All`; default is `Completed`.
+- `Liked` and `Tagged` are independent toggle filters and can be combined with the completion filter.
+- `Completed` means at least 65% of the track was played.
+- Activity groups before filtering, then selects matching rows while preserving chronological representative order.
 - Activity display grouping uses `release_track_id` first, then Spotify track id, then normalized text identity.
 - Activity grouped rows keep a representative Spotify track id/uri from an actual `RecentTrack` row for playback.
 - Player recent dedupe remains Spotify-first and should not be widened without a separate QA pass.
@@ -341,4 +342,5 @@ Listen Log behavior:
 - Rows include album art and listened progress.
 - Play amount toggle options are `Listened`, `All`, and `Skipped`; default is `Listened`.
 - `Reload` forces Spotify recent sync before reloading the log.
+- A forced reload treats Spotify recent-sync errors as best effort, returns the failure summary, and still loads existing local log rows.
 - Loading more rows does not force Spotify sync.

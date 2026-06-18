@@ -36,6 +36,8 @@ Downstream entity backfill boundary:
 - evidenced composite history credits such as `Brian Eno, David Byrne` should be skipped as fake single artist identities when structured/provider context proves the parts are separate credited artists
 - Spotify artist IDs can promote an existing text-only artist row only when exact-name and album/track evidence gates are satisfied
 - artist name alone is not enough to promote or repair identity
+- SQLite schema version `35` records evidence-gated Spotify artist promotion skips by stable signature, reason, context ids, occurrence count, and first/last seen timestamps
+- Identity Audit exposes those recorded skips separately from duplicate repair so blocked promotions can be inspected without weakening automatic gates
 - broad album and track source/text reconciliation remains outside raw ingest and should use explicit audit/repair flows
 
 Important boundary:

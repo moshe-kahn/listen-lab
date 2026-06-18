@@ -72,10 +72,6 @@ export function DashboardTrackColumn({
     section === "tracksAllTimeCurrent" || section === "tracksAllTimeNew"
       ? formatFormulaRankDelta(track)
       : null;
-  const completedRepeatText = (track: RecentTrack) =>
-    section === "recent" && Number(track.filtered_play_count ?? track.completed_play_count ?? 0) > 1
-      ? `x${track.filtered_play_count ?? track.completed_play_count}`
-      : null;
   const completionRatio = (track: RecentTrack) =>
     section === "recent"
       ? recentTrackCompletionRatio(track)
@@ -120,11 +116,12 @@ export function DashboardTrackColumn({
               releaseSiblingDuplicateSourceCount: row.track.release_track_duplicate_source_count ?? null,
               releaseTrackClusterCandidateType: row.track.release_track_cluster_candidate_type ?? null,
               releaseTrackClusterRelationshipKind: row.track.release_track_cluster_relationship_kind ?? null,
-              primaryBadgeText: formulaRankDeltaText(row.track) ?? completedRepeatText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
+              primaryBadgeText: formulaRankDeltaText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
               secondaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
               secondaryText: row.track.artist_name ?? "Unknown artist",
               tertiaryText: row.track.album_name ?? "Unknown album",
               completionRatio: completionRatio(row.track),
+              completionMarkers: section === "recent" ? row.track.activity_completion_markers : undefined,
               metricText: isAllTimeTrackSection
                 ? (
                     section === "tracksAllTimeNew"

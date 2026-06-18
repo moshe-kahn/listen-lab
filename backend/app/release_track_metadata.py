@@ -132,6 +132,71 @@ def release_track_play_history_for_release_track_ids(release_track_ids: list[int
     }
 
 
+def recording_play_history_for_release_track_ids(release_track_ids: list[int]) -> dict[int, dict[str, Any]]:
+    normalized_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+    if not normalized_ids:
+        return {}
+    from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
+
+    candidate_cluster_metadata_for_release_track_ids(normalized_ids)
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            f"""
+            WITH ranked_clusters AS (
+              SELECT
+                member.release_track_id AS target_release_track_id,
+                cluster.id AS cluster_id,
+                row_number() OVER (
+                  PARTITION BY member.release_track_id
+                  ORDER BY cluster.member_count DESC, cluster.confidence DESC, cluster.id ASC
+                ) AS cluster_rank
+              FROM generated_recording_track_cluster_member member
+              JOIN generated_recording_track_cluster cluster
+                ON cluster.id = member.cluster_id
+              WHERE member.release_track_id IN ({placeholders})
+                AND cluster.candidate_type = 'recording_track_candidate'
+            ),
+            recording_sources AS (
+              SELECT DISTINCT
+                ranked.target_release_track_id,
+                CASE
+                  WHEN source.source_name = 'spotify_uri' THEN replace(source.external_id, 'spotify:track:', '')
+                  ELSE source.external_id
+                END AS spotify_track_id
+              FROM ranked_clusters ranked
+              JOIN generated_recording_track_cluster_member cluster_member
+                ON cluster_member.cluster_id = ranked.cluster_id
+              JOIN source_track_map source_map
+                ON source_map.release_track_id = cluster_member.release_track_id
+               AND source_map.status = 'accepted'
+              JOIN source_track source
+                ON source.id = source_map.source_track_id
+               AND source.source_name IN ('spotify', 'spotify_uri')
+              WHERE ranked.cluster_rank = 1
+            )
+            SELECT
+              recording_sources.target_release_track_id,
+              sum(play_counts.play_count) AS play_count,
+              min(play_counts.first_played_at) AS first_played_at,
+              max(play_counts.last_played_at) AS last_played_at
+            FROM recording_sources
+            JOIN source_track_play_count_cache play_counts
+              ON play_counts.spotify_track_id = recording_sources.spotify_track_id
+            GROUP BY recording_sources.target_release_track_id
+            """,
+            normalized_ids,
+        ).fetchall()
+    return {
+        int(row["target_release_track_id"]): {
+            "play_count": int(row["play_count"] or 0),
+            "first_played_at": row["first_played_at"],
+            "last_played_at": row["last_played_at"],
+        }
+        for row in rows
+    }
+
+
 def play_history_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict[str, Any]]:
     normalized_ids = sorted({str(track_id or "").strip() for track_id in spotify_track_ids if str(track_id or "").strip()})
     if not normalized_ids:
@@ -285,6 +350,11 @@ def enrich_track_rows_with_release_metadata(
         for row in enriched
         if isinstance(row.get("release_track_id"), int)
     ])
+    recording_history_by_release_track_id = recording_play_history_for_release_track_ids([
+        int(row["release_track_id"])
+        for row in enriched
+        if isinstance(row.get("release_track_id"), int)
+    ])
     play_history_by_track_id = play_history_for_spotify_ids([
         str(row.get(track_id_key) or "").strip()
         for row in enriched
@@ -315,6 +385,19 @@ def enrich_track_rows_with_release_metadata(
             row.setdefault("play_count", 0)
             row.setdefault("first_played_at", None)
             row.setdefault("last_played_at", None)
+        recording_history = (
+            recording_history_by_release_track_id.get(release_track_id)
+            if isinstance(release_track_id, int)
+            else None
+        ) or play_history
+        if recording_history:
+            row["recording_play_count"] = recording_history["play_count"]
+            row["recording_first_played_at"] = recording_history["first_played_at"]
+            row["recording_last_played_at"] = recording_history["last_played_at"]
+        else:
+            row.setdefault("recording_play_count", 0)
+            row.setdefault("recording_first_played_at", None)
+            row.setdefault("recording_last_played_at", None)
     return enriched
 
 

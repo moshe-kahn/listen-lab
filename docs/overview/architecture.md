@@ -73,7 +73,7 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend playback controls and player state presentation
 - frontend queue organizer, preview-resume handling, album play-all controls, and Recent Likes cache/sync UI
 - frontend playback-action menu for overlay and album play controls, with `Play now`, `Play next`, and `Add to queue` actions backed by the ListenLab queue
-- frontend recording/release track views with same-recording album appearances, broader variation/family album cards, source-version album cards in release view, exact-source vs aggregate listen/date semantics, liked-state fallback checks, and in-place album tracklist scrolling/highlighting
+- frontend recording/release track views with collapsible same-recording album appearances, compact two-column `Song Family` relationship rows, source-version album cards in release view, exact-source vs aggregate listen/date semantics, liked-state fallback checks, and in-place album tracklist scrolling/highlighting
 - frontend homepage playback album expansion uses a compact tracklist while keeping the queue visible; repeated Spotify queue cycles are collapsed for display
 - frontend local/full/test mode controls with cached-state indicators
 - frontend tracks-only comparison page for current vs new all-time ranking formulas
@@ -89,6 +89,9 @@ This document is the implementation-oriented technical source of truth for the L
 - backend Spotify HTTP, rate-limit, normalization, and lookup helpers extracted into focused `backend/app/spotify_*.py` modules
 - backend encrypted Spotify token persistence and token-backed session restore
 - backend `source_track_play_count_cache` stores derived per-Spotify-track play count, first listened, and last listened values for release-source detail and generated recording candidate aggregation
+- album-track metadata exposes exact source, release, and generated recording-group history separately; track recording view uses recording history while release and standalone album views retain exact-release semantics
+- complete track-overlay album fetches can explicitly invoke the separate conservative catalog identity-promotion workflow, creating missing release appearances and refreshing generated recording evidence without merging canonical tracks
+- backend schema version `35` stores evidence-gated artist-promotion skip telemetry for Identity Audit review
 - backend PKCE code-challenge handling for Spotify auth flows
 - authenticated `GET /me` snapshot endpoint
 - authenticated `GET /me/progress` timing endpoint for debugging load phases

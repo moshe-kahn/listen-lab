@@ -57,6 +57,7 @@ async def maybe_sync_spotify_recent(
     force: bool = False,
     min_interval_seconds: int = 30 * 60,
     limit: int = 50,
+    raise_on_error: bool = True,
 ) -> dict[str, Any]:
     async with _recent_sync_lock:
         now = datetime.now(UTC)
@@ -99,11 +100,41 @@ async def maybe_sync_spotify_recent(
                     "row_outcomes": [],
                 }
 
-        summary = await sync_spotify_recent_plays(
-            access_token,
-            source_ref=source_ref,
-            limit=limit,
-        )
+        try:
+            summary = await sync_spotify_recent_plays(
+                access_token,
+                source_ref=source_ref,
+                limit=limit,
+            )
+        except Exception as exc:
+            if raise_on_error:
+                raise
+            logger.warning(
+                "event=spotify_recent_sync_best_effort_failed source_ref=%s error=%s",
+                source_ref,
+                exc,
+            )
+            return {
+                "status": "failed",
+                "skipped": True,
+                "source_ref": source_ref,
+                "force": force,
+                "min_interval_seconds": bounded_min_interval,
+                "error": str(exc),
+                "error_type": exc.__class__.__name__,
+                "last_completed_at": state.get("last_completed_at"),
+                "last_run_id": state.get("last_run_id"),
+                "last_successful_played_at": state.get("last_successful_played_at"),
+                "fetched_count": 0,
+                "row_count": 0,
+                "inserted_count": 0,
+                "duplicate_count": 0,
+                "already_seen_source_row_count": 0,
+                "merged_duplicate_row_count": 0,
+                "collection_outcomes": {},
+                "item_decisions": [],
+                "row_outcomes": [],
+            }
         recording_cluster_refresh: dict[str, Any] | None = None
         if int(summary.get("inserted_count") or 0) > 0:
             from backend.app.recording_track_candidates import drain_generated_recording_track_cluster_dirty

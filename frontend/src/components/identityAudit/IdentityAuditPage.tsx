@@ -7,7 +7,7 @@ import type {
 } from "../../utils/identityAuditPrefs";
 import type { RecordingTrackCandidateMember } from "../../types/appTypes";
 import { AlbumHistorySpotifyRepairTab } from "./AlbumHistorySpotifyRepairTab";
-import { ArtistDuplicateAuditTab } from "./ArtistDuplicateAuditTab";
+import { ArtistIdentityAuditTab } from "./ArtistIdentityAuditTab";
 import { RecordingTrackCandidatesTab } from "./RecordingTrackCandidatesTab";
 import { ReleaseTrackDurationConflictsTab } from "./ReleaseTrackDurationConflictsTab";
 
@@ -105,7 +105,7 @@ export function IdentityAuditPage({
         <div>
           <h2>Identity Audit</h2>
           <p className="tracks-only-subtitle">
-            Find identity problems, inspect mappings and evidence, then review decisions before any grouping behavior is promoted.
+            Review track, album, and artist identity issues.
           </p>
         </div>
         <div className="section-column-header-actions">
@@ -126,18 +126,24 @@ export function IdentityAuditPage({
           </button>
         </div>
       </div>
-      <div className="tracks-only-summary">
-        <span>Identity samples: {identityAuditLimit != null ? `${identityAuditLimit} per group` : "not loaded"}</span>
-        <span>Suggested groups: {suggestedGroupTotal}</span>
-        <span>Ambiguous queue: {ambiguousReviewTotal}</span>
-        <span>Album duplicate Spotify ID groups: {albumDuplicateLookupLoaded ? albumDuplicateTotal : "not loaded"}</span>
-        <span>Album duplicate name groups: {albumNameDuplicateLookupLoaded ? albumNameDuplicateTotal : "not loaded"}</span>
-        {identityAuditLastLoadedAt ? <span>Identity loaded {new Date(identityAuditLastLoadedAt).toLocaleTimeString()}</span> : null}
-        {identityAuditSuggestedLastLoadedAt ? <span>Suggested loaded {new Date(identityAuditSuggestedLastLoadedAt).toLocaleTimeString()}</span> : null}
-        {identityAuditAmbiguousLastLoadedAt ? <span>Ambiguous loaded {new Date(identityAuditAmbiguousLastLoadedAt).toLocaleTimeString()}</span> : null}
-        {albumDuplicateLookupLastLoadedAt ? <span>Album duplicates loaded {new Date(albumDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
-        {albumNameDuplicateLookupLastLoadedAt ? <span>Album names loaded {new Date(albumNameDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
-      </div>
+      {identityAuditEntityTab === "tracks" ? (
+        <div className="tracks-only-summary">
+          <span>Samples: {identityAuditLimit != null ? `${identityAuditLimit} per group` : "not loaded"}</span>
+          <span>Suggested: {suggestedGroupTotal}</span>
+          <span>Needs review: {ambiguousReviewTotal}</span>
+          {identityAuditLastLoadedAt ? <span>Loaded {new Date(identityAuditLastLoadedAt).toLocaleTimeString()}</span> : null}
+          {identityAuditSuggestedLastLoadedAt ? <span>Suggestions loaded {new Date(identityAuditSuggestedLastLoadedAt).toLocaleTimeString()}</span> : null}
+          {identityAuditAmbiguousLastLoadedAt ? <span>Review queue loaded {new Date(identityAuditAmbiguousLastLoadedAt).toLocaleTimeString()}</span> : null}
+        </div>
+      ) : null}
+      {identityAuditEntityTab === "albums" ? (
+        <div className="tracks-only-summary">
+          <span>Duplicate Spotify IDs: {albumDuplicateLookupLoaded ? albumDuplicateTotal : "not loaded"}</span>
+          <span>Duplicate names: {albumNameDuplicateLookupLoaded ? albumNameDuplicateTotal : "not loaded"}</span>
+          {albumDuplicateLookupLastLoadedAt ? <span>Spotify IDs loaded {new Date(albumDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
+          {albumNameDuplicateLookupLastLoadedAt ? <span>Names loaded {new Date(albumNameDuplicateLookupLastLoadedAt).toLocaleTimeString()}</span> : null}
+        </div>
+      ) : null}
       <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit entity type">
         {identityEntityTabs.map((tab) => (
           <button
@@ -189,7 +195,7 @@ export function IdentityAuditPage({
       {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "merge_review" ? renderAlbumMergeReviewTab() : null}
       {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "history_spotify_repair" ? <AlbumHistorySpotifyRepairTab /> : null}
       {identityAuditEntityTab === "albums" && albumIdentityAuditTab === "catalog" ? renderAlbumCatalogTab() : null}
-      {identityAuditEntityTab === "artists" ? <ArtistDuplicateAuditTab /> : null}
+      {identityAuditEntityTab === "artists" ? <ArtistIdentityAuditTab /> : null}
     </section>
   );
 }

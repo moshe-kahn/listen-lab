@@ -66,7 +66,12 @@ Behavior:
 - use the same cached/local fallback path for the song overlay and homepage album expansion
 - preserve album queue context when a track is started from an album row
 
-This fallback is catalog enrichment only. It must not merge, promote, or repair identity rows.
+The fallback remains catalog enrichment-only by default. A track-overlay request explicitly sends
+`promote_identity=true` after the user opens an album context. Once the album tracklist is complete,
+the route invokes the separate conservative catalog identity-promotion workflow. That workflow creates
+missing source/release/album membership rows, marks affected generated recording clusters dirty, and
+refreshes them. It does not merge or repair existing canonical identities. Homepage and generic catalog
+requests do not enable this flag.
 
 ## History/Spotify Release-Album Repair
 The debug repair path for history-only release albums and Spotify-backed release albums is separate from catalog backfill. It may merge release-album rows only through explicit preview/dry-run/apply flow.

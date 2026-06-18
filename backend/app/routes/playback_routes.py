@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 
 from backend.app.artist_album_evidence import list_artist_album_evidence
 from backend.app.artwork import resolve_artist_artwork
+from backend.app.catalog_identity_promotion import promote_catalog_album_tracks_to_identity
 from backend.app.auth.session import _require_local_data_session, _require_user_id
 from backend.app.auth.token import _require_token
 from backend.app.db import (
@@ -294,6 +295,7 @@ async def auth_playback_album_tracks(
     album_id: str | None = None,
     force_spotify: bool = False,
     local_only: bool = False,
+    promote_identity: bool = False,
 ) -> dict[str, Any]:
     _require_user_id(request)
     track_id_candidate = track_id or _spotify_track_id_from_uri(track_uri)
@@ -309,6 +311,10 @@ async def auth_playback_album_tracks(
         cached_items, cached_complete = _cached_album_track_rows(normalized_album_id)
         local_fallback_items = cached_items
         if cached_complete:
+            promotion = promote_catalog_album_tracks_to_identity(
+                album_ids=[normalized_album_id],
+                apply=True,
+            ) if promote_identity else None
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
@@ -316,6 +322,7 @@ async def auth_playback_album_tracks(
                 "source": source,
                 "cached": True,
                 "partial": False,
+                "identity_promotion": promotion,
             }
 
         catalog_items, catalog_complete = _cached_album_track_rows_from_track_catalog(normalized_album_id)
@@ -379,6 +386,10 @@ async def auth_playback_album_tracks(
 
     cached_items, cached_complete = _cached_album_track_rows(normalized_album_id)
     if cached_complete:
+        promotion = promote_catalog_album_tracks_to_identity(
+            album_ids=[normalized_album_id],
+            apply=True,
+        ) if promote_identity else None
         return {
             "album_id": normalized_album_id,
             "track_id": normalized_track_id,
@@ -386,6 +397,7 @@ async def auth_playback_album_tracks(
             "source": source,
             "cached": True,
             "partial": False,
+            "identity_promotion": promotion,
         }
 
     try:
@@ -401,6 +413,10 @@ async def auth_playback_album_tracks(
                 "partial": True,
             }
         raise
+    promotion = promote_catalog_album_tracks_to_identity(
+        album_ids=[normalized_album_id],
+        apply=True,
+    ) if promote_identity else None
     return {
         "album_id": normalized_album_id,
         "track_id": normalized_track_id,
@@ -408,6 +424,7 @@ async def auth_playback_album_tracks(
         "source": "spotify_album_tracks",
         "cached": False,
         "partial": False,
+        "identity_promotion": promotion,
     }
 
 

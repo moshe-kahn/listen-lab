@@ -1,5 +1,5 @@
 import { PLAYER_RECENT_FETCH_LIMIT } from "../constants/appConstants";
-import type { PlayerQueueTrack, PlayerTrackSummary, RecentPlayFilter, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
+import type { PlayerQueueTrack, PlayerTrackSummary, RecentCompletionFilter, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
 
 export const QUEUE_PLAYLIST_URI_LIMIT = 100;
 
@@ -76,7 +76,7 @@ export function recentTrackCompletionRatio(track: RecentTrack) {
   return null;
 }
 
-function recentTrackMatchesFilter(track: RecentTrack, filter: RecentPlayFilter) {
+function recentTrackMatchesFilter(track: RecentTrack, filter: RecentCompletionFilter) {
   if (filter === "all") {
     return true;
   }
@@ -89,29 +89,28 @@ function recentTrackMatchesFilter(track: RecentTrack, filter: RecentPlayFilter) 
     : ratio < 0.65;
 }
 
+function recentTrackHasActivityTag(track: RecentTrack) {
+  return Boolean(
+    track.has_release_track_siblings
+    || Number(track.release_track_source_count ?? 0) > 1
+    || Number(track.release_track_duplicate_source_count ?? 0) > 1
+    || track.release_track_cluster_candidate_type,
+  );
+}
+
 export function filterAndDedupeRecentTracksForActivity(
   tracks: RecentTrack[],
-  filter: RecentPlayFilter,
+  filter: RecentCompletionFilter,
   limit = tracks.length,
   likedTrackIds?: Set<string>,
   likedReleaseTrackIds?: Set<number>,
+  options: { likedOnly?: boolean; taggedOnly?: boolean } = {},
 ) {
   const groups = new Map<string, RecentTrack[]>();
   const orderedKeys: string[] = [];
-  for (const track of tracks) {
-    if (filter === "liked") {
-      const isKnownLiked = Boolean(
-        track.is_liked === true
-        || track.source_label === "liked_cache"
-        || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
-        || (track.track_id && likedTrackIds?.has(track.track_id)),
-      );
-      if (!isKnownLiked) {
-        continue;
-      }
-    } else if (!recentTrackMatchesFilter(track, filter)) {
-      continue;
-    }
+  const trackOrder = new Map<RecentTrack, number>();
+  tracks.forEach((track, index) => {
+    trackOrder.set(track, index);
     const key = activityRecentTrackKey(track);
     const group = groups.get(key);
     if (group) {
@@ -120,34 +119,59 @@ export function filterAndDedupeRecentTracksForActivity(
       groups.set(key, [track]);
       orderedKeys.push(key);
     }
-  }
+  });
 
-  const unique: RecentTrack[] = [];
+  const unique: Array<{ order: number; track: RecentTrack }> = [];
   for (const key of orderedKeys) {
     const group = groups.get(key) ?? [];
     if (group.length === 0) {
       continue;
     }
-    const representative = group.reduce((best, candidate) => {
-      const bestRatio = recentTrackCompletionRatio(best);
-      const candidateRatio = recentTrackCompletionRatio(candidate);
-      if (candidateRatio === null) {
-        return best;
+    const matchingRows = group.filter((track) => {
+      const isLiked = Boolean(
+        track.is_liked === true
+        || track.source_label === "liked_cache"
+        || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
+        || (track.track_id && likedTrackIds?.has(track.track_id)),
+      );
+      if (options.likedOnly && !isLiked) {
+        return false;
       }
-      if (bestRatio === null || candidateRatio > bestRatio) {
-        return candidate;
+      if (options.taggedOnly && !recentTrackHasActivityTag(track)) {
+        return false;
       }
-      return best;
-    }, group[0]);
-    unique.push({
-      ...representative,
-      filtered_play_count: group.length,
+      return recentTrackMatchesFilter(track, filter);
     });
-    if (unique.length >= limit) {
-      break;
+    if (matchingRows.length === 0) {
+      continue;
     }
+    const displayRows = filter === "all" ? group : matchingRows;
+    const markerCounts = new Map<number, number>();
+    for (const track of displayRows) {
+      const ratio = recentTrackCompletionRatio(track);
+      if (ratio === null) {
+        continue;
+      }
+      const markerRatio = Math.max(0, Math.min(1, Number(ratio)));
+      const markerKey = Math.round(markerRatio * 100);
+      markerCounts.set(markerKey, (markerCounts.get(markerKey) ?? 0) + 1);
+    }
+    const representative = displayRows[0];
+    unique.push({
+      order: trackOrder.get(representative) ?? tracks.length,
+      track: {
+        ...representative,
+        filtered_play_count: matchingRows.length,
+        activity_completion_markers: Array.from(markerCounts.entries())
+          .sort(([left], [right]) => left - right)
+          .map(([ratioPercent, count]) => ({ ratio: ratioPercent / 100, count })),
+      },
+    });
   }
-  return unique;
+  return unique
+    .sort((left, right) => left.order - right.order)
+    .slice(0, limit)
+    .map((item) => item.track);
 }
 
 export function dedupeRecentTracksForPlayer(tracks: RecentTrack[], limit = PLAYER_RECENT_FETCH_LIMIT) {
