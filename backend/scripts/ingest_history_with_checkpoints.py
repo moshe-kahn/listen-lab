@@ -24,6 +24,36 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def commit_and_project_checkpoint(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    row_count: int,
+    inserted_count: int,
+    duplicate_count: int,
+    error_count: int,
+) -> dict[str, Any]:
+    """Durably record checkpoint progress, then globally recover history projection."""
+    heartbeat_at = _utc_now_iso()
+    cursor = connection.execute(
+        """
+        UPDATE ingest_run
+        SET
+          row_count = ?,
+          inserted_count = ?,
+          duplicate_count = ?,
+          error_count = ?,
+          last_heartbeat_at = ?
+        WHERE id = ? AND status = 'running'
+        """,
+        (row_count, inserted_count, duplicate_count, error_count, heartbeat_at, run_id),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError(f"running ingest_run not found for checkpoint id={run_id}")
+    connection.commit()
+    return reconcile_fact_play_events_for_ingest_run(source_type="export", run_id=run_id)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--history-dir", required=True)
@@ -137,6 +167,14 @@ def main() -> None:
                 inserted_count += 1
 
             if row_count % max(1, int(args.checkpoint_every)) == 0:
+                projection_summary = commit_and_project_checkpoint(
+                    connection,
+                    run_id=run_id,
+                    row_count=row_count,
+                    inserted_count=inserted_count,
+                    duplicate_count=duplicate_count,
+                    error_count=failure_count,
+                )
                 print(
                     json.dumps(
                         {
@@ -149,12 +187,20 @@ def main() -> None:
                             "mapping_ms": mapping_elapsed_ms,
                             "raw_inserts_ms": raw_insert_elapsed_ms,
                             "elapsed_ms_total": (perf_counter() - total_started) * 1000,
+                            "canonical_projection_summary": projection_summary,
                         },
                         sort_keys=True,
                     )
                 )
-                connection.commit()
-
+        # Commit and project a final partial checkpoint before marking the run complete.
+        projection_summary = commit_and_project_checkpoint(
+            connection,
+            run_id=run_id,
+            row_count=row_count,
+            inserted_count=inserted_count,
+            duplicate_count=duplicate_count,
+            error_count=failure_count,
+        )
         commit_started = perf_counter()
         completed_at = _utc_now_iso()
         _complete_ingest_run_with_connection(
@@ -170,9 +216,7 @@ def main() -> None:
         connection.commit()
         final_commit_ms = (perf_counter() - commit_started) * 1000
 
-    projector_started = perf_counter()
-    projection_summary = reconcile_fact_play_events_for_ingest_run(source_type="export", run_id=run_id)
-    projector_wall_ms = (perf_counter() - projector_started) * 1000
+    projector_wall_ms = float(projection_summary.get("projector_ms") or 0.0)
 
     print(
         json.dumps(
@@ -206,4 +250,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

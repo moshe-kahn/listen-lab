@@ -59,6 +59,10 @@ from backend.app.db import (
     recover_stale_ingest_runs,
 )
 from backend.app.history_analysis import get_history_signature, load_history_insights
+from backend.app.play_event_projector import (
+    audit_eligible_unlinked_history_rows,
+    reconcile_fact_play_events_for_ingest_run,
+)
 from backend.app.logging_config import configure_logging
 from backend.app.progress_tracker import (
     LOAD_PROGRESS,
@@ -212,6 +216,20 @@ async def _ensure_sqlite_db_on_startup() -> None:
             stale_recovery["recovered_count"],
             ",".join(stale_recovery["recovered_run_ids"]),
             stale_recovery["cutoff_last_heartbeat_at"],
+        )
+    orphan_audit = audit_eligible_unlinked_history_rows()
+    if int(orphan_audit["eligible_unlinked_history_count"]) > 0:
+        # Audit on every startup. If projection itself is interrupted, the next
+        # startup retries even though the stale run was already marked failed.
+        orphan_recovery = reconcile_fact_play_events_for_ingest_run(
+            source_type="export",
+            run_id="startup-stale-run-recovery",
+        )
+        logger.warning(
+            "event=stale_ingest_orphan_projection recovered=%s remaining=%s facts_touched=%s",
+            orphan_recovery.get("eligible_unlinked_history_before", 0),
+            orphan_recovery.get("eligible_unlinked_history_after", 0),
+            orphan_recovery.get("facts_touched_count", 0),
         )
     logger.info("event=backend_ready sqlite_initialized=true debug_log=%s", log_file_path)
 

@@ -18,11 +18,13 @@ from backend.app.db import (
     update_listenlab_player_play_progress,
 )
 from backend.app.play_event_projector import (
+    audit_eligible_unlinked_history_rows,
     backfill_fact_play_event_release_track_identity,
     delete_projected_podcast_episode_facts,
     delete_projected_unidentifiable_history_facts,
     reconcile_fact_play_events_for_ingest_run,
 )
+from backend.scripts.ingest_history_with_checkpoints import commit_and_project_checkpoint
 from backend.app.release_track_metadata import enrich_track_rows_with_release_metadata
 
 
@@ -48,6 +50,121 @@ class PlayEventProjectionTests(unittest.TestCase):
                     break
                 except PermissionError:
                     time.sleep(0.1)
+
+    def test_checkpoint_resume_globally_recovers_failed_run_orphans_idempotently(self) -> None:
+        insert_ingest_run(
+            run_id="crashed-checkpoint-run",
+            source_type="export",
+            started_at="2026-04-17T18:00:00Z",
+            source_ref="test-crash",
+            status="failed",
+        )
+        insert_ingest_run(
+            run_id="resumed-checkpoint-run",
+            source_type="export",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test-resume",
+        )
+        for run_id, row_key, played_at, track_id in (
+            ("crashed-checkpoint-run", "orphan-from-crash", "2026-04-17T18:10:00Z", "crash-track"),
+            ("resumed-checkpoint-run", "row-from-resume", "2026-04-17T19:10:00Z", "resume-track"),
+        ):
+            insert_raw_spotify_history_observation(
+                ingest_run_id=run_id,
+                source_row_key=row_key,
+                played_at=played_at,
+                ms_played=240000,
+                spotify_track_uri=f"spotify:track:{track_id}",
+                spotify_track_id=track_id,
+                track_name_raw=track_id,
+                artist_name_raw="Checkpoint Artist",
+                album_name_raw="Checkpoint Album",
+                spotify_album_id="checkpoint-album",
+                spotify_artist_ids_json=json.dumps(["checkpoint-artist"]),
+                reason_start="trackdone",
+                reason_end="trackdone",
+                skipped=0,
+                shuffle=0,
+                offline=0,
+                platform="test",
+                conn_country="US",
+                private_session=0,
+                raw_payload_json="{}",
+            )
+
+        self.assertEqual(2, audit_eligible_unlinked_history_rows()["eligible_unlinked_history_count"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            first = commit_and_project_checkpoint(
+                connection,
+                run_id="resumed-checkpoint-run",
+                row_count=1,
+                inserted_count=1,
+                duplicate_count=0,
+                error_count=0,
+            )
+            second = commit_and_project_checkpoint(
+                connection,
+                run_id="resumed-checkpoint-run",
+                row_count=1,
+                inserted_count=1,
+                duplicate_count=0,
+                error_count=0,
+            )
+            run_row = connection.execute(
+                """
+                SELECT row_count, inserted_count, duplicate_count, error_count, last_heartbeat_at
+                FROM ingest_run WHERE id = 'resumed-checkpoint-run'
+                """
+            ).fetchone()
+            link_count = int(connection.execute("SELECT count(*) FROM fact_play_event_history_link").fetchone()[0])
+
+        self.assertEqual(2, first["eligible_unlinked_history_before"])
+        self.assertEqual(0, first["eligible_unlinked_history_after"])
+        self.assertEqual(0, second["eligible_unlinked_history_before"])
+        self.assertEqual(2, link_count)
+        self.assertEqual((1, 1, 0, 0), run_row[:4])
+        self.assertIsNotNone(run_row[4])
+        self.assertEqual(0, audit_eligible_unlinked_history_rows()["eligible_unlinked_history_count"])
+
+    def test_orphan_invariant_excludes_episode_and_unidentifiable_history(self) -> None:
+        insert_ingest_run(
+            run_id="non-music-history-run",
+            source_type="export",
+            started_at="2026-04-17T19:00:00Z",
+            source_ref="test",
+        )
+        for row_key, payload in (
+            ("episode", json.dumps({"spotify_episode_uri": "spotify:episode:episode-1"})),
+            ("unidentifiable", "{}"),
+        ):
+            insert_raw_spotify_history_observation(
+                ingest_run_id="non-music-history-run",
+                source_row_key=row_key,
+                played_at="2026-04-17T19:10:00Z",
+                ms_played=240000,
+                spotify_track_uri=None,
+                spotify_track_id=None,
+                track_name_raw="Podcast title" if row_key == "episode" else None,
+                artist_name_raw=None,
+                album_name_raw=None,
+                spotify_album_id=None,
+                spotify_artist_ids_json=None,
+                reason_start=None,
+                reason_end=None,
+                skipped=0,
+                shuffle=0,
+                offline=0,
+                platform="test",
+                conn_country="US",
+                private_session=0,
+                raw_payload_json=payload,
+            )
+
+        self.assertEqual(0, audit_eligible_unlinked_history_rows()["eligible_unlinked_history_count"])
+        summary = reconcile_fact_play_events_for_ingest_run(
+            source_type="export", run_id="non-music-history-run"
+        )
+        self.assertEqual(0, summary["facts_touched_count"])
 
     def test_reconcile_creates_matched_fact_with_history_timing_precedence(self) -> None:
         run_recent = "run-recent-1"

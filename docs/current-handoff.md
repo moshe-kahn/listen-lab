@@ -25,8 +25,8 @@ Worktree at handoff:
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
 
-## Immediate Next Task: Recover Orphan History Projection
-The user discovered that `Radiohead - Paranoid Android` incorrectly had no qualified listen. A raw-title search found the missing complete play:
+## Completed: Recover Orphan History Projection
+The user discovered that `Radiohead - Paranoid Android` incorrectly had no qualified listen. The missing complete play was:
 - raw history row `70164`
 - `2025-10-08T23:04:12Z`
 - Spotify track `6LgJvl0Xdtc73RJ1mmpotq`
@@ -43,18 +43,27 @@ Root cause:
 - stale-run startup recovery only marked runs failed; it did not project their durable raw checkpoints.
 - current DB audit: 9,980 unprojected raw history rows belonging to failed runs, plus 24 unprojected rows belonging to completed runs.
 
-Implement next:
-1. Add an idempotent orphan-history projection/backfill that selects eligible `raw_spotify_history` rows lacking `fact_play_event_history_link`, regardless of original run status/ID.
-2. Run it against the full local DB, rebuild source-track play counts, and verify Paranoid Android gains the 2025-10-08 listen.
-3. Harden checkpoint ingestion:
-   - project each committed checkpoint or enqueue it durably;
-   - update heartbeat and run counters each checkpoint;
-   - make retry/finalization sweep global eligible orphans, not only rows owned by the current run;
-   - make stale-run recovery enqueue orphan projection;
-   - add a crash-after-checkpoint/resume regression test and an invariant audit for eligible unlinked rows.
-4. Preserve raw rows and canonical idempotency; do not reimport or duplicate source observations.
+Implemented:
+- global eligible-unlinked history projection independent of original run ID/status
+- checkpoint counter/heartbeat persistence followed by projection after every durable raw checkpoint
+- finalization and retries sweep the same global orphan set
+- startup audits and retries orphan projection after stale-run recovery, including after interrupted recovery
+- standalone `backend/scripts/backfill_orphan_history_projection.py`
+- crash/checkpoint/resume idempotency regression and eligible-unlinked invariant regression
+
+Local DB result:
+- 9,586 eligible orphan history rows projected; repeat run projected 0
+- 0 eligible unlinked history rows remain
+- 418 intentionally unprojected raw rows remain: 390 podcast episodes and 28 unidentifiable observations
+- `source_track_play_count_cache` rebuilt to 26,465 rows
+- Paranoid Android raw row `70164` links to fact `80926`
+- source track `6LgJvl0Xdtc73RJ1mmpotq` now has play count `1`, first/last `2025-10-08T23:04:12Z`
+- focused test runs passed: 22 tests total; `git diff --check` passed
 
 Do not confuse this with the proposed listen-threshold change. The current cache uses 65%. The user has not yet confirmed changing it to 50%/four minutes. The newly found 387355 ms event qualifies even under 65%, so orphan recovery should fix this case without changing threshold policy.
+
+## Immediate Next Task: Paranoid Android Relationship Display
+Paranoid Android has an `R` tag but does not show `Also Appears On` in one album context. Switching to the other album shows the first album as a remaster. User's final sentence was incomplete (`but remaster should be ...`), so confirm intended remaster/recording relationship behavior before changing identity logic.
 
 ## Latest UI/Identity Work This Session
 - General album-family inference now supports complete title-prefix expansions and explicit `Disc N` / `Disk N` companion releases.

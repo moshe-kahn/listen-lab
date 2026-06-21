@@ -745,6 +745,53 @@ def _pending_history_candidates_for_run(connection: sqlite3.Connection, run_id: 
     return [dict(row) for row in rows]
 
 
+def _eligible_unlinked_history_candidates(connection: sqlite3.Connection) -> list[dict[str, Any]]:
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        """
+        SELECT
+          h.*,
+          NULL AS existing_fact_id
+        FROM raw_spotify_history h
+        LEFT JOIN fact_play_event_history_link l
+          ON l.raw_spotify_history_id = h.id
+        WHERE l.raw_spotify_history_id IS NULL
+          AND json_extract(h.raw_payload_json, '$.spotify_episode_uri') IS NULL
+          AND COALESCE(
+            NULLIF(trim(h.spotify_track_id), ''),
+            NULLIF(trim(h.spotify_track_uri), ''),
+            NULLIF(trim(h.track_name_raw), '')
+          ) IS NOT NULL
+        ORDER BY h.played_at ASC, h.id ASC
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def audit_eligible_unlinked_history_rows() -> dict[str, int]:
+    """Count raw history rows that are safe to project but have no fact link."""
+    with sqlite3.connect(get_sqlite_db_path(), timeout=30) as connection:
+        eligible_count = int(
+            connection.execute(
+                """
+                SELECT count(*)
+                FROM raw_spotify_history h
+                LEFT JOIN fact_play_event_history_link l
+                  ON l.raw_spotify_history_id = h.id
+                WHERE l.raw_spotify_history_id IS NULL
+                  AND json_extract(h.raw_payload_json, '$.spotify_episode_uri') IS NULL
+                  AND COALESCE(
+                    NULLIF(trim(h.spotify_track_id), ''),
+                    NULLIF(trim(h.spotify_track_uri), ''),
+                    NULLIF(trim(h.track_name_raw), '')
+                  ) IS NOT NULL
+                """
+            ).fetchone()[0]
+            or 0
+        )
+        return {"eligible_unlinked_history_count": eligible_count}
+
+
 def _pending_player_candidates_for_run(connection: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
     connection.row_factory = sqlite3.Row
     rows = connection.execute(
@@ -1052,6 +1099,7 @@ def reconcile_fact_play_events_for_ingest_run(
 
         candidate_started = datetime.now(UTC)
         player_candidates: list[dict[str, Any]] = []
+        eligible_unlinked_history_before = 0
         skipped_history_episode_count = 0
         skipped_history_unidentifiable_count = 0
         if source_type == "spotify_recent":
@@ -1092,7 +1140,10 @@ def reconcile_fact_play_events_for_ingest_run(
                 ).fetchone()[0]
                 or 0
             )
-            history_candidates = _pending_history_candidates_for_run(connection, run_id)
+            # Export recovery is intentionally global. A retry may encounter durable raw
+            # rows owned by a failed checkpoint run, so run-scoped projection strands them.
+            history_candidates = _eligible_unlinked_history_candidates(connection)
+            eligible_unlinked_history_before = len(history_candidates)
             recent_candidates = _recent_counterparts_for_history_rows(
                 connection, history_rows=history_candidates
             )
@@ -1152,11 +1203,8 @@ def reconcile_fact_play_events_for_ingest_run(
             for recent_id in unmatched_run_recent:
                 touched_fact_ids.append(_ensure_fact_for_unmatched_recent(connection, recent_id=recent_id))
         elif source_type == "export":
-            run_history_ids = {
-                int(row["id"]) for row in history_candidates if str(row["ingest_run_id"] or "") == run_id
-            }
-            unmatched_run_history = sorted(run_history_ids & set(match_result.unmatched_history_ids))
-            for history_id in unmatched_run_history:
+            unmatched_history = sorted(set(match_result.unmatched_history_ids))
+            for history_id in unmatched_history:
                 touched_fact_ids.append(_ensure_fact_for_unmatched_history(connection, history_id=history_id))
         else:
             run_player_ids = {
@@ -1174,6 +1222,26 @@ def reconcile_fact_play_events_for_ingest_run(
         commit_started = datetime.now(UTC)
         connection.commit()
         commit_ms = (datetime.now(UTC) - commit_started).total_seconds() * 1000
+        eligible_unlinked_history_after = 0
+        if source_type == "export":
+            eligible_unlinked_history_after = int(
+                connection.execute(
+                    """
+                    SELECT count(*)
+                    FROM raw_spotify_history h
+                    LEFT JOIN fact_play_event_history_link l
+                      ON l.raw_spotify_history_id = h.id
+                    WHERE l.raw_spotify_history_id IS NULL
+                      AND json_extract(h.raw_payload_json, '$.spotify_episode_uri') IS NULL
+                      AND COALESCE(
+                        NULLIF(trim(h.spotify_track_id), ''),
+                        NULLIF(trim(h.spotify_track_uri), ''),
+                        NULLIF(trim(h.track_name_raw), '')
+                      ) IS NOT NULL
+                    """
+                ).fetchone()[0]
+                or 0
+            )
         total_ms = (datetime.now(UTC) - started_total).total_seconds() * 1000
         return {
             "source_type": source_type,
@@ -1187,6 +1255,8 @@ def reconcile_fact_play_events_for_ingest_run(
             "unmatched_player_count": len(player_match_result.unmatched_history_ids),
             "skipped_history_episode_count": skipped_history_episode_count,
             "skipped_history_unidentifiable_count": skipped_history_unidentifiable_count,
+            "eligible_unlinked_history_before": eligible_unlinked_history_before,
+            "eligible_unlinked_history_after": eligible_unlinked_history_after,
             "facts_touched_count": len(set(touched_fact_ids)),
             "play_count_cache_row_count": play_count_cache_summary["row_count"],
             "candidate_collect_ms": candidate_collect_ms,

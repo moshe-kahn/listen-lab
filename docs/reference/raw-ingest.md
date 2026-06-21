@@ -115,6 +115,27 @@ The live playback evidence layer is responsible for:
 - Older `ingest_run` rows remain valid with null values in new timing columns.
 - The same phases remain available in returned summary payloads and logs.
 
+## 2026-06-21 Orphan History Projection Recovery
+
+Checkpointed history imports now preserve projection progress as well as raw rows:
+- each raw checkpoint updates `ingest_run` counters and `last_heartbeat_at`, commits, then runs canonical history projection
+- export projection sweeps all eligible unlinked `raw_spotify_history` rows, regardless of original run ID or status
+- startup audits eligible unlinked history after stale-run recovery and projects any remaining rows
+- retries are idempotent through `fact_play_event_history_link`; raw observations are not reimported or duplicated
+- podcast episodes and rows without track ID, track URI, or track name remain preserved raw and intentionally unprojected
+
+Recovery utility:
+- `python -m backend.scripts.backfill_orphan_history_projection`
+- reports eligible-unlinked counts before and after projection plus projection/cache totals
+
+Local recovery result on 2026-06-21:
+- 9,586 eligible orphan history rows projected; repeat run projected 0
+- 0 eligible orphan rows remained
+- 418 raw unlinked rows remained intentionally: 390 podcast episodes and 28 unidentifiable rows
+- source-track play-count cache rebuilt with 26,465 rows
+- Radiohead `Paranoid Android` source track `6LgJvl0Xdtc73RJ1mmpotq` gained its complete `2025-10-08T23:04:12Z` listen (`387355` ms, `reason_end=trackdone`)
+- current 65% listen threshold was unchanged
+
 ## SQLite Tables
 
 ### `ingest_run`
@@ -535,6 +556,13 @@ Purpose:
   - no duplicate/multi-link violations
   - duplicate-only rerun skips downstream pipeline
   - heartbeat/timing fields are persisted on `ingest_run`
+
+### `backend/scripts/backfill_orphan_history_projection.py`
+Purpose:
+- audit eligible raw history rows missing canonical fact links
+- project all eligible orphans independent of original ingest-run ownership
+- rebuild source-track play counts as part of projection
+- support safe repeated execution without duplicate facts or source observations
 
 ### `backend/scripts/probe_spotify_recent_before.py`
 Purpose:
