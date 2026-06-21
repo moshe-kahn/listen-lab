@@ -327,6 +327,14 @@ For Spotify recent-play API rows:
 
 This is intentionally a fallback, not source truth.
 
+### Listen-count accumulation
+- Canonical facts remain separate provenance events; resumed fragments are not destructively merged.
+- Source-track listen counts accumulate consecutive fragments of the same track when no other track intervenes and the gap is at most four hours.
+- A session counts one listen for every full track duration, plus one when its remaining listened time reaches 65% of the duration.
+- A different track or a gap over four hours starts a new accumulation session.
+- Recent-API-only `default_guess` sessions are capped at one duration because Spotify does not provide actual played time. Exact history or chronology timing can support multiple listens.
+- Events with no known duration retain the conservative 30-second fallback. Legacy events with no `ms_played` remain countable for compatibility.
+
 ### Fallback classification note (2026-04-20)
 - Introduced `fallback_short_transition` to isolate a narrow cohort of problematic fallback rows without changing matcher behavior or canonical precedence.
 - Current assignment split:

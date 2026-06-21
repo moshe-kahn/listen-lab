@@ -95,6 +95,13 @@ class TrackVariantPolicyTests(unittest.TestCase):
         self.assertEqual("edit", radio_edit.family)
         self.assertTrue(radio_edit.groupable_by_default)
 
+    def test_interpret_track_variant_title_treats_rmx_as_remix(self) -> None:
+        interpretation = interpret_track_variant_title("Little By Little - Caribou Rmx")
+
+        self.assertEqual("Little By Little", interpretation.base_title_anchor)
+        self.assertEqual("remix", interpretation.dominant_family)
+        self.assertEqual("attributed_derived_version", interpretation.dominant_semantic_category)
+
     def test_interpret_track_variant_title_detects_dominant_remix_with_secondary_edit(self) -> None:
         interpretation = interpret_track_variant_title("Puente Roto (Quantic Remix) - Radio Edit")
 

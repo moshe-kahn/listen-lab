@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from backend.app.auth.session import _require_local_data_session
+from backend.app.album_family import apply_reviewed_album_family_grouping
 from backend.app.db import query_artist_promotion_skip_log
 from backend.app.artist_identity_repair import (
     build_duplicate_artist_audit,
@@ -52,6 +53,23 @@ async def debug_artists_duplicate_audit(request: Request) -> dict[str, Any]:
 async def debug_artists_promotion_skips(request: Request, limit: int = 100) -> dict[str, Any]:
     _require_local_data_session(request)
     return query_artist_promotion_skip_log(limit=limit)
+
+
+@router.post("/debug/albums/family-review")
+async def debug_albums_family_review(
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    _require_local_data_session(request)
+    release_album_ids = payload.get("release_album_ids") if isinstance(payload.get("release_album_ids"), list) else []
+    canonical_release_album_id = int(payload.get("canonical_release_album_id") or 0)
+    return apply_reviewed_album_family_grouping(
+        release_album_ids=[int(value) for value in release_album_ids if str(value).isdigit()],
+        canonical_release_album_id=canonical_release_album_id,
+        rationale=str(payload.get("rationale") or ""),
+        apply=not dry_run,
+    )
 
 
 @router.post("/debug/artists/duplicate-repair")

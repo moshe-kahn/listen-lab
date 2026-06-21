@@ -37,6 +37,7 @@ function RouteChunkFallback() {
 }
 
 type DashboardSectionsProps = {
+  activityRecentTracks: any;
   activityPreviewTracks: any;
   albumCatalogLookupEnqueueError: any;
   albumCatalogLookupEnqueueLoading: any;
@@ -216,6 +217,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
     allTimeTrackIdCount,
     analysisMode,
     appPage,
+    activityRecentTracks,
     activityPreviewTracks,
     cachedLikedTracks,
     catalogBackfillAlbumTracklistPolicy,
@@ -641,8 +643,8 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 )}
                 leftContent={renderTrackColumn(
                   "recent",
-                  profile.recent_tracks,
-                  profile.recent_tracks_available,
+                  activityRecentTracks,
+                  activityRecentTracks.length > 0 || profile.recent_tracks_available,
                   "Spotify returned no recent listening history.",
                   recentUnavailableCopy(
                     "Recent listening is not available for this session yet. Log out and log back in to grant the updated Spotify permissions.",
@@ -696,7 +698,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
                     )}
                   </>
                 )}
-                previewItemsLeft={previewItems(profile.recent_tracks)}
+                previewItemsLeft={previewItems(activityRecentTracks)}
                 previewItemsRight={previewItems(likedTracksForActivity)}
                 collapsedPreviewItems={previewItems(collapseRecentPreviewTracks(activityPreviewTracks))}
                 isOpen={openSections.recent}

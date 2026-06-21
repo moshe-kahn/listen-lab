@@ -488,6 +488,28 @@ def is_liked_track_cached(user_id: str, spotify_track_id: str) -> bool:
     return row is not None
 
 
+def cached_liked_track_statuses(user_id: str, spotify_track_ids: list[str]) -> dict[str, bool]:
+    normalized_ids = list(dict.fromkeys(
+        str(track_id or "").strip()
+        for track_id in spotify_track_ids
+        if str(track_id or "").strip()
+    ))
+    if not normalized_ids:
+        return {}
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with sqlite_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT spotify_track_id, is_liked
+            FROM spotify_liked_track_cache
+            WHERE user_id = ?
+              AND spotify_track_id IN ({placeholders})
+            """,
+            (str(user_id), *normalized_ids),
+        ).fetchall()
+    return {str(row[0]): bool(row[1]) for row in rows}
+
+
 async def sync_spotify_liked_tracks(
     *,
     user_id: str,

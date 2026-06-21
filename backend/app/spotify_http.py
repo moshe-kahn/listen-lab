@@ -18,11 +18,16 @@ settings = get_settings()
 
 async def _fetch_spotify_profile(access_token: str) -> dict[str, Any]:
     _enforce_spotify_cooldown()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            settings.spotify_me_url,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                settings.spotify_me_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=503, detail="Spotify profile request timed out.") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail="Spotify profile request could not connect.") from exc
 
     if response.status_code == status.HTTP_401_UNAUTHORIZED:
         raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
@@ -70,12 +75,17 @@ async def _fetch_spotify_profile(access_token: str) -> dict[str, Any]:
 
 async def _spotify_get(access_token: str, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     _enforce_spotify_cooldown()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            url,
-            params=params,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                url,
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=503, detail="Spotify data request timed out.") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail="Spotify data request could not connect.") from exc
 
     if response.status_code == status.HTTP_401_UNAUTHORIZED:
         raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -65,9 +66,11 @@ from backend.app.progress_tracker import (
     _progress_key,
     _set_load_progress,
 )
+from backend.app.request_timing import RequestTimingMiddleware
 from backend.app.liked_tracks import (
     SIMULATED_SYNC_FAILURE_REASONS,
     build_simulated_liked_track_sync_failure,
+    cached_liked_track_statuses,
     is_liked_track_cached,
     list_cached_liked_tracks,
     sync_spotify_liked_tracks,
@@ -145,6 +148,9 @@ MIN_RECENT_ALBUM_DISTINCT_TRACKS = 2
 SPOTIFY_RECENT_MAX_ITEMS = 50
 
 app = FastAPI(title="ListenLab API", version="0.1.0")
+BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+LOCAL_PROFILE_PAYLOAD_CACHE_TTL_SECONDS = 15.0
+LOCAL_PROFILE_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -159,6 +165,7 @@ app.add_middleware(
     same_site="lax",
     https_only=False,
 )
+app.add_middleware(RequestTimingMiddleware)
 
 
 @app.on_event("startup")
@@ -168,9 +175,6 @@ async def _ensure_sqlite_db_on_startup() -> None:
     try:
         ensure_sqlite_db()
         apply_pending_migrations()
-        from backend.app.recording_track_candidates import _ensure_generated_recording_track_clusters
-
-        _ensure_generated_recording_track_clusters()
     except sqlite3.OperationalError as exc:
         if "database is locked" in str(exc).lower():
             db_path = get_settings().sqlite_db_path
@@ -184,6 +188,23 @@ async def _ensure_sqlite_db_on_startup() -> None:
                 "Stop stale ListenLab uvicorn/worker processes that are holding the DB, then restart."
             ) from exc
         raise
+    async def drain_dirty_recording_clusters() -> None:
+        await asyncio.sleep(1)
+        from backend.app.recording_track_candidates import drain_generated_recording_track_cluster_dirty
+
+        try:
+            result = await asyncio.to_thread(drain_generated_recording_track_cluster_dirty, limit=50)
+            logger.info(
+                "event=recording_cluster_background_refresh dirty_count=%s refreshed=%s",
+                result.get("dirty_count", 0),
+                result.get("refreshed", False),
+            )
+        except Exception:
+            logger.exception("event=recording_cluster_background_refresh_failed")
+
+    background_task = asyncio.create_task(drain_dirty_recording_clusters())
+    BACKGROUND_TASKS.add(background_task)
+    background_task.add_done_callback(BACKGROUND_TASKS.discard)
     stale_recovery = recover_stale_ingest_runs(stale_after_minutes=60)
     if int(stale_recovery["recovered_count"]) > 0:
         logger.warning(
@@ -229,9 +250,6 @@ def _load_persistent_history_cache(
     history_signature: tuple[tuple[str, int, int], ...] | None,
     recent_window_days: int,
 ) -> dict[str, Any] | None:
-    if not history_signature:
-        return None
-
     cache_path = _persistent_history_cache_path()
     if not cache_path.exists():
         return None
@@ -245,7 +263,7 @@ def _load_persistent_history_cache(
         return None
     if payload.get("schema") != PERSISTENT_HISTORY_CACHE_SCHEMA:
         return None
-    if payload.get("history_signature") != [list(item) for item in history_signature]:
+    if history_signature and payload.get("history_signature") != [list(item) for item in history_signature]:
         return None
     if int(payload.get("recent_window_days", 28)) != recent_window_days:
         return None
@@ -283,8 +301,6 @@ def _load_local_history_insights_cache(
     recent_window_days: int,
     min_track_limit: int,
 ) -> dict[str, Any] | None:
-    if not history_signature:
-        return None
     payload = _read_json_file(_local_history_insights_cache_path())
     if not payload:
         return None
@@ -292,7 +308,7 @@ def _load_local_history_insights_cache(
         return None
     if payload.get("schema") != LOCAL_HISTORY_INSIGHTS_CACHE_SCHEMA:
         return None
-    if payload.get("history_signature") != [list(item) for item in history_signature]:
+    if history_signature and payload.get("history_signature") != [list(item) for item in history_signature]:
         return None
     entries = payload.get("entries") or {}
     entry = entries.get(str(recent_window_days)) or {}
@@ -1864,9 +1880,25 @@ def _build_local_profile_payload(
     display_name: str | None = None,
     email: str | None = None,
     cached_profile_snapshot: dict[str, Any] | None = None,
+    cached_recent_snapshot: dict[str, Any] | None = None,
     progress_hook: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
+    build_started_at = time.perf_counter()
+    phase_started_at = build_started_at
+    current_phase: str | None = None
+
     def _progress(phase: str) -> None:
+        nonlocal current_phase, phase_started_at
+        now = time.perf_counter()
+        if current_phase is not None:
+            logger.info(
+                "event=local_profile_phase_timing phase=%s elapsed_ms=%.1f total_ms=%.1f",
+                current_phase,
+                (now - phase_started_at) * 1_000,
+                (now - build_started_at) * 1_000,
+            )
+        current_phase = phase
+        phase_started_at = now
         if progress_hook:
             progress_hook(phase)
 
@@ -2003,10 +2035,16 @@ def _build_local_profile_payload(
     top_playlists_available = bool((cached_profile_snapshot or {}).get("top_playlists_available")) and bool(
         top_playlists_recent or top_playlists_all_time
     )
-    local_last_synced_at = (cached_profile_snapshot or {}).get("_stored_at")
+    saved_recent_tracks = list((cached_recent_snapshot or {}).get("recent_tracks") or [])
+    saved_recent_stored_at = (cached_recent_snapshot or {}).get("_stored_at")
+    profile_stored_at = (cached_profile_snapshot or {}).get("_stored_at")
+    local_last_synced_at = max(
+        (value for value in (profile_stored_at, saved_recent_stored_at) if isinstance(value, (int, float))),
+        default=None,
+    )
     if owned_playlists_available:
         stale_sections.append("playlists")
-    if recent_likes_available:
+    if recent_likes_available or saved_recent_tracks:
         stale_sections.append("recent_likes")
     if top_playlists_available:
         stale_sections.append("top_playlists")
@@ -2048,8 +2086,8 @@ def _build_local_profile_payload(
         "top_playlists_available": top_playlists_available,
         "profile_url": None,
         "image_url": None,
-        "recent_tracks": top_tracks_recent[:item_limit],
-        "recent_tracks_available": bool(top_tracks_recent),
+        "recent_tracks": saved_recent_tracks or top_tracks_recent[:item_limit],
+        "recent_tracks_available": bool(saved_recent_tracks or top_tracks_recent),
         "owned_playlists": owned_playlists,
         "owned_playlists_available": owned_playlists_available,
         "recent_likes_tracks": recent_likes_tracks,
@@ -2057,7 +2095,59 @@ def _build_local_profile_payload(
         "stale_sections": stale_sections,
         "local_last_synced_at": local_last_synced_at,
     }
-    return _enrich_profile_track_payload_sections(payload)
+    result = _enrich_profile_track_payload_sections(payload)
+    finished_at = time.perf_counter()
+    logger.info(
+        "event=local_profile_phase_timing phase=%s elapsed_ms=%.1f total_ms=%.1f",
+        current_phase or "complete",
+        (finished_at - phase_started_at) * 1_000,
+        (finished_at - build_started_at) * 1_000,
+    )
+    return result
+
+
+def _cached_local_profile_payload(
+    *,
+    cache_user_id: str | None,
+    mode: str,
+    recent_range: str,
+    analysis_mode: str,
+    username: str | None,
+    display_name: str | None,
+    email: str | None,
+    cached_profile_snapshot: dict[str, Any] | None,
+    cached_recent_snapshot: dict[str, Any] | None,
+    progress_hook: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    cache_key = (
+        cache_user_id or "local",
+        mode,
+        recent_range,
+        (cached_profile_snapshot or {}).get("_stored_at"),
+        (cached_recent_snapshot or {}).get("_stored_at"),
+    )
+    now = time.monotonic()
+    cached = LOCAL_PROFILE_PAYLOAD_CACHE.get(cache_key)
+    if cached and now - cached[0] <= LOCAL_PROFILE_PAYLOAD_CACHE_TTL_SECONDS:
+        if progress_hook:
+            progress_hook("loading cached local profile")
+        logger.info("event=local_profile_cache_hit mode=%s recent_range=%s", mode, recent_range)
+        return {**cached[1], "analysis_mode": analysis_mode}
+
+    payload = _build_local_profile_payload(
+        mode=mode,
+        recent_range=recent_range,
+        analysis_mode=analysis_mode,
+        username=username,
+        display_name=display_name,
+        email=email,
+        cached_profile_snapshot=cached_profile_snapshot,
+        cached_recent_snapshot=cached_recent_snapshot,
+        progress_hook=progress_hook,
+    )
+    LOCAL_PROFILE_PAYLOAD_CACHE.clear()
+    LOCAL_PROFILE_PAYLOAD_CACHE[cache_key] = (now, payload)
+    return payload
 
 
 app.include_router(admin_router)
@@ -2279,10 +2369,23 @@ async def me_local_recent(
     item_limit = max(1, min(int(limit), SECTION_PREVIEW_LIMIT))
     _set_load_progress(request, "recent refresh", mode="local-recent")
     try:
-        payload = _build_local_profile_payload(
+        session_user = request.session.get("spotify_user") or {}
+        cached_recent_snapshot = _load_user_recent_snapshot(
+            session_user.get("id"),
+            recent_range,
+            allow_stale=True,
+        )
+        cached_profile_snapshot = _load_user_profile_snapshot(session_user.get("id"))
+        payload = _cached_local_profile_payload(
+            cache_user_id=session_user.get("id"),
             mode="extended",
             recent_range=recent_range,
             analysis_mode="full",
+            username=session_user.get("id"),
+            display_name=session_user.get("display_name"),
+            email=session_user.get("email"),
+            cached_profile_snapshot=cached_profile_snapshot,
+            cached_recent_snapshot=cached_recent_snapshot,
             progress_hook=lambda phase: _set_load_progress(request, phase),
         )
         _set_load_progress(request, "finishing")
@@ -2321,7 +2424,13 @@ async def me_local(
     try:
         session_user = request.session.get("spotify_user") or {}
         cached_profile_snapshot = _load_user_profile_snapshot(session_user.get("id"))
-        payload = _build_local_profile_payload(
+        cached_recent_snapshot = _load_user_recent_snapshot(
+            session_user.get("id"),
+            recent_range,
+            allow_stale=True,
+        )
+        payload = _cached_local_profile_payload(
+            cache_user_id=session_user.get("id"),
             mode=mode,
             recent_range=recent_range,
             analysis_mode=analysis_mode,
@@ -2329,6 +2438,7 @@ async def me_local(
             display_name=session_user.get("display_name"),
             email=session_user.get("email"),
             cached_profile_snapshot=cached_profile_snapshot,
+            cached_recent_snapshot=cached_recent_snapshot,
             progress_hook=lambda phase: _set_load_progress(request, phase),
         )
         _set_load_progress(request, "finishing")
@@ -2404,6 +2514,44 @@ async def me_liked_tracks_contains(
     }
 
 
+@app.post("/me/liked-tracks/contains")
+async def me_liked_tracks_contains_batch(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    raw_track_ids = body.get("spotify_track_ids") if isinstance(body, dict) else None
+    if not isinstance(raw_track_ids, list):
+        raise HTTPException(status_code=400, detail="spotify_track_ids must be a list.")
+    track_ids = list(dict.fromkeys(
+        str(track_id or "").strip()
+        for track_id in raw_track_ids
+        if str(track_id or "").strip()
+    ))[:50]
+    user_id = _require_local_data_session(request)
+    cached_statuses = cached_liked_track_statuses(str(user_id), track_ids)
+    statuses = dict(cached_statuses)
+    unknown_ids = [track_id for track_id in track_ids if track_id not in cached_statuses]
+    if unknown_ids:
+        try:
+            token = _require_token(request)
+            spotify_result = await _spotify_get(
+                token,
+                "https://api.spotify.com/v1/me/tracks/contains",
+                {"ids": ",".join(unknown_ids)},
+            )
+            if isinstance(spotify_result, list):
+                statuses.update({
+                    track_id: bool(spotify_result[index])
+                    for index, track_id in enumerate(unknown_ids)
+                    if index < len(spotify_result)
+                })
+        except HTTPException:
+            pass
+    return {
+        "items": {
+            track_id: bool(statuses.get(track_id, False))
+            for track_id in track_ids
+        },
+    }
+
+
 @app.post("/tracks/release-track-metadata")
 async def tracks_release_track_metadata(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     _require_local_data_session(request)
@@ -2460,13 +2608,36 @@ async def me_recent(
     limit: int = SECTION_PREVIEW_LIMIT,
     force_recent_sync: bool = False,
 ) -> dict[str, Any]:
-    token = _require_token(request)
+    route_started_at = time.perf_counter()
+
+    def log_phase(phase: str, started_at: float) -> float:
+        finished_at = time.perf_counter()
+        logger.info(
+            "event=me_recent_phase_timing phase=%s elapsed_ms=%.1f total_ms=%.1f",
+            phase,
+            (finished_at - started_at) * 1_000,
+            (finished_at - route_started_at) * 1_000,
+        )
+        return finished_at
+
     if recent_range not in {"short_term", "medium_term"}:
         raise HTTPException(status_code=400, detail="Unsupported recent range.")
     item_limit = max(1, min(int(limit), SECTION_PREVIEW_LIMIT))
+    try:
+        token = _require_token(request)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_429_TOO_MANY_REQUESTS:
+            raise
+        logger.warning(
+            "event=me_recent_token_cooldown_local_fallback recent_range=%s limit=%s",
+            recent_range,
+            item_limit,
+        )
+        return await me_local_recent(request, recent_range=recent_range, limit=item_limit)
     recent_window_days = 28 if recent_range == "short_term" else 180
     _set_load_progress(request, "recent refresh", mode="full-recent")
     try:
+        phase_started_at = time.perf_counter()
         try:
             profile = await _fetch_spotify_profile(token)
         except HTTPException as exc:
@@ -2474,16 +2645,19 @@ async def me_recent(
                 raise
             token = await _refresh_spotify_access_token(request)
             profile = await _fetch_spotify_profile(token)
+        phase_started_at = log_phase("spotify_profile", phase_started_at)
         user_id = profile.get("id")
 
         try:
             _set_load_progress(request, "recent listening")
             recent_sync_summary = await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh", force=force_recent_sync)
+            phase_started_at = log_phase("recent_sync", phase_started_at)
             inserted_recent_count = int((recent_sync_summary or {}).get("inserted_count") or 0)
             skipped_recent_sync = bool((recent_sync_summary or {}).get("skipped"))
             if inserted_recent_count == 0:
                 cached_snapshot = _load_user_recent_snapshot(user_id, recent_range)
                 if cached_snapshot:
+                    phase_started_at = log_phase("recent_snapshot_cache", phase_started_at)
                     _set_load_progress(
                         request,
                         "recent sections cache hit (no new plays)" if not skipped_recent_sync else "recent sections cache hit",
@@ -2497,9 +2671,11 @@ async def me_recent(
             )
             recent_tracks = _normalize_recent_tracks_payload_for_route(list(db_recent_tracks_payload.get("items") or []))
             recent_tracks_available = bool(db_recent_tracks_payload.get("available"))
+            phase_started_at = log_phase("recent_db_section", phase_started_at)
 
             _set_load_progress(request, "liked tracks")
             recent_likes_tracks, recent_likes_available = await _fetch_recent_liked_tracks(token, item_limit)
+            phase_started_at = log_phase("recent_likes", phase_started_at)
 
             cached_top_tracks_recent = _get_short_cache(f"top_tracks_{recent_range}", user_id, item_limit)
             _set_load_progress(
@@ -2516,6 +2692,7 @@ async def me_recent(
                     item_limit,
                     (top_tracks_recent, top_tracks_recent_available),
                 )
+            phase_started_at = log_phase("recent_top_tracks", phase_started_at)
 
             cached_top_artists_recent = _get_short_cache(f"top_artists_{recent_range}", user_id, item_limit)
             _set_load_progress(
@@ -2532,6 +2709,7 @@ async def me_recent(
                     item_limit,
                     (top_artists_recent, top_artists_recent_available),
                 )
+            phase_started_at = log_phase("recent_top_artists", phase_started_at)
         except HTTPException as exc:
             if exc.status_code != status.HTTP_429_TOO_MANY_REQUESTS:
                 raise
@@ -2550,6 +2728,7 @@ async def me_recent(
             liked_tracks=recent_likes_tracks,
         )
         top_albums_recent_available = bool(top_albums_recent)
+        phase_started_at = log_phase("recent_album_formulas", phase_started_at)
 
         payload = {
             "recent_range": recent_range,
@@ -2566,6 +2745,7 @@ async def me_recent(
             "recent_likes_available": recent_likes_available,
         }
         payload = _enrich_profile_track_payload_sections(payload)
+        phase_started_at = log_phase("recent_metadata_enrichment", phase_started_at)
         _store_user_recent_snapshot(user_id, recent_range, payload)
         _store_user_profile_snapshot(
             user_id,
@@ -2574,6 +2754,7 @@ async def me_recent(
                 "recent_likes_available": recent_likes_available,
             },
         )
+        log_phase("recent_snapshot_store", phase_started_at)
         _set_load_progress(request, "finishing")
         return payload
     finally:

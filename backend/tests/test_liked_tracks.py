@@ -481,6 +481,41 @@ class LikedTracksSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"spotify_track_id": "missing", "is_liked": False, "source": "cache"}, absent_response.json())
         self.assertEqual(400, blank_response.status_code)
 
+    async def test_batch_contains_reads_known_statuses_without_spotify_calls(self) -> None:
+        upsert_liked_tracks(
+            "user-1",
+            [
+                {
+                    "spotify_track_id": track_id,
+                    "uri": f"spotify:track:{track_id}",
+                    "name": track_id,
+                    "artist_names": ["Artist"],
+                    "album_name": "Album",
+                    "album_spotify_id": "album",
+                    "duration_ms": 120000,
+                    "popularity": None,
+                    "explicit": None,
+                    "liked_at": "2026-05-01T00:00:00Z",
+                }
+                for track_id in ("track-a", "track-b")
+            ],
+            "2026-05-01T00:00:00Z",
+        )
+        mark_missing_liked_tracks_unliked("user-1", {"track-a"}, "2026-05-02T00:00:00Z")
+
+        with patch("backend.app.main._require_local_data_session", return_value="user-1"), patch(
+            "backend.app.main._spotify_get",
+            side_effect=AssertionError("known cached statuses must not call Spotify"),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/me/liked-tracks/contains",
+                json={"spotify_track_ids": ["track-a", "track-b", "track-a"]},
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"items": {"track-a": True, "track-b": False}}, response.json())
+
     async def test_sync_failure_simulation_requires_env_gate_and_debug_header(self) -> None:
         upsert_liked_tracks(
             "user-1",

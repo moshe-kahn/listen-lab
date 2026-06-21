@@ -54,9 +54,15 @@ def _normalize_current_playback(payload: dict[str, Any]) -> dict[str, Any]:
             artist_names = [str(show.get("publisher"))]
 
     album_name = None
+    album_id = None
     album = item.get("album")
     if isinstance(album, dict) and album.get("name"):
         album_name = str(album.get("name"))
+    if isinstance(album, dict) and album.get("id"):
+        album_id = str(album.get("id"))
+
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    context_urls = context.get("external_urls") if isinstance(context.get("external_urls"), dict) else {}
 
     image_url = None
     if isinstance(album, dict):
@@ -86,6 +92,10 @@ def _normalize_current_playback(payload: dict[str, Any]) -> dict[str, Any]:
         "image_url": image_url,
         "artist_names": artist_names,
         "album_name": album_name,
+        "album_id": album_id,
+        "context_type": context.get("type"),
+        "context_uri": context.get("uri"),
+        "context_url": context_urls.get("spotify"),
         "device_id": device.get("id"),
         "progress_ms": payload.get("progress_ms"),
         "duration_ms": item.get("duration_ms"),

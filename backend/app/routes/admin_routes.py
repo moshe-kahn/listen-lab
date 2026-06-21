@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -20,6 +22,7 @@ from backend.app.spotify_recent_sync import maybe_sync_spotify_recent
 from backend.app.spotify_token_store import refresh_access_token_if_needed
 
 router = APIRouter(tags=["admin"])
+logger = logging.getLogger("listenlabs.admin")
 
 
 @router.get("/health")
@@ -69,10 +72,13 @@ async def debug_listening_log(
     limit: int = 50,
     offset: int = 0,
     source_filter: str = "all",
+    liked_only: bool = False,
     force_recent_sync: bool = False,
 ) -> dict[str, Any]:
+    route_started_at = time.perf_counter()
     user_id = _require_local_data_session(request)
     if force_recent_sync:
+        sync_started_at = time.perf_counter()
         token_row = refresh_access_token_if_needed(user_id)
         recent_sync_summary = await maybe_sync_spotify_recent(
             str(token_row["access_token"]),
@@ -81,10 +87,22 @@ async def debug_listening_log(
             limit=50,
             raise_on_error=False,
         )
+        logger.info(
+            "event=listening_log_phase_timing phase=recent_sync elapsed_ms=%.1f",
+            (time.perf_counter() - sync_started_at) * 1_000,
+        )
+    query_started_at = time.perf_counter()
     payload = query_listening_log(
         limit=limit,
         offset=offset,
         source_filter=source_filter if source_filter in {"all", "api", "history", "both"} else "all",
+        user_id=str(user_id),
+        liked_only=liked_only,
+    )
+    logger.info(
+        "event=listening_log_phase_timing phase=query elapsed_ms=%.1f total_ms=%.1f",
+        (time.perf_counter() - query_started_at) * 1_000,
+        (time.perf_counter() - route_started_at) * 1_000,
     )
     result = dict(payload)
     if force_recent_sync:

@@ -9,12 +9,50 @@ from backend.app.config import get_settings
 from backend.app.db import get_spotify_sync_state, raw_play_event_exists
 from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
 from backend.app.spotify_recent_mapper import map_spotify_recent_play_item
+from backend.app.spotify_recent_context import resolve_recent_context_track
 from backend.app.sync_state import get_spotify_recent_sync_start_point, ingest_spotify_recent_rows
 
 logger = logging.getLogger("listenlabs.sync")
 file_logger = logging.getLogger("listenlabs.sync.file")
 settings = get_settings()
 _recent_sync_lock = asyncio.Lock()
+
+
+def _map_recent_item_with_context(item: dict[str, Any]) -> dict[str, Any]:
+    mapped = map_spotify_recent_play_item(item)
+    resolution = resolve_recent_context_track(item)
+    if resolution is None:
+        return mapped
+    contextual_item = dict(item)
+    contextual_track = dict(item.get("track") or {})
+    contextual_album = dict(contextual_track.get("album") or {})
+    contextual_album.update({
+        "id": resolution["spotify_album_id"],
+        "uri": f"spotify:album:{resolution['spotify_album_id']}",
+        "name": resolution["album_name"] or contextual_album.get("name"),
+        "album_type": resolution["album_type"] or contextual_album.get("album_type"),
+        "release_date": resolution["album_release_date"] or contextual_album.get("release_date"),
+        "total_tracks": resolution["album_total_tracks"] or contextual_album.get("total_tracks"),
+        "artists": resolution["album_artists"] or contextual_album.get("artists"),
+        "images": resolution["album_images"] or contextual_album.get("images"),
+    })
+    contextual_track.update({
+        "id": resolution["spotify_track_id"],
+        "uri": resolution["spotify_track_uri"],
+        "album": contextual_album,
+    })
+    contextual_item["track"] = contextual_track
+    contextual = map_spotify_recent_play_item(contextual_item)
+    contextual["raw_payload_json"] = mapped["raw_payload_json"]
+    file_logger.info(
+        "event=spotify_recent_context_track_resolved played_at=%s returned_track_id=%s context_track_id=%s returned_album_id=%s context_album_id=%s",
+        contextual["played_at"],
+        resolution["returned_spotify_track_id"],
+        resolution["spotify_track_id"],
+        resolution["returned_spotify_album_id"],
+        resolution["spotify_album_id"],
+    )
+    return contextual
 
 
 def _parse_played_at(value: str) -> datetime:
@@ -381,7 +419,7 @@ async def sync_spotify_recent_plays(
 
             if page_items:
                 try:
-                    mapped_rows = [map_spotify_recent_play_item(item) for item in page_items]
+                    mapped_rows = [_map_recent_item_with_context(item) for item in page_items]
                 except Exception:
                     _log_recent_play_sync_failed(
                         phase="map",
@@ -447,7 +485,7 @@ async def sync_spotify_recent_plays(
                     break
 
                 try:
-                    mapped_rows = [map_spotify_recent_play_item(item) for item in page_items]
+                    mapped_rows = [_map_recent_item_with_context(item) for item in page_items]
                 except Exception:
                     _log_recent_play_sync_failed(
                         phase="map",

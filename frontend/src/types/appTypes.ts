@@ -5,6 +5,7 @@ export type SessionResponse = {
   display_name: string | null;
   spotify_user_id: string | null;
   email?: string | null;
+  spotify_cooldown_seconds_remaining?: number | null;
 };
 
 export type ProfileProgressResponse = {
@@ -405,6 +406,7 @@ export type ListeningLogResponse = {
   limit: number;
   offset: number;
   source_filter: "all" | "api" | "history" | "both";
+  liked_only?: boolean;
 };
 
 export type MergedTrackSourceFilter = "all" | "recent" | "history" | "both";
@@ -520,6 +522,15 @@ export type RecordingTrackCandidateMember = {
   artist: string;
   artists?: TrackArtistEntry[];
   album: string;
+  album_versions?: Array<{
+    release_album_id: number | null;
+    name: string | null;
+    spotify_album_id: string | null;
+    is_direct_source_album: number | boolean | null;
+    image_url: string | null;
+    release_date: string | null;
+    album_type: string | null;
+  }>;
   release_album_ids?: number[];
   spotify_album_ids?: string[];
   album_image_urls?: string[];
@@ -1772,6 +1783,10 @@ export type CurrentPlaybackSnapshot = {
   image_url: string | null;
   artist_names: string[];
   album_name: string | null;
+  album_id?: string | null;
+  context_type?: string | null;
+  context_uri?: string | null;
+  context_url?: string | null;
   device_id: string | null;
   progress_ms: number | null;
   duration_ms: number | null;
@@ -1831,6 +1846,8 @@ export type AlbumTrackEntry = {
   name: string;
   uri: string | null;
   durationMs: number | null;
+  discNumber: number | null;
+  trackNumber: number | null;
   artistName: string | null;
   artists?: TrackArtistEntry[];
   sourceTrack: RecentTrack | null;
@@ -1840,6 +1857,12 @@ export type AlbumTrackEntry = {
   recordingLastPlayedAt?: string | null;
   recordingPlayCount?: number;
   recordingHistoryAvailable?: boolean;
+  familyExclusive: boolean;
+  familyAvailableVersions: AlbumFamilyVersion[];
+  familySwitchAlbumId: string | null;
+  familySwitchLabel: string | null;
+  familyHasEditionRelation: boolean;
+  familyHasExternalRecordingRelation: boolean;
   playCount: number;
   isSelected: boolean;
   isTopTrack: boolean;
@@ -1850,6 +1873,28 @@ export type AlbumTrackEntry = {
   hasReleaseTrackSiblings: boolean;
   releaseTrackClusterCandidateType: string | null;
   releaseTrackClusterRelationshipKind: string | null;
+};
+
+export type AlbumFamilyVersion = {
+  release_album_id: number;
+  spotify_album_id: string;
+  name: string;
+  label: string;
+  menu_label?: string | null;
+  release_year: number | null;
+  total_tracks: number | null;
+  total_duration_ms: number | null;
+  image_url: string | null;
+  is_selected: boolean;
+  is_canonical: boolean;
+};
+
+export type AlbumFamilyContext = {
+  album_family_id: number;
+  core_name: string;
+  selected_spotify_album_id: string;
+  release_album_ids: number[];
+  versions: AlbumFamilyVersion[];
 };
 
 export type SpotifyPlayerInstance = {
@@ -1887,7 +1932,8 @@ export type RecordingRelationRows = {
   recording: RecordingTrackCandidateMember[];
   songFamily: Array<{
     member: RecordingTrackCandidateMember;
-    badge: "Original" | "Cover" | "Remix" | "Version" | "Rework" | "Sibling Cover" | "Sibling Remix";
+    badge: "Original" | "Cover" | "Remix" | "Version" | "Rework" | "Live" | "Demo" | "Acoustic" | "Instrumental" | "Sibling Cover" | "Sibling Remix";
+    qualifier: string | null;
     originalArtists: TrackArtistEntry[];
   }>;
 };

@@ -397,7 +397,7 @@ def classify_label_families(label: str | None) -> tuple[TrackVariantComponent, .
         component = _family_policy_component("cover", label, normalized)
         if component is not None:
             components.append(component)
-    if "remix" in normalized:
+    if "remix" in normalized or re.search(r"\brmx\b", normalized):
         component = _family_policy_component("remix", label, normalized)
         if component is not None:
             components.append(component)

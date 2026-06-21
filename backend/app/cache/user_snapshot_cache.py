@@ -15,6 +15,14 @@ USER_RECENT_CACHE_MAX_AGE_SECONDS = 60 * 60 * 12
 USER_PROFILE_SNAPSHOT_MAX_AGE_SECONDS = 60 * 60 * 24 * 14
 
 
+def _snapshot_user_entry(users: dict[str, Any], user_id: str | None) -> dict[str, Any]:
+    if user_id:
+        return users.get(str(user_id)) or {}
+    if len(users) == 1:
+        return next(iter(users.values())) or {}
+    return {}
+
+
 def _load_user_recent_cache() -> dict[str, Any]:
     payload = _read_json_file(_user_recent_cache_path()) or {}
     if payload.get("cache_version") != USER_RECENT_CACHE_VERSION:
@@ -71,18 +79,17 @@ def _store_user_profile_snapshot(user_id: str | None, snapshot: dict[str, Any]) 
 
 
 def _load_user_profile_snapshot(user_id: str | None) -> dict[str, Any] | None:
-    if not user_id:
-        return None
     payload = _load_user_profile_snapshot_cache()
     users = payload.get("users") or {}
-    entry = users.get(str(user_id)) or {}
+    entry = _snapshot_user_entry(users, user_id)
     if not entry:
         return None
     stored_at = float(entry.get("stored_at", 0.0))
     if time.time() - stored_at > USER_PROFILE_SNAPSHOT_MAX_AGE_SECONDS:
-        users.pop(str(user_id), None)
-        payload["users"] = users
-        _save_user_profile_snapshot_cache(payload)
+        if user_id:
+            users.pop(str(user_id), None)
+            payload["users"] = users
+            _save_user_profile_snapshot_cache(payload)
         return None
     snapshot = entry.get("snapshot")
     if not isinstance(snapshot, dict):
@@ -122,21 +129,34 @@ def _store_user_recent_snapshot(
 def _load_user_recent_snapshot(
     user_id: str | None,
     recent_range: str,
+    *,
+    allow_stale: bool = False,
 ) -> dict[str, Any] | None:
-    if not user_id:
-        return None
     payload = _load_user_recent_cache()
     users = payload.get("users") or {}
-    entry = users.get(str(user_id)) or {}
+    entry = _snapshot_user_entry(users, user_id)
     if not entry:
         return None
     stored_at = float(entry.get("stored_at", 0.0))
-    if time.time() - stored_at > USER_RECENT_CACHE_MAX_AGE_SECONDS:
-        users.pop(str(user_id), None)
-        payload["users"] = users
-        _save_user_recent_cache(payload)
+    if time.time() - stored_at > USER_RECENT_CACHE_MAX_AGE_SECONDS and not allow_stale:
+        if user_id:
+            users.pop(str(user_id), None)
+            payload["users"] = users
+            _save_user_recent_cache(payload)
         return None
     if entry.get("recent_range") != recent_range:
         return None
     snapshot = entry.get("snapshot")
-    return snapshot if isinstance(snapshot, dict) else None
+    return {**snapshot, "_stored_at": stored_at} if isinstance(snapshot, dict) else None
+
+
+def _invalidate_user_recent_snapshot(user_id: str | None) -> bool:
+    if not user_id:
+        return False
+    payload = _load_user_recent_cache()
+    users = payload.get("users") or {}
+    removed = users.pop(str(user_id), None) is not None
+    if removed:
+        payload["users"] = users
+        _save_user_recent_cache(payload)
+    return removed

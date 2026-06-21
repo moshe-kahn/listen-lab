@@ -92,6 +92,7 @@ import type {
   PlayerQueueTrack,
   SpotifyPlayerState,
   AlbumTrackEntry,
+  AlbumFamilyContext,
   SpotifyPlayerInstance,
   PopupTrackPlaybackOptions,
   PlaybackActionRequest
@@ -99,6 +100,8 @@ import type {
 import {
   DEFAULT_PLAYER_VOLUME,
   EXPERIENCE_MODE_STORAGE_KEY,
+  SPOTIFY_COOLDOWN_DURATION_STORAGE_KEY,
+  SPOTIFY_COOLDOWN_UNTIL_STORAGE_KEY,
   IDENTITY_AUDIT_AMBIGUOUS_VISIBLE_STEP,
   INITIAL_OPEN_SECTIONS,
   INITIAL_SECTION_PAGES,
@@ -139,8 +142,9 @@ import {
   fetchIdentityAuditSavedSubmissionById,
   fetchIdentityAuditSavedSubmissionDryRun,
   fetchAllLikedTracks,
+  fetchActivityListeningLog,
   fetchArtistAlbumEvidence,
-  fetchLikedTrackContains,
+  fetchLikedTracksContains,
   fetchRecordingTrackCandidateByReleaseTrack,
   fetchReleaseTrackDetail,
   fetchReleaseTrackMetadata,
@@ -185,6 +189,7 @@ import {
 } from "./components/identityAudit/IssueFeed";
 import { FullAnalysisOverlay, LoadingScreen } from "./components/loading/LoadingScreens";
 import { PlaybackActionMenu, type PlaybackAction } from "./components/playback/PlaybackActionMenu";
+import { SpotifyCooldownPanel } from "./components/profile/SpotifyCooldownPanel";
 import { RecentDebugPage } from "./components/recentDebug/RecentDebugPage";
 import { SearchLookupPage } from "./components/searchLookup/SearchLookupPage";
 import {
@@ -216,7 +221,6 @@ import {
   collapseTrackPreviewAlbums,
   firstArtistFromRecentTrack,
   formatCooldownCopy,
-  formatCooldownTimerLabel,
   formatCompactRelativeAge,
   formatDebugTimestamp,
   formatDurationMs,
@@ -246,6 +250,8 @@ const DetailPreviewModal = lazy(() => import("./components/dashboard/DetailPrevi
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const ALBUM_TRACKS_FETCH_TIMEOUT_MS = 15_000;
+let recentSectionsRequestInFlight: Promise<RecentSectionResponse> | null = null;
+let recentSectionsRequestBlockedUntilMs = 0;
 function artistEntriesFromText(value: string | null | undefined): TrackArtistEntry[] {
   return String(value ?? "")
     .split(",")
@@ -361,6 +367,9 @@ function albumContextTagLabel(albumType: string | null | undefined, albumName: s
   if (type === "compilation") {
     return "Compilation";
   }
+  if (/\bremaster(?:ed)?\b/.test(name)) {
+    return "Remaster";
+  }
   return null;
 }
 
@@ -417,8 +426,14 @@ export function App() {
   const [releaseTrackMetadataCheckedIds, setReleaseTrackMetadataCheckedIds] = useState<Record<string, true>>({});
   const [loadingHistoryRecompute, setLoadingHistoryRecompute] = useState(false);
   const [profileLoadAttempted, setProfileLoadAttempted] = useState(false);
-  const [reloadCooldownUntil, setReloadCooldownUntil] = useState<number | null>(null);
-  const [reloadCooldownDurationMs, setReloadCooldownDurationMs] = useState<number>(60_000);
+  const [reloadCooldownUntil, setReloadCooldownUntil] = useState<number | null>(() => {
+    const stored = Number(window.localStorage.getItem(SPOTIFY_COOLDOWN_UNTIL_STORAGE_KEY));
+    return Number.isFinite(stored) && stored > 0 ? stored : null;
+  });
+  const [reloadCooldownDurationMs, setReloadCooldownDurationMs] = useState<number>(() => {
+    const stored = Number(window.localStorage.getItem(SPOTIFY_COOLDOWN_DURATION_STORAGE_KEY));
+    return Number.isFinite(stored) && stored > 0 ? stored : 60_000;
+  });
   const [reloadCountdownNow, setReloadCountdownNow] = useState(Date.now());
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(INITIAL_OPEN_SECTIONS);
   const [sectionPages, setSectionPages] = useState<Record<SectionKey, number>>(INITIAL_SECTION_PAGES);
@@ -427,7 +442,6 @@ export function App() {
   const [experimentalMenuOpen, setExperimentalMenuOpen] = useState(false);
   const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [playerMenuOpen, setPlayerMenuOpen] = useState(false);
-  const [rateLimitMenuOpen, setRateLimitMenuOpen] = useState(false);
   const [selectedPreview, setSelectedPreview] = useState<PreviewItem | null>(null);
   const [selectedPreviewReleaseTrackDetail, setSelectedPreviewReleaseTrackDetail] = useState<ReleaseTrackDetailResponse | null>(null);
   const [selectedPreviewReleaseTrackDetailLoading, setSelectedPreviewReleaseTrackDetailLoading] = useState(false);
@@ -443,6 +457,7 @@ export function App() {
   const [albumTrackEntriesLoading, setAlbumTrackEntriesLoading] = useState(false);
   const [albumTrackEntriesError, setAlbumTrackEntriesError] = useState<string | null>(null);
   const [albumTrackEntriesPartial, setAlbumTrackEntriesPartial] = useState(false);
+  const [selectedAlbumFamilyContext, setSelectedAlbumFamilyContext] = useState<AlbumFamilyContext | null>(null);
   const [albumTrackSpotifyFetchRequest, setAlbumTrackSpotifyFetchRequest] = useState<{
     albumId: string | null;
     trackId: string | null;
@@ -511,6 +526,7 @@ export function App() {
   const [recentRange, setRecentRange] = useState<RecentRange>("short_term");
   const [recentCompletionFilter, setRecentCompletionFilter] = useState<RecentCompletionFilter>("listened");
   const [recentLikedOnly, setRecentLikedOnly] = useState(false);
+  const [likedActivityTracks, setLikedActivityTracks] = useState<RecentTrack[] | null>(null);
   const [recentTaggedOnly, setRecentTaggedOnly] = useState(false);
   const [trackRankingMode, setTrackRankingMode] = useState<TrackRankingMode>("plays");
   const [trackRankingRefreshPending, setTrackRankingRefreshPending] = useState(false);
@@ -686,7 +702,6 @@ export function App() {
   const experimentalMenuRef = useRef<HTMLDivElement | null>(null);
   const playerMenuRef = useRef<HTMLDivElement | null>(null);
   const homeQueueListRef = useRef<HTMLDivElement | null>(null);
-  const rateLimitMenuRef = useRef<HTMLDivElement | null>(null);
   const spotifyPlayerRef = useRef<SpotifyPlayerInstance | null>(null);
   const spotifyDeviceIdRef = useRef<string | null>(null);
   const previewStopTimerRef = useRef<number | null>(null);
@@ -701,7 +716,7 @@ export function App() {
   } | null>(null);
   const currentPlayerVolumeRef = useRef(DEFAULT_PLAYER_VOLUME);
   const loadedAlbumTracksAlbumIdRef = useRef<string | null>(null);
-  const albumTrackRowsCacheRef = useRef<Map<string, { albumId: string; rows: AlbumTrackEntry[]; partial: boolean }>>(new Map());
+  const albumTrackRowsCacheRef = useRef<Map<string, { albumId: string; rows: AlbumTrackEntry[]; partial: boolean; family: AlbumFamilyContext | null }>>(new Map());
   const albumTrackSpotifyAutoFetchAttemptedRef = useRef<Set<string>>(new Set());
   const loadedHomeAlbumTracksAlbumIdRef = useRef<string | null>(null);
   const albumTrackListRef = useRef<HTMLUListElement | null>(null);
@@ -715,10 +730,20 @@ export function App() {
   const autoAdvanceTrackUriRef = useRef<string | null>(null);
   const liveProgressAnchorRef = useRef<{ baseProgressMs: number; receivedAtMs: number; durationMs: number } | null>(null);
   const liveEndRefreshRequestedRef = useRef(false);
+  const liveListenQualificationRef = useRef<{
+    trackId: string | null;
+    lastProgressMs: number;
+    eventId: string | null;
+    submitted: boolean;
+  }>({ trackId: null, lastProgressMs: 0, eventId: null, submitted: false });
   const profileLoadInFlightRef = useRef(false);
   const extendedLoadInFlightRef = useRef(false);
   const quickProfileLoadInFlightRef = useRef(false);
   const quickRecentAutoAttemptRef = useRef<string | null>(null);
+  const recentSectionLoadInFlightRef = useRef(false);
+  const listeningLogLoadInFlightRef = useRef(false);
+  const releaseTrackMetadataInFlightIdsRef = useRef<Set<string>>(new Set());
+  const targetedLikedInFlightIdsRef = useRef<Set<string>>(new Set());
   const hasPremiumPlayback = profile?.product?.toLowerCase() === "premium";
   const usingLivePlaybackSnapshot = Boolean(livePlaybackSnapshot);
   const livePlaybackTrackSummary: PlayerTrackSummary | null = useMemo(() => (livePlaybackSnapshot
@@ -751,27 +776,12 @@ export function App() {
   const liveReadOnlyMode = usingLivePlaybackSnapshot && !livePlaybackOnListenLabDevice && !liveControlOverrideActive;
   const startupPlaybackReady = experienceMode === "local"
     || !hasPremiumPlayback
-    || (
-      livePlaybackProbeComplete
-      && (playerRecentTracksLoadAttempted || Boolean(currentTrack || livePlaybackSnapshot))
-      && playerQueueLoadAttempted
-      && !playerRecentTracksLoading
-      && !playerQueueLoading
-    );
+    || livePlaybackProbeComplete;
   const startupRecentReady = experienceMode === "local"
     || analysisMode !== "quick"
-    || Boolean(
-      profile
-      && (
-        profile.recent_tracks_available
-        || profile.recent_likes_available
-        || profile.recent_top_tracks_available
-        || profile.recent_top_artists_available
-        || profile.recent_top_albums_available
-      ),
-    )
-    || (Boolean(profile) && recentSectionLoadAttempted && recentSectionStartupError && !loadingRecentSection);
-  const startupReadyForDashboard = Boolean(profile) && startupPlaybackReady && startupRecentReady;
+    || Boolean(profile?.recent_tracks_available)
+    || (Boolean(profile) && recentSectionLoadAttempted && !loadingRecentSection);
+  const startupReadyForDashboard = Boolean(profile && startupPlaybackReady && startupRecentReady);
   useEffect(() => {
     if (startupReadyForDashboard && !startupDashboardReleased) {
       setStartupDashboardReleased(true);
@@ -836,6 +846,31 @@ export function App() {
     }
     return ids;
   }, [likedTracksForActivitySource]);
+  const activityRecentTracks = recentLikedOnly && likedActivityTracks !== null
+    ? likedActivityTracks
+    : (profile?.recent_tracks ?? []);
+  useEffect(() => {
+    if (!recentLikedOnly) {
+      setLikedActivityTracks(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setLikedActivityTracks(null);
+    void fetchActivityListeningLog(50, 0, true)
+      .then((payload) => {
+        if (!cancelled) {
+          setLikedActivityTracks(payload.items ?? []);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setStatusMessage(formatUiErrorMessage(error, "Failed to load liked listening history."));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [recentLikedOnly]);
   const releaseTrackIdForSpotifyTrackId = (trackId: string | null | undefined) => {
     if (!trackId) {
       return null;
@@ -1580,7 +1615,7 @@ export function App() {
     reloadCooldownUntil == null ? 0 : Math.max(0, Math.ceil((reloadCooldownUntil - reloadCountdownNow) / 1000));
   const reloadReady = reloadSecondsRemaining <= 0;
   const spotifyCooldownActive = reloadCooldownUntil != null && !reloadReady;
-  const showRateLimitReload = experienceMode === "full" && (spotifyCooldownActive || Boolean(statusMessage && statusMessage.includes("rate-limiting")));
+  const showRateLimitReload = reloadCooldownUntil != null || Boolean(statusMessage && statusMessage.includes("rate-limiting"));
   const reloadProgress =
     reloadCooldownUntil == null
       ? 1
@@ -1665,7 +1700,7 @@ export function App() {
     if (appPage !== "recentDebug" || !profile || listeningLogLoaded || listeningLogLoading) {
       return;
     }
-    void loadListeningLogBatch(true, true);
+    void loadListeningLogBatch(true, false);
   }, [appPage, listeningLogLoaded, listeningLogLoading, profile, recentDebugSourceFilter]);
 
   useEffect(() => {
@@ -2248,6 +2283,98 @@ export function App() {
   }, [livePlaybackSnapshot?.is_playing, usingLivePlaybackSnapshot]);
 
   useEffect(() => {
+    const snapshot = livePlaybackSnapshot;
+    const trackId = snapshot?.item_id ?? spotifyTrackIdFromUri(snapshot?.uri ?? null);
+    const durationMs = Math.max(0, Number(snapshot?.duration_ms ?? 0));
+    const progressMs = Math.max(0, Number(liveDerivedProgressMs));
+    if (
+      !snapshot
+      || !trackId
+      || durationMs <= 0
+      || !snapshot.is_playing
+      || livePlaybackOnListenLabDevice
+      || activePlayerListenEventId != null
+    ) {
+      return;
+    }
+
+    const state = liveListenQualificationRef.current;
+    if (state.trackId !== trackId || progressMs + 10_000 < state.lastProgressMs) {
+      state.trackId = trackId;
+      state.lastProgressMs = progressMs;
+      state.eventId = crypto.randomUUID();
+      state.submitted = false;
+    } else {
+      state.lastProgressMs = progressMs;
+    }
+    if (state.submitted || progressMs < durationMs * 0.65) {
+      return;
+    }
+
+    state.submitted = true;
+    void (async () => {
+      const verificationResponse = await fetch(`${apiBaseUrl}/auth/current-playback`, { credentials: "include" });
+      if (!verificationResponse.ok) {
+        throw new Error(`Playback verification failed (${verificationResponse.status}).`);
+      }
+      const verification = (await verificationResponse.json()) as CurrentPlaybackResponse;
+      const verifiedSnapshot = verification.status === "ok" && verification.has_playback ? verification.snapshot ?? null : null;
+      const verifiedTrackId = verifiedSnapshot?.item_id ?? spotifyTrackIdFromUri(verifiedSnapshot?.uri ?? null);
+      const verifiedDurationMs = Math.max(0, Number(verifiedSnapshot?.duration_ms ?? 0));
+      const verifiedProgressMs = Math.max(0, Number(verifiedSnapshot?.progress_ms ?? 0));
+      if (
+        !verifiedSnapshot
+        || verifiedTrackId !== trackId
+        || !verifiedSnapshot.is_playing
+        || verifiedDurationMs <= 0
+        || verifiedProgressMs < verifiedDurationMs * 0.65
+      ) {
+        state.submitted = false;
+        if (verifiedSnapshot) {
+          setLivePlaybackSnapshot(verifiedSnapshot);
+        }
+        return;
+      }
+      setLivePlaybackSnapshot(verifiedSnapshot);
+      const qualifiedAt = new Date().toISOString();
+      const playedAt = new Date(Date.now() - verifiedProgressMs).toISOString();
+      const response = await fetch(`${apiBaseUrl}/auth/player-listen-event`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event_id: state.eventId,
+          track_uri: verifiedSnapshot.uri,
+          track_id: trackId,
+          track_name: verifiedSnapshot.name,
+          artist_name: verifiedSnapshot.artist_names.join(", "),
+          album_name: verifiedSnapshot.album_name,
+          album_id: verifiedSnapshot.album_id,
+          duration_ms: verifiedDurationMs,
+          progress_ms: verifiedProgressMs,
+          ms_played_confidence: "listened",
+          played_at: playedAt,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Listen qualification failed (${response.status}).`);
+      }
+      const payload = (await response.json()) as { listen_qualified?: boolean };
+      if (payload.listen_qualified) {
+        await refreshQualifiedListenState(
+          trackId,
+          verifiedSnapshot.release_track_id ?? releaseTrackIdForSpotifyTrackId(trackId),
+          qualifiedAt,
+          verifiedProgressMs,
+          verifiedDurationMs,
+        );
+      }
+    })().catch(() => {
+      state.submitted = false;
+    });
+  }, [activePlayerListenEventId, liveDerivedProgressMs, livePlaybackOnListenLabDevice, livePlaybackSnapshot]);
+
+  useEffect(() => {
     if (!recentIngestCallbackPending) {
       return;
     }
@@ -2259,8 +2386,19 @@ export function App() {
   }, [experienceMode]);
 
   useEffect(() => {
+    if (reloadCooldownUntil == null) {
+      window.localStorage.removeItem(SPOTIFY_COOLDOWN_UNTIL_STORAGE_KEY);
+      window.localStorage.removeItem(SPOTIFY_COOLDOWN_DURATION_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(SPOTIFY_COOLDOWN_UNTIL_STORAGE_KEY, String(reloadCooldownUntil));
+    window.localStorage.setItem(SPOTIFY_COOLDOWN_DURATION_STORAGE_KEY, String(reloadCooldownDurationMs));
+  }, [reloadCooldownDurationMs, reloadCooldownUntil]);
+
+  useEffect(() => {
     if (
       experienceMode === "local"
+      && session != null
       && !profile
       && !loadingProfile
       && !profileLoadAttempted
@@ -2296,7 +2434,6 @@ export function App() {
       || experienceMode === "local"
       || !profile
       || analysisMode !== "quick"
-      || !startupPlaybackReady
       || loadingProfile
       || loadingExtendedProfile
       || loadingRecentSection
@@ -2325,17 +2462,22 @@ export function App() {
     recentRange,
     session,
     spotifyCooldownActive,
-    startupPlaybackReady,
   ]);
 
   useEffect(() => {
-    quickRecentAutoAttemptRef.current = null;
     setPlayerRecentTracksLoadAttempted(false);
     setPlayerQueueLoadAttempted(false);
     setRecentSectionLoadAttempted(false);
     setRecentSectionStartupError(false);
     setStartupDashboardReleased(false);
   }, [session?.spotify_user_id]);
+
+  useEffect(() => {
+    if (!profile) {
+      quickRecentAutoAttemptRef.current = null;
+      recentSectionLoadInFlightRef.current = false;
+    }
+  }, [profile]);
 
   useEffect(() => {
     if (
@@ -2349,6 +2491,7 @@ export function App() {
       || loadingRecentSection
       || spotifyCooldownActive
       || quickProfileLoadInFlightRef.current
+      || !startupDashboardReleased
     ) {
       return;
     }
@@ -2376,6 +2519,7 @@ export function App() {
     session?.authenticated,
     spotifyCooldownActive,
     startupPlaybackReady,
+    startupDashboardReleased,
     startupRecentReady,
   ]);
 
@@ -2421,12 +2565,6 @@ export function App() {
   }, [reloadCooldownUntil]);
 
   useEffect(() => {
-    if (!showRateLimitReload) {
-      setRateLimitMenuOpen(false);
-    }
-  }, [showRateLimitReload]);
-
-  useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
       if (!profileMenuRef.current?.contains(event.target as Node)) {
         setProfileMenuOpen(false);
@@ -2440,9 +2578,6 @@ export function App() {
       }
       if (!playerMenuRef.current?.contains(event.target as Node)) {
         setPlayerMenuOpen(false);
-      }
-      if (!rateLimitMenuRef.current?.contains(event.target as Node)) {
-        setRateLimitMenuOpen(false);
       }
     }
 
@@ -2471,7 +2606,6 @@ export function App() {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setSelectedPreview(null);
-        setRateLimitMenuOpen(false);
         setExperimentalMenuOpen(false);
       }
     }
@@ -2495,6 +2629,7 @@ export function App() {
       setAlbumTrackEntriesLoading(false);
       setAlbumTrackEntriesError(null);
       setAlbumTrackEntriesPartial(false);
+      setSelectedAlbumFamilyContext(null);
       setAlbumTrackSpotifyFetchPending(false);
       return () => {
         cancelled = true;
@@ -2511,9 +2646,13 @@ export function App() {
         ?? null
       )
       : null;
+    const selectedReleaseTrackId = selectedPreview.kind === "track" ? selectedPreview.releaseTrackId ?? null : null;
     const initialAlbumId = (
       selectedPreview.kind === "track"
-        ? selectedPreviewReleasePlaybackSourceVersion?.album_id ?? albumIdFromPreview(selectedPreview)
+        ? selectedPreview.albumId
+          ?? selectedPreview.sourceAlbumId
+          ?? selectedPreviewReleasePlaybackSourceVersion?.album_id
+          ?? albumIdFromPreview(selectedPreview)
         : albumIdFromPreview(selectedPreview)
     );
     if (!initialAlbumId && !selectedTrackId) {
@@ -2529,6 +2668,7 @@ export function App() {
       setAlbumTrackEntriesLoading(false);
       setAlbumTrackEntriesError("Album track list is unavailable for this item.");
       setAlbumTrackEntriesPartial(false);
+      setSelectedAlbumFamilyContext(null);
       setAlbumTrackSpotifyFetchPending(false);
       return () => {
         cancelled = true;
@@ -2547,23 +2687,31 @@ export function App() {
       : selectedTrackId ? `track:${selectedTrackId}` : null;
     const cachedAlbumTrackRowsCandidate = !shouldForceSpotifyFetch
       ? (
-        (initialAlbumId ? albumTrackRowsCacheRef.current.get(`album:${initialAlbumId}`) : null)
-        ?? (selectedTrackId ? albumTrackRowsCacheRef.current.get(`track:${selectedTrackId}`) : null)
+        (initialAlbumId
+          ? albumTrackRowsCacheRef.current.get(`album:${initialAlbumId}`)
+          : selectedTrackId ? albumTrackRowsCacheRef.current.get(`track:${selectedTrackId}`) : null)
         ?? null
       )
       : null;
-    const cachedAlbumTrackRows = cachedAlbumTrackRowsCandidate?.rows.every((row) => row.recordingHistoryAvailable === true)
+    const cachedAlbumTrackRows = cachedAlbumTrackRowsCandidate?.rows.every((row) => (
+      row.recordingHistoryAvailable === true
+      && (activePreview.kind !== "track" || !row.id || row.releaseTrackId != null)
+    ))
       ? cachedAlbumTrackRowsCandidate
       : null;
     if (cachedAlbumTrackRows && cachedAlbumTrackRows.rows.length > 0) {
       setAlbumTrackEntries(cachedAlbumTrackRows.rows.map((row) => ({
         ...row,
-        isSelected: Boolean(selectedTrackId && row.id && selectedTrackId === row.id),
+        isSelected: Boolean(
+          (selectedTrackId && row.id && selectedTrackId === row.id)
+          || (selectedReleaseTrackId && row.releaseTrackId === selectedReleaseTrackId),
+        ),
       })));
       loadedAlbumTracksAlbumIdRef.current = cachedAlbumTrackRows.albumId;
       setAlbumTrackEntriesLoading(false);
       setAlbumTrackEntriesError(null);
       setAlbumTrackEntriesPartial(cachedAlbumTrackRows.partial);
+      setSelectedAlbumFamilyContext(cachedAlbumTrackRows.family);
       setAlbumTrackSpotifyFetchPending(false);
       return () => {
         cancelled = true;
@@ -2577,7 +2725,10 @@ export function App() {
     if (albumAlreadyLoaded) {
       setAlbumTrackEntries((current) => current.map((row) => ({
         ...row,
-        isSelected: Boolean(selectedTrackId && row.id && selectedTrackId === row.id),
+        isSelected: Boolean(
+          (selectedTrackId && row.id && selectedTrackId === row.id)
+          || (selectedReleaseTrackId && row.releaseTrackId === selectedReleaseTrackId),
+        ),
       })));
       setAlbumTrackEntriesLoading(false);
       setAlbumTrackEntriesError(null);
@@ -2601,6 +2752,9 @@ export function App() {
           params.set("track_id", selectedTrackId);
         }
         params.set("promote_identity", "true");
+        if (activePreview.kind === "track") {
+          params.set("include_family", "true");
+        }
         const activeTrackUri = activePreview.trackUri ?? selectedPreviewReleasePlaybackSourceVersion?.uri ?? null;
         if (activeTrackUri) {
           params.set("track_uri", activeTrackUri);
@@ -2625,6 +2779,8 @@ export function App() {
             name?: string | null;
             uri?: string | null;
             duration_ms?: number | null;
+            disc_number?: number | null;
+            track_number?: number | null;
             artists?: TrackArtistEntry[];
             release_track_id?: number | null;
             release_track_name?: string | null;
@@ -2642,29 +2798,39 @@ export function App() {
             recording_play_count?: number | null;
             recording_first_played_at?: string | null;
             recording_last_played_at?: string | null;
+            family_exclusive?: boolean | null;
+            family_available_versions?: AlbumFamilyContext["versions"] | null;
+            family_switch_album_id?: string | null;
+            family_switch_label?: string | null;
+            family_has_edition_relation?: boolean | null;
+            family_has_external_recording_relation?: boolean | null;
           }>;
           partial?: boolean | null;
+          album_family?: AlbumFamilyContext | null;
         };
         const resolvedAlbumId = payload.album_id ?? initialAlbumId;
         if (!resolvedAlbumId) {
           throw new Error("Album track list is unavailable for this item.");
         }
-        const rows = albumTrackRowsFromItems(payload.items ?? [], selectedTrackId);
+        const rows = albumTrackRowsFromItems(payload.items ?? [], selectedTrackId, selectedReleaseTrackId);
 
         if (!cancelled) {
           const isPartial = Boolean(payload.partial);
           setAlbumTrackEntries(rows);
+          setSelectedAlbumFamilyContext(payload.album_family ?? null);
           loadedAlbumTracksAlbumIdRef.current = resolvedAlbumId;
           albumTrackRowsCacheRef.current.set(`album:${resolvedAlbumId}`, {
             albumId: resolvedAlbumId,
             rows,
             partial: isPartial,
+            family: payload.album_family ?? null,
           });
           if (selectedTrackId) {
             albumTrackRowsCacheRef.current.set(`track:${selectedTrackId}`, {
               albumId: resolvedAlbumId,
               rows,
               partial: isPartial,
+              family: payload.album_family ?? null,
             });
           }
           setAlbumTrackEntriesError(rows.length === 0 ? "No tracks were returned for this album." : null);
@@ -2775,39 +2941,35 @@ export function App() {
         ids.add(track.sourceTrack.track_id);
       }
     }
-    const missingIds = [...ids].filter((trackId) => !likedTrackIdsForDisplay.has(trackId) && !targetedLikedTrackCheckedById[trackId]).slice(0, 60);
+    const missingIds = [...ids].filter((trackId) => (
+      !likedTrackIdsForDisplay.has(trackId)
+      && !targetedLikedTrackCheckedById[trackId]
+      && !targetedLikedInFlightIdsRef.current.has(trackId)
+    )).slice(0, 50);
     if (missingIds.length === 0) {
       return;
     }
-    let cancelled = false;
-    Promise.all(
-      missingIds.map((trackId) => (
-        fetchLikedTrackContains(trackId)
-          .then((payload) => ({ trackId, isLiked: Boolean(payload.is_liked) }))
-          .catch(() => ({ trackId, isLiked: false }))
-      )),
-    ).then((results) => {
-      if (cancelled) {
-        return;
-      }
+    missingIds.forEach((trackId) => targetedLikedInFlightIdsRef.current.add(trackId));
+    fetchLikedTracksContains(missingIds).then((payload) => {
       setTargetedLikedTrackById((current) => {
         const next = { ...current };
-        for (const result of results) {
-          next[result.trackId] = result.isLiked;
+        for (const trackId of missingIds) {
+          next[trackId] = Boolean(payload.items[trackId]);
         }
         return next;
       });
       setTargetedLikedTrackCheckedById((current) => {
         const next = { ...current };
-        for (const result of results) {
-          next[result.trackId] = true;
+        for (const trackId of missingIds) {
+          next[trackId] = true;
         }
         return next;
       });
+    }).catch(() => {
+      // Star enrichment is best-effort; unchecked tracks can retry later.
+    }).finally(() => {
+      missingIds.forEach((trackId) => targetedLikedInFlightIdsRef.current.delete(trackId));
     });
-    return () => {
-      cancelled = true;
-    };
   }, [
     albumTrackEntries,
     homeAlbumTrackEntries,
@@ -2821,14 +2983,14 @@ export function App() {
     if (!hoveredAlbumWithArtistName || !albumTrackListRef.current) {
       return;
     }
-    const visibleTrackEntries = sortedAlbumTrackEntries(albumTrackEntries, albumTrackLastSortMode);
+    const visibleTrackEntries = sortedAlbumTrackEntries(albumTrackEntries, albumTrackLastSortMode, selectedPreviewDetailView);
     const firstMatchIndex = visibleTrackEntries.findIndex((track) => artistNameMatches(track.artistName, hoveredAlbumWithArtistName));
     if (firstMatchIndex < 0) {
       return;
     }
     const row = albumTrackListRef.current.children.item(firstMatchIndex);
     row?.scrollIntoView({ block: "nearest" });
-  }, [albumTrackEntries, albumTrackLastSortMode, hoveredAlbumWithArtistName]);
+  }, [albumTrackEntries, albumTrackLastSortMode, hoveredAlbumWithArtistName, selectedPreviewDetailView]);
 
   useEffect(() => {
     const activePreview = selectedPreview;
@@ -2845,18 +3007,42 @@ export function App() {
     if (!activePreview) {
       return;
     }
-    const albumTracklistKey = loadedAlbumTracksAlbumIdRef.current
+    const visibleEntries = sortedAlbumTrackEntries(albumTrackEntries, albumTrackLastSortMode, selectedPreviewDetailView);
+    const selectedEntry = visibleEntries.find((track) => track.isSelected);
+    if (!selectedEntry) {
+      autoScrolledAlbumTracklistKeyRef.current = null;
+      return;
+    }
+    const albumKey = loadedAlbumTracksAlbumIdRef.current
       ?? albumIdFromPreview(activePreview)
       ?? `${activePreview.kind}:${activePreview.entityId}`;
+    const albumTracklistKey = `${albumKey}|${selectedEntry.id ?? selectedEntry.releaseTrackId ?? selectedEntry.name}`;
     if (autoScrolledAlbumTracklistKeyRef.current === albumTracklistKey) {
       return;
     }
-    autoScrolledAlbumTracklistKeyRef.current = albumTracklistKey;
-    const frameId = window.requestAnimationFrame(() => {
-      scrollSelectedAlbumTrackToMiddle(albumTrackListRef.current, sortedAlbumTrackEntries(albumTrackEntries, albumTrackLastSortMode));
-    });
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    let attemptCount = 0;
+    const attemptScroll = () => {
+      if (cancelled) {
+        return;
+      }
+      if (scrollSelectedAlbumTrackToMiddle(albumTrackListRef.current, visibleEntries)) {
+        autoScrolledAlbumTracklistKeyRef.current = albumTracklistKey;
+        return;
+      }
+      attemptCount += 1;
+      if (attemptCount < 4) {
+        retryTimer = window.setTimeout(attemptScroll, 75 * attemptCount);
+      }
+    };
+    const frameId = window.requestAnimationFrame(attemptScroll);
     return () => {
+      cancelled = true;
       window.cancelAnimationFrame(frameId);
+      if (retryTimer != null) {
+        window.clearTimeout(retryTimer);
+      }
     };
   }, [
     albumTrackEntries,
@@ -3069,7 +3255,7 @@ export function App() {
       return;
     }
     try {
-      await fetch(`${apiBaseUrl}/auth/player-listen-event`, {
+      const response = await fetch(`${apiBaseUrl}/auth/player-listen-event`, {
         method: "POST",
         credentials: "include",
         headers: {
@@ -3081,8 +3267,100 @@ export function App() {
           ms_played_confidence: confidence,
         }),
       });
+      if (response.ok) {
+        const payload = (await response.json()) as { listen_qualified?: boolean };
+        if (payload.listen_qualified && currentTrack) {
+          const trackId = spotifyTrackIdFromUri(currentTrack.uri);
+          if (trackId) {
+            await refreshQualifiedListenState(
+              trackId,
+              playerDisplayKnownTrack?.release_track_id ?? null,
+              new Date().toISOString(),
+              progressMs,
+              playbackDurationMs || currentTrack.durationMs,
+            );
+          }
+        }
+      }
     } catch {
       // Player progress persistence is best-effort and should not interrupt playback.
+    }
+  }
+
+  async function refreshQualifiedListenState(
+    trackId: string,
+    releaseTrackId: number | null,
+    playedAt: string,
+    progressMs: number,
+    durationMs: number,
+  ) {
+    const patchRows = (rows: AlbumTrackEntry[]) => rows.map((row) => {
+      if (row.id !== trackId && (!releaseTrackId || row.releaseTrackId !== releaseTrackId)) {
+        return row;
+      }
+      return {
+        ...row,
+        playCount: Math.max(0, row.playCount) + 1,
+        lastPlayedAt: playedAt,
+        sourceTrack: row.sourceTrack
+          ? {
+              ...row.sourceTrack,
+              play_count: Math.max(0, Number(row.sourceTrack.play_count ?? 0)) + 1,
+              last_played_at: playedAt,
+              spotify_played_at: playedAt,
+            }
+          : row.sourceTrack,
+      };
+    });
+    setAlbumTrackEntries(patchRows);
+    setHomeAlbumTrackEntries(patchRows);
+    setProfile((current) => {
+      if (!current) {
+        return current;
+      }
+      const existing = current.recent_tracks.find((track) => track.track_id === trackId) ?? null;
+      const optimistic: RecentTrack = {
+        ...(existing ?? {
+          track_id: trackId,
+          track_name: livePlaybackSnapshot?.name ?? currentTrack?.name ?? "Unknown track",
+          artist_name: livePlaybackSnapshot?.artist_names.join(", ") ?? currentTrack?.artists ?? "Unknown artist",
+          album_name: livePlaybackSnapshot?.album_name ?? currentTrack?.album ?? "Unknown album",
+        }),
+        track_id: trackId,
+        release_track_id: releaseTrackId ?? existing?.release_track_id ?? null,
+        spotify_played_at: playedAt,
+        last_played_at: playedAt,
+        duration_ms: durationMs,
+        estimated_played_ms: progressMs,
+        estimated_completion_ratio: durationMs > 0 ? Math.min(1, progressMs / durationMs) : 0.65,
+        source_label: "api",
+      };
+      return {
+        ...current,
+        recent_tracks: [optimistic, ...current.recent_tracks.filter((track) => track.track_id !== trackId)],
+        recent_tracks_available: true,
+      };
+    });
+
+    const selectedTrackMatches = selectedPreview?.kind === "track" && Boolean(
+      selectedPreview.trackId === trackId
+      || selectedPreview.entityId === trackId
+      || selectedPreview.sourceTrack?.track_id === trackId
+      || (releaseTrackId && selectedPreview.releaseTrackId === releaseTrackId),
+    );
+    if (!selectedTrackMatches || !releaseTrackId) {
+      return;
+    }
+    const [detail, candidatePayload] = await Promise.all([
+      fetchReleaseTrackDetail(releaseTrackId, trackId).catch(() => null),
+      fetchRecordingTrackCandidateByReleaseTrack(releaseTrackId).catch(() => null),
+    ]);
+    if (detail) {
+      setSelectedPreviewReleaseTrackDetail(detail);
+    }
+    if (candidatePayload) {
+      setSelectedPreviewRecordingCandidate(candidatePayload.item);
+      setSelectedPreviewRelatedCandidates(candidatePayload.items ?? (candidatePayload.item ? [candidatePayload.item] : []));
     }
   }
 
@@ -3103,6 +3381,8 @@ export function App() {
       name?: string | null;
       uri?: string | null;
       duration_ms?: number | null;
+      disc_number?: number | null;
+      track_number?: number | null;
       artists?: TrackArtistEntry[];
       release_track_id?: number | null;
       release_track_name?: string | null;
@@ -3120,8 +3400,15 @@ export function App() {
       recording_play_count?: number | null;
       recording_first_played_at?: string | null;
       recording_last_played_at?: string | null;
+      family_exclusive?: boolean | null;
+      family_available_versions?: AlbumFamilyContext["versions"] | null;
+      family_switch_album_id?: string | null;
+      family_switch_label?: string | null;
+      family_has_edition_relation?: boolean | null;
+      family_has_external_recording_relation?: boolean | null;
     }>,
     selectedTrackId: string | null,
+    selectedReleaseTrackId: number | null = null,
   ) {
     const normalizedTopTrackKeys = new Set(
       [
@@ -3227,6 +3514,8 @@ export function App() {
         name: item.name ?? "Unknown track",
         uri: item.uri ?? null,
         durationMs: typeof item.duration_ms === "number" && Number.isFinite(item.duration_ms) ? Math.max(0, item.duration_ms) : null,
+        discNumber: typeof item.disc_number === "number" && Number.isFinite(item.disc_number) ? item.disc_number : null,
+        trackNumber: typeof item.track_number === "number" && Number.isFinite(item.track_number) ? item.track_number : null,
         artistName: artistNames || null,
         artists: itemArtists,
         sourceTrack: sourceTrackWithHistory,
@@ -3236,8 +3525,17 @@ export function App() {
         recordingLastPlayedAt,
         recordingPlayCount,
         recordingHistoryAvailable,
+        familyExclusive: Boolean(item.family_exclusive),
+        familyAvailableVersions: item.family_available_versions ?? [],
+        familySwitchAlbumId: item.family_switch_album_id ?? null,
+        familySwitchLabel: item.family_switch_label ?? null,
+        familyHasEditionRelation: Boolean(item.family_has_edition_relation),
+        familyHasExternalRecordingRelation: Boolean(item.family_has_external_recording_relation),
         playCount,
-        isSelected: Boolean(selectedTrackId && id && selectedTrackId === id),
+        isSelected: Boolean(
+          (selectedTrackId && id && selectedTrackId === id)
+          || (selectedReleaseTrackId && typeof item.release_track_id === "number" && item.release_track_id === selectedReleaseTrackId),
+        ),
         isTopTrack,
         releaseTrackId: typeof item.release_track_id === "number" ? item.release_track_id : null,
         releaseTrackName: item.release_track_name ?? null,
@@ -3418,13 +3716,16 @@ export function App() {
     const sourceTrackIds = member.source_track_ids ?? [];
     const sourceTrackUris = member.source_track_uris ?? [];
     const sourceTrackDbIds = member.source_track_db_ids ?? [];
+    const preferredAlbumVersion = recordingMemberPreferredAlbumVersion(member);
     const spotifyAlbumIds = member.spotify_album_ids ?? [];
     const albumReleaseDates = member.album_release_dates ?? [];
     const spotifyTrackId = sourceTrackIds[0] ?? null;
     const trackUri = sourceTrackUris[0] ?? (spotifyTrackId ? `spotify:track:${spotifyTrackId}` : null);
-    const albumId = spotifyAlbumIds[0] ?? null;
-    const albumImageUrl = recordingMemberAlbumImageUrl(member);
-    const releaseDate = albumReleaseDates.find((value) => /^\d{4}/.test(String(value ?? ""))) ?? null;
+    const albumId = preferredAlbumVersion?.spotify_album_id ?? spotifyAlbumIds[0] ?? null;
+    const albumImageUrl = preferredAlbumVersion?.image_url ?? recordingMemberAlbumImageUrl(member);
+    const releaseDate = preferredAlbumVersion?.release_date
+      ?? albumReleaseDates.find((value) => /^\d{4}/.test(String(value ?? "")))
+      ?? null;
     const releaseYear = releaseDate ? String(releaseDate).slice(0, 4) : null;
     const artistName = recordingMemberArtistDisplay(member);
     const artists = recordingMemberArtistEntries(member);
@@ -3433,7 +3734,7 @@ export function App() {
       fallbackLabel: "T",
       label: member.title || `Release track ${member.release_track_id}`,
       meta: artistName || null,
-      detail: member.album || null,
+      detail: preferredAlbumVersion?.name ?? member.album ?? null,
       kind: "track",
       entityId: spotifyTrackId,
       trackUri,
@@ -3447,7 +3748,7 @@ export function App() {
       artistName: artistName || null,
       artists,
       sourceAlbumId: albumId,
-      sourceAlbumName: member.album || null,
+      sourceAlbumName: preferredAlbumVersion?.name ?? member.album ?? null,
       sourceAlbumImage: albumImageUrl,
       sourceAlbumYear: releaseYear,
       sourceTrack: null,
@@ -3768,7 +4069,7 @@ export function App() {
   }, [profile?.recent_tracks, profile?.recent_tracks_available]);
 
   useEffect(() => {
-    if (!playerPanelVisible || !profile || playerRecentTracksLoading) {
+    if (!startupDashboardReleased || !playerPanelVisible || !profile || playerRecentTracksLoading) {
       return;
     }
     if ((!playbackPaused && currentTrack) || (playerRecentTracks.length > 0 && !playerRecentTracksError)) {
@@ -3776,10 +4077,10 @@ export function App() {
     }
 
     void loadPlayerRecentTracks();
-  }, [currentTrack, experienceMode, playbackPaused, playerPanelVisible, playerRecentTracks.length, playerRecentTracksError, playerRecentTracksLoading, profile, recentRange]);
+  }, [currentTrack, experienceMode, playbackPaused, playerPanelVisible, playerRecentTracks.length, playerRecentTracksError, playerRecentTracksLoading, profile, recentRange, startupDashboardReleased]);
 
   useEffect(() => {
-    if (!playerPanelVisible || !profile) {
+    if (!startupDashboardReleased || !playerPanelVisible || !profile) {
       return;
     }
 
@@ -3809,7 +4110,7 @@ export function App() {
     }
 
     void loadPlayerQueueTracks();
-  }, [playerPanelVisible, profile, experienceMode, usingRecentLikedStartupFallback, liveSpotifyPlaybackShouldOwnQueue, playerQueueSource, playerQueueCleared]);
+  }, [playerPanelVisible, profile, experienceMode, usingRecentLikedStartupFallback, liveSpotifyPlaybackShouldOwnQueue, livePlaybackSnapshot?.item_id, playerQueueSource, playerQueueCleared, startupDashboardReleased]);
 
   useEffect(() => {
     if (pendingSeekMs == null) {
@@ -4350,6 +4651,7 @@ export function App() {
       return null;
     }
     const playableTracks = entries
+      .filter((track) => !track.familyExclusive)
       .map((track) => {
         const uri = trackUriWithFallback(track.uri, track.id);
         if (!uri) {
@@ -4366,14 +4668,20 @@ export function App() {
       return null;
     }
     const playlistUris = playableTracks.map(({ uri }) => uri);
-    const queueTracks = playableTracks.map(({ track, uri }) => ({
-      ...playerSummaryFromAlbumTrack(track, contextPreview),
-      uri,
-      durationMs: Math.max(0, track.durationMs ?? 0),
-      trackId: track.id ?? spotifyTrackIdFromUri(uri),
-      albumId: albumIdFromPreview(contextPreview),
-      artistItems: uniqueArtistEntries(track.sourceTrack?.artists, contextPreview?.artists, artistEntriesFromText(track.artistName)),
-    }));
+    const queueTracks = playableTracks.map(({ track, uri }) => {
+      const familySourceVersion = selectedAlbumFamilyContext?.versions.find((version) => (
+        version.spotify_album_id === track.familySwitchAlbumId
+        || track.familyAvailableVersions.some((available) => available.spotify_album_id === version.spotify_album_id)
+      )) ?? null;
+      return {
+        ...playerSummaryFromAlbumTrack(track, contextPreview),
+        uri,
+        durationMs: Math.max(0, track.durationMs ?? 0),
+        trackId: track.id ?? spotifyTrackIdFromUri(uri),
+        albumId: familySourceVersion?.spotify_album_id ?? albumIdFromPreview(contextPreview),
+        artistItems: uniqueArtistEntries(track.sourceTrack?.artists, contextPreview?.artists, artistEntriesFromText(track.artistName)),
+      };
+    });
     const albumLabel = contextPreview?.kind === "album"
       ? contextPreview.label
       : (contextPreview?.sourceTrack?.album_name ?? contextPreview?.sourceAlbumName ?? contextPreview?.detail ?? "Album");
@@ -5095,11 +5403,21 @@ export function App() {
       return;
     }
     const sourceTrack = selectedPreview.sourceTrack ?? null;
-    const albumId = selectedPreviewReleasePlaybackSourceVersion?.album_id ?? sourceTrack?.album_id ?? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? null;
-    const albumName = selectedPreviewReleasePlaybackSourceVersion?.album_name ?? sourceTrack?.album_name ?? selectedPreview.sourceAlbumName ?? selectedPreview.detail ?? "Unknown album";
-    const albumYear = selectedPreviewReleasePlaybackSourceVersion?.album_release_year ?? sourceTrack?.album_release_year ?? selectedPreview.sourceAlbumYear ?? null;
-    const albumImage = selectedPreviewReleasePlaybackSourceVersion?.album_image_url ?? selectedPreview.sourceAlbumImage ?? selectedPreview.image ?? sourceTrack?.image_url ?? null;
-    const albumUrl = spotifyEntityUrl("album", selectedPreviewReleasePlaybackSourceVersion?.album_id) || sourceTrack?.album_url || selectedPreview.sourceAlbumUrl || spotifyEntityUrl("album", albumId);
+    const albumId = selectedAlbumFamilyContext
+      ? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? null
+      : selectedPreviewReleasePlaybackSourceVersion?.album_id ?? sourceTrack?.album_id ?? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? null;
+    const albumName = selectedAlbumFamilyContext
+      ? selectedPreview.sourceAlbumName ?? selectedAlbumFamilyContext.core_name
+      : selectedPreviewReleasePlaybackSourceVersion?.album_name ?? sourceTrack?.album_name ?? selectedPreview.sourceAlbumName ?? selectedPreview.detail ?? "Unknown album";
+    const albumYear = selectedAlbumFamilyContext
+      ? selectedPreview.sourceAlbumYear ?? null
+      : selectedPreviewReleasePlaybackSourceVersion?.album_release_year ?? sourceTrack?.album_release_year ?? selectedPreview.sourceAlbumYear ?? null;
+    const albumImage = selectedAlbumFamilyContext
+      ? selectedPreview.sourceAlbumImage ?? selectedPreview.image ?? null
+      : selectedPreviewReleasePlaybackSourceVersion?.album_image_url ?? selectedPreview.sourceAlbumImage ?? selectedPreview.image ?? sourceTrack?.image_url ?? null;
+    const albumUrl = selectedAlbumFamilyContext
+      ? selectedPreview.sourceAlbumUrl || spotifyEntityUrl("album", albumId)
+      : spotifyEntityUrl("album", selectedPreviewReleasePlaybackSourceVersion?.album_id) || sourceTrack?.album_url || selectedPreview.sourceAlbumUrl || spotifyEntityUrl("album", albumId);
     const albumArtistEntries = uniqueArtistEntries(
       sourceTrack?.artists,
       selectedPreview.artists,
@@ -5133,16 +5451,53 @@ export function App() {
     });
   }
 
+  function switchSelectedTrackAlbumVersion(spotifyAlbumId: string) {
+    if (!selectedPreview || selectedPreview.kind !== "track" || !selectedAlbumFamilyContext) {
+      return;
+    }
+    const version = selectedAlbumFamilyContext.versions.find((candidate) => candidate.spotify_album_id === spotifyAlbumId);
+    if (!version) {
+      return;
+    }
+    setAlbumTrackLastSortMode(null);
+    setSelectedPreview((current) => current?.kind === "track" ? {
+      ...current,
+      image: version.image_url ?? current.image,
+      albumId: version.spotify_album_id,
+      sourceAlbumId: version.spotify_album_id,
+      sourceAlbumName: version.name,
+      sourceAlbumImage: version.image_url,
+      sourceAlbumUrl: spotifyEntityUrl("album", version.spotify_album_id),
+      sourceAlbumYear: version.release_year == null ? null : String(version.release_year),
+    } : current);
+  }
+
   function playerSummaryFromAlbumTrack(track: AlbumTrackEntry, contextPreview: PreviewItem | null = selectedPreview): PlayerTrackSummary {
     const previewTrackUri = trackUriWithFallback(track.uri, track.id);
+    const familySourceVersion = selectedAlbumFamilyContext?.versions.find((version) => (
+      version.spotify_album_id === track.familySwitchAlbumId
+      || track.familyAvailableVersions.some((available) => available.spotify_album_id === version.spotify_album_id)
+    )) ?? null;
     return {
       name: track.name,
       artists: track.artistName ?? track.sourceTrack?.artist_name ?? contextPreview?.artistName ?? "Unknown artist",
-      album: track.sourceTrack?.album_name ?? contextPreview?.sourceTrack?.album_name ?? contextPreview?.sourceAlbumName ?? contextPreview?.detail ?? "Unknown album",
-      image: track.sourceTrack?.image_url ?? contextPreview?.sourceAlbumImage ?? contextPreview?.image ?? null,
+      album: familySourceVersion?.name ?? track.sourceTrack?.album_name ?? contextPreview?.sourceTrack?.album_name ?? contextPreview?.sourceAlbumName ?? contextPreview?.detail ?? "Unknown album",
+      image: familySourceVersion?.image_url ?? track.sourceTrack?.image_url ?? contextPreview?.sourceAlbumImage ?? contextPreview?.image ?? null,
       uri: previewTrackUri,
       durationMs: Math.max(0, track.durationMs ?? track.sourceTrack?.duration_ms ?? 0),
     };
+  }
+
+  function includeAlbumFamilyTracks(spotifyAlbumId: string) {
+    setAlbumTrackEntries((current) => current.map((track) => (
+      track.familyExclusive
+      && (
+        track.familySwitchAlbumId === spotifyAlbumId
+        || track.familyAvailableVersions.some((version) => version.spotify_album_id === spotifyAlbumId)
+      )
+        ? { ...track, familyExclusive: false }
+        : track
+    )));
   }
 
   function selectedAlbumTrackMarkerTop(entries: AlbumTrackEntry[], minScrollableTrackCount = 5) {
@@ -5172,15 +5527,28 @@ export function App() {
     return null;
   }
 
-  function sortedAlbumTrackEntries(entries: AlbumTrackEntry[], mode: LastPlayedSortMode) {
+  function sortedAlbumTrackEntries(
+    entries: AlbumTrackEntry[],
+    mode: LastPlayedSortMode,
+    historyMode: "recording" | "release" | "default" = "default",
+  ) {
     if (mode === null) {
       return entries;
     }
     return entries
       .map((track, index) => ({ track, index }))
       .sort((left, right) => {
-        const leftMs = parseTimestampMs(left.track.lastPlayedAt);
-        const rightMs = parseTimestampMs(right.track.lastPlayedAt);
+        const editionGroupDelta = Number(left.track.familyExclusive) - Number(right.track.familyExclusive);
+        if (editionGroupDelta !== 0) {
+          return editionGroupDelta;
+        }
+        const historyTimestamp = (track: AlbumTrackEntry) => historyMode === "recording"
+          ? track.recordingLastPlayedAt === undefined ? track.lastPlayedAt : track.recordingLastPlayedAt
+          : historyMode === "release"
+            ? track.sourceLastPlayedAt === undefined ? track.lastPlayedAt : track.sourceLastPlayedAt
+            : track.lastPlayedAt;
+        const leftMs = parseTimestampMs(historyTimestamp(left.track));
+        const rightMs = parseTimestampMs(historyTimestamp(right.track));
         const leftSortValue = leftMs ?? -Infinity;
         const rightSortValue = rightMs ?? -Infinity;
         const delta = mode === "recent"
@@ -5193,19 +5561,20 @@ export function App() {
 
   function scrollSelectedAlbumTrackToMiddle(listElement: HTMLUListElement | null, entries: AlbumTrackEntry[]) {
     if (!listElement) {
-      return;
+      return false;
     }
     const selectedIndex = entries.findIndex((track) => track.isSelected);
     if (selectedIndex < 0) {
-      return;
+      return false;
     }
-    const row = listElement.children.item(selectedIndex);
+    const row = listElement.querySelector(".detail-album-track-row-selected");
     if (!(row instanceof HTMLElement)) {
-      return;
+      return false;
     }
     const targetTop = row.offsetTop - ((listElement.clientHeight - row.offsetHeight) / 2);
     const maxScrollTop = Math.max(0, listElement.scrollHeight - listElement.clientHeight);
     listElement.scrollTop = Math.max(0, Math.min(maxScrollTop, targetTop));
+    return true;
   }
 
   function albumTrackPreviewKey(track: AlbumTrackEntry, rowTrackUri: string | null) {
@@ -5432,6 +5801,7 @@ export function App() {
 
   async function handleAlbumPlayAll(action: PlaybackAction = "play_now") {
     const firstPlayableTrack = albumTrackEntries
+      .filter((track) => !track.familyExclusive)
       .map((track) => ({ track, uri: trackUriWithFallback(track.uri, track.id) }))
       .find((item) => Boolean(item.uri));
     if (!firstPlayableTrack) {
@@ -5465,14 +5835,11 @@ export function App() {
     setProfile(null);
     setOpenSections(INITIAL_OPEN_SECTIONS);
     setSectionPages(INITIAL_SECTION_PAGES);
-    setRateLimitMenuOpen(false);
     setPlayerQueueTracks([]);
     setPlayerQueueCursor(null);
     setPlayerQueueSource(null);
     resetQueueControls();
     setQueuePlaylistUri(null);
-    setReloadCooldownUntil(null);
-    setReloadCooldownDurationMs(60_000);
     if (nextMode === "local") {
       setStatusMessage("Loading local-only experience...");
       setAuthTransitioning(true);
@@ -5617,6 +5984,11 @@ export function App() {
 
       const data = (await response.json()) as SessionResponse;
       setSession(data);
+      const sessionCooldownSeconds = Math.max(0, Number(data.spotify_cooldown_seconds_remaining ?? 0));
+      if (sessionCooldownSeconds > 0) {
+        setReloadCooldownDurationMs(sessionCooldownSeconds * 1000);
+        setReloadCooldownUntil(Date.now() + sessionCooldownSeconds * 1000);
+      }
       setProfileLoadAttempted(false);
       setOpenSections(INITIAL_OPEN_SECTIONS);
       setSectionPages(INITIAL_SECTION_PAGES);
@@ -6247,17 +6619,18 @@ export function App() {
   }
 
   async function loadProfile() {
-    if (experienceMode === "full" && spotifyCooldownActive) {
-      setStatusMessage(formatCooldownCopy(reloadSecondsRemaining));
-      return;
-    }
     if (profileLoadInFlightRef.current) {
       return;
+    }
+    const fellBackForCooldown = experienceMode === "full" && spotifyCooldownActive;
+    const loadExperienceMode = fellBackForCooldown ? "local" : experienceMode;
+    if (loadExperienceMode === "local" && experienceMode !== "local") {
+      setExperienceMode("local");
     }
     profileLoadInFlightRef.current = true;
     setLoadingProfile(true);
     setProfileLoadAttempted(true);
-    setStatusMessage(experienceMode === "local" ? "Loading local history..." : "Loading your Spotify data...");
+    setStatusMessage(loadExperienceMode === "local" ? "Loading local history..." : "Loading your Spotify data...");
     setStatusHistory(["Initial load started."]);
     let pollingActive = true;
     let progressTimer: number | null = null;
@@ -6303,12 +6676,14 @@ export function App() {
       void updateProgress();
     }, 500);
     try {
-      const endpoint = experienceMode === "local" ? "/me/local" : "/me";
+      const endpoint = loadExperienceMode === "local" ? "/me/local" : "/me";
       const profileParams = new URLSearchParams({
         recent_range: recentRange,
         analysis_mode: analysisMode,
       });
-      if (experienceMode !== "local" && analysisMode === "quick") {
+      if (loadExperienceMode === "local") {
+        profileParams.set("mode", "extended");
+      } else if (analysisMode === "quick") {
         profileParams.set("mode", "shell");
       }
       const response = await fetch(
@@ -6336,14 +6711,42 @@ export function App() {
           const cooldownSeconds = parseCooldownSeconds(detail) ?? 60;
           setReloadCooldownDurationMs(cooldownSeconds * 1000);
           setReloadCooldownUntil(Date.now() + cooldownSeconds * 1000);
-          detail = formatCooldownCopy(cooldownSeconds);
+          const localResponse = await fetch(
+            `${apiBaseUrl}/me/local?${new URLSearchParams({
+              recent_range: recentRange,
+              analysis_mode: analysisMode,
+              mode: "extended",
+            }).toString()}`,
+            { method: "GET", credentials: "include" },
+          );
+          if (localResponse.ok) {
+            const localData = (await localResponse.json()) as ProfileResponse;
+            const hydratedLocalProfile = {
+              ...localData,
+              username: session?.spotify_user_id ?? localData.username,
+              display_name: session?.display_name ?? localData.display_name,
+              email: session?.email ?? localData.email,
+            };
+            setExperienceMode("local");
+            setProfile(hydratedLocalProfile);
+            setAnalysisMode(hydratedLocalProfile.analysis_mode ?? analysisMode);
+            setAuthTransitioning(false);
+            setSectionPages(INITIAL_SECTION_PAGES);
+            setStatusMessage(`Spotify is rate-limiting requests. Loaded offline data; Full mode will be available after the cooldown.`);
+            setStatusHistory((current) => [...current, `Spotify 429: switched to Local mode for ${cooldownSeconds}s cooldown.`]);
+            if (hydratedLocalProfile.recent_range) {
+              setRecentRange(hydratedLocalProfile.recent_range);
+            }
+            return;
+          }
+          detail = `${formatCooldownCopy(cooldownSeconds)} Offline data could not be loaded.`;
         }
         throw new Error(detail);
       }
 
       const data = (await response.json()) as ProfileResponse;
       let hydratedProfile = data;
-      if (experienceMode === "local") {
+      if (loadExperienceMode === "local") {
         hydratedProfile = {
           ...hydratedProfile,
           username: session?.spotify_user_id ?? hydratedProfile.username,
@@ -6356,7 +6759,9 @@ export function App() {
       setAnalysisMode(hydratedProfile.analysis_mode ?? analysisMode);
       setAuthTransitioning(false);
       setSectionPages(INITIAL_SECTION_PAGES);
-      setStatusMessage("");
+      setStatusMessage(fellBackForCooldown
+        ? "Spotify is rate-limiting requests. Loaded offline data; Full mode will be available after the cooldown."
+        : "");
       if (hydratedProfile.recent_range) {
         setRecentRange(hydratedProfile.recent_range);
       }
@@ -8208,6 +8613,10 @@ export function App() {
   function handleCooldownRetry() {
     setReloadCooldownUntil(null);
     setReloadCooldownDurationMs(60_000);
+    if (experienceMode === "local") {
+      handleExperienceModeChange("full");
+      return;
+    }
     if (!profile) {
       void loadProfile();
       return;
@@ -8256,6 +8665,13 @@ export function App() {
   }
 
   async function fetchRecentSections(targetRange: RecentRange, forceRecentSync = false): Promise<RecentSectionResponse> {
+    if (Date.now() < recentSectionsRequestBlockedUntilMs) {
+      const seconds = Math.max(1, Math.ceil((recentSectionsRequestBlockedUntilMs - Date.now()) / 1000));
+      throw new Error(formatCooldownCopy(seconds));
+    }
+    if (recentSectionsRequestInFlight) {
+      return recentSectionsRequestInFlight;
+    }
     const endpoint = experienceMode === "local" ? "/me/local/recent" : "/me/recent";
     const params = new URLSearchParams({
       recent_range: targetRange,
@@ -8264,31 +8680,42 @@ export function App() {
     if (forceRecentSync && experienceMode !== "local") {
       params.set("force_recent_sync", "true");
     }
-    const response = await fetch(
-      `${apiBaseUrl}${endpoint}?${params.toString()}`,
-      {
-        credentials: "include",
-      },
-    );
-    if (!response.ok) {
-      let detail = "Failed to refresh recent sections.";
-      try {
-        const payload = (await response.json()) as { detail?: string };
-        if (payload.detail) {
-          detail = payload.detail;
+    const request = (async () => {
+      const response = await fetch(
+        `${apiBaseUrl}${endpoint}?${params.toString()}`,
+        {
+          credentials: "include",
+        },
+      );
+      if (!response.ok) {
+        let detail = "Failed to refresh recent sections.";
+        try {
+          const payload = (await response.json()) as { detail?: string };
+          if (payload.detail) {
+            detail = payload.detail;
+          }
+        } catch {
+          // ignore invalid error payloads
         }
-      } catch {
-        // ignore invalid error payloads
+        if (response.status === 429 && experienceMode === "full") {
+          const cooldownSeconds = parseCooldownSeconds(detail) ?? 60;
+          recentSectionsRequestBlockedUntilMs = Date.now() + cooldownSeconds * 1000;
+          setReloadCooldownDurationMs(cooldownSeconds * 1000);
+          setReloadCooldownUntil(recentSectionsRequestBlockedUntilMs);
+          detail = formatCooldownCopy(cooldownSeconds);
+        }
+        throw new Error(detail);
       }
-      if (response.status === 429 && experienceMode === "full") {
-        const cooldownSeconds = parseCooldownSeconds(detail) ?? 60;
-        setReloadCooldownDurationMs(cooldownSeconds * 1000);
-        setReloadCooldownUntil(Date.now() + cooldownSeconds * 1000);
-        detail = formatCooldownCopy(cooldownSeconds);
+      return (await response.json()) as RecentSectionResponse;
+    })();
+    recentSectionsRequestInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (recentSectionsRequestInFlight === request) {
+        recentSectionsRequestInFlight = null;
       }
-      throw new Error(detail);
     }
-    return (await response.json()) as RecentSectionResponse;
   }
 
   async function loadLikedTracksCache() {
@@ -8492,15 +8919,86 @@ export function App() {
         .map(spotifyQueueItemToTrack)
         .filter((track): track is PlayerQueueTrack => Boolean(track));
       const collapsedQueuedTracks = collapseRepeatedQueueCycle(queuedTracks);
-      const liveQueueTracks = [
+      let liveQueueTracks = [
         ...(currentQueueTrack ? [currentQueueTrack] : []),
         ...(queueRepeatsTrack(collapsedQueuedTracks, currentQueueTrack?.uri ?? playerDisplayTrack?.uri) ? [] : collapsedQueuedTracks),
       ]
         .slice(0, PLAYER_RECENT_FETCH_LIMIT);
+      let expandedAlbumContext: { label: string; url?: string | null } | null = null;
+      const queuePlaybackSnapshot = livePlaybackSnapshot;
+      const contextAlbumId = queuePlaybackSnapshot?.context_type === "album"
+        ? (
+          queuePlaybackSnapshot.album_id
+          ?? (queuePlaybackSnapshot.context_uri?.startsWith("spotify:album:")
+            ? queuePlaybackSnapshot.context_uri.split(":")[2] ?? null
+            : null)
+        )
+        : null;
+      if (queuePlaybackSnapshot && contextAlbumId && currentQueueTrack?.trackId) {
+        try {
+          const params = new URLSearchParams({
+            album_id: contextAlbumId,
+            track_id: currentQueueTrack.trackId,
+          });
+          if (!spotifyCooldownActive) {
+            params.set("force_spotify", "true");
+          } else {
+            params.set("local_only", "true");
+          }
+          const albumResponse = await fetch(`${apiBaseUrl}/auth/playback/album-tracks?${params.toString()}`, {
+            credentials: "include",
+          });
+          if (albumResponse.ok) {
+            const albumPayload = (await albumResponse.json()) as {
+              items?: Array<{
+                id?: string | null;
+                name?: string | null;
+                uri?: string | null;
+                duration_ms?: number | null;
+                artists?: TrackArtistEntry[];
+              }>;
+            };
+            const albumQueueTracks = (albumPayload.items ?? []).map((item): PlayerQueueTrack | null => {
+              const uri = trackUriWithFallback(item.uri ?? null, item.id ?? null);
+              if (!uri) {
+                return null;
+              }
+              return {
+                name: item.name ?? "Unknown track",
+                artists: (item.artists ?? []).map((artist) => artist.name ?? "").filter(Boolean).join(", ") || "Unknown artist",
+                album: queuePlaybackSnapshot.album_name ?? currentQueueTrack.album,
+                image: queuePlaybackSnapshot.image_url ?? currentQueueTrack.image,
+                uri,
+                durationMs: Math.max(0, Number(item.duration_ms ?? 0)),
+                trackId: item.id ?? spotifyTrackIdFromUri(uri),
+                albumId: contextAlbumId,
+              };
+            }).filter((track): track is PlayerQueueTrack => Boolean(track));
+            const currentAlbumTrackIndex = albumQueueTracks.findIndex((track) => {
+              const albumTrackId = track.trackId ?? spotifyTrackIdFromUri(track.uri);
+              return Boolean(albumTrackId && albumTrackId === currentQueueTrack.trackId);
+            });
+            if (albumQueueTracks.length > 0 && currentAlbumTrackIndex >= 0) {
+              // Album context is a fixed tracklist, not Spotify's rotated/wrapped queue.
+              liveQueueTracks = albumQueueTracks;
+              expandedAlbumContext = {
+                label: queuePlaybackSnapshot.album_name ?? currentQueueTrack.album,
+                url: queuePlaybackSnapshot.context_url ?? spotifyEntityUrl("album", contextAlbumId),
+              };
+            }
+          }
+        } catch {
+          // Spotify's explicit queue remains usable when album expansion is unavailable.
+        }
+      }
       setPlayerQueueTracks(liveQueueTracks);
       setPlayerQueueCursor(currentQueueTrack ? 0 : null);
       setPlayerQueueSource("spotify");
-      clearQueueContext();
+      if (expandedAlbumContext) {
+        setPlayerQueueContext(expandedAlbumContext);
+      } else {
+        clearQueueContext();
+      }
       setPlayerQueueCleared(false);
       resetQueueControls();
     } catch (error) {
@@ -8767,9 +9265,10 @@ export function App() {
   }
 
   async function loadListeningLogBatch(reset: boolean = false, forceRecentSync = false) {
-    if (listeningLogLoading) {
+    if (listeningLogLoadInFlightRef.current) {
       return;
     }
+    listeningLogLoadInFlightRef.current = true;
     setListeningLogLoading(true);
     setListeningLogError("");
     try {
@@ -8790,6 +9289,7 @@ export function App() {
         setListeningLogHasMore(false);
       }
     } finally {
+      listeningLogLoadInFlightRef.current = false;
       setListeningLogLoading(false);
     }
   }
@@ -9168,9 +9668,10 @@ export function App() {
       setStatusHistory((current) => [...current, "Spotify cooldown active. Recent refresh paused."]);
       return;
     }
-    if (loadingRecentSection) {
+    if (recentSectionLoadInFlightRef.current) {
       return;
     }
+    recentSectionLoadInFlightRef.current = true;
     setRecentSectionStartupError(false);
     setLoadingRecentSection(true);
     setStatusMessage("Refreshing recent sections...");
@@ -9207,6 +9708,7 @@ export function App() {
     } finally {
       setRecentSectionLoadAttempted(true);
       setLoadingRecentSection(false);
+      recentSectionLoadInFlightRef.current = false;
     }
   }
 
@@ -9260,7 +9762,7 @@ export function App() {
   }
 
   function renderHomePlayerPanel() {
-    if (!profile || appPage !== "dashboard") {
+    if (!profile || appPage !== "dashboard" || experienceMode === "local") {
       return null;
     }
 
@@ -9871,17 +10373,17 @@ export function App() {
     if (!releaseTrackMetadataIds.length || !profile) {
       return;
     }
-    const missingIds = releaseTrackMetadataIds.filter((trackId) => !releaseTrackMetadataCheckedIds[trackId]);
+    const missingIds = releaseTrackMetadataIds.filter((trackId) => (
+      !releaseTrackMetadataCheckedIds[trackId]
+      && !releaseTrackMetadataInFlightIdsRef.current.has(trackId)
+    ));
     if (!missingIds.length) {
       return;
     }
     const requestIds = missingIds.slice(0, 500);
-    let cancelled = false;
+    requestIds.forEach((trackId) => releaseTrackMetadataInFlightIdsRef.current.add(trackId));
     fetchReleaseTrackMetadata(requestIds)
       .then((payload) => {
-        if (cancelled) {
-          return;
-        }
         setReleaseTrackMetadataById((current) => ({
           ...current,
           ...payload.items,
@@ -9895,20 +10397,18 @@ export function App() {
         });
       })
       .catch(() => {
-        if (!cancelled) {
-          console.warn("Release-track metadata lookup failed.");
-          setReleaseTrackMetadataCheckedIds((current) => {
-            const next = { ...current };
-            for (const trackId of requestIds) {
-              next[trackId] = true;
-            }
-            return next;
-          });
-        }
+        console.warn("Release-track metadata lookup failed.");
+        setReleaseTrackMetadataCheckedIds((current) => {
+          const next = { ...current };
+          for (const trackId of requestIds) {
+            next[trackId] = true;
+          }
+          return next;
+        });
+      })
+      .finally(() => {
+        requestIds.forEach((trackId) => releaseTrackMetadataInFlightIdsRef.current.delete(trackId));
       });
-    return () => {
-      cancelled = true;
-    };
   }, [profile, releaseTrackMetadataCheckedIds, releaseTrackMetadataIds, releaseTrackMetadataKey]);
   const releaseTrackSiblingById = useMemo(() => {
     const byId = new Map<string, number>();
@@ -9983,6 +10483,11 @@ export function App() {
   const selectedPreviewOtherRecordingMembers = selectedPreview && selectedPreview.kind === "track"
     ? selectedPreviewRecordingMembers.filter((member) => member.release_track_id !== selectedPreview.releaseTrackId)
     : [];
+  const selectedPreviewAlsoAppearsOnRecordingMembers = selectedAlbumFamilyContext
+    ? selectedPreviewOtherRecordingMembers.filter((member) => !member.release_album_ids?.some(
+      (releaseAlbumId) => selectedAlbumFamilyContext.release_album_ids.includes(releaseAlbumId),
+    ))
+    : selectedPreviewOtherRecordingMembers;
   const selectedPreviewCurrentRecordingMember = selectedPreview?.kind === "track"
     ? selectedPreviewRecordingMembers.find((member) => member.release_track_id === selectedPreview.releaseTrackId) ?? null
     : null;
@@ -10260,20 +10765,31 @@ export function App() {
       selectedPreviewRecordingRepresentativeByReleaseTrackId.set(member.release_track_id, representative);
     }
   }
-  type SongFamilyKind = "Original" | "Cover" | "Remix" | "Version" | "Rework";
+  type SongFamilyKind = "Original" | "Cover" | "Remix" | "Version" | "Rework" | "Live" | "Demo" | "Acoustic" | "Instrumental";
   const songFamilyKind = (
     member: RecordingTrackCandidateMember,
     original: RecordingTrackCandidateMember,
-    relationshipKind: string,
   ): SongFamilyKind => {
     if (member.release_track_id === original.release_track_id) {
       return "Original";
     }
     const normalizedTitle = member.title.toLocaleLowerCase();
-    if (relationshipKind === "remix" || relationshipKind === "mix" || /\bremix\b/.test(normalizedTitle)) {
+    if (/\blive\b/.test(normalizedTitle)) {
+      return "Live";
+    }
+    if (/\bdemo\b/.test(normalizedTitle)) {
+      return "Demo";
+    }
+    if (/\bacoustic\b/.test(normalizedTitle)) {
+      return "Acoustic";
+    }
+    if (/\binstrumental\b/.test(normalizedTitle)) {
+      return "Instrumental";
+    }
+    if (/\b(?:remix|rmx)\b/.test(normalizedTitle)) {
       return "Remix";
     }
-    if (relationshipKind === "rework" || /\brework\b/.test(normalizedTitle)) {
+    if (/\brework\b/.test(normalizedTitle)) {
       return "Rework";
     }
     if (/\bcover\b/.test(normalizedTitle)) {
@@ -10295,6 +10811,31 @@ export function App() {
     }
     return "Version";
   };
+  const songFamilyQualifier = (
+    member: RecordingTrackCandidateMember,
+    original: RecordingTrackCandidateMember,
+    kind: SongFamilyKind,
+  ) => {
+    if (kind === "Original") {
+      return null;
+    }
+    const rawTitle = member.title.trim();
+    const originalTitle = original.title.trim();
+    let qualifier = rawTitle.toLocaleLowerCase().startsWith(originalTitle.toLocaleLowerCase())
+      ? rawTitle.slice(originalTitle.length)
+      : rawTitle.match(/\s[-–—]\s(.+)$/)?.[1] ?? rawTitle.match(/\(([^)]+)\)\s*$/)?.[1] ?? "";
+    qualifier = qualifier.replace(/^[\s:–—-]+/, "").replace(/^\((.*)\)$/, "$1").trim();
+    if (["Live", "Demo", "Acoustic", "Instrumental", "Remix", "Cover"].includes(kind)) {
+      qualifier = qualifier
+        .replace(new RegExp(`^${kind}\\b[\\s:–—-]*`, "i"), "")
+        .replace(new RegExp(`[\\s:–—-]*${kind}$`, "i"), "")
+        .trim();
+    }
+    if (/^version$/i.test(qualifier) || /^(live|demo|acoustic|instrumental) version$/i.test(qualifier)) {
+      return null;
+    }
+    return qualifier || null;
+  };
   const selectedPreviewFamilyRelationMembers = selectedPreview && selectedPreview.kind === "track"
     ? selectedPreviewRelatedCandidatesForCurrent
       .filter((candidate) => candidate.candidate_type === "track_family_candidate")
@@ -10310,10 +10851,10 @@ export function App() {
         const currentMember = currentRawMember
           ? selectedPreviewRecordingRepresentativeByReleaseTrackId.get(currentRawMember.release_track_id) ?? currentRawMember
           : null;
-        const currentKind = currentMember ? songFamilyKind(currentMember, original, candidate.relationship_kind) : null;
+        const currentKind = currentMember ? songFamilyKind(currentMember, original) : null;
         return candidate.members.map((rawMember) => {
           const member = selectedPreviewRecordingRepresentativeByReleaseTrackId.get(rawMember.release_track_id) ?? rawMember;
-          const kind = songFamilyKind(member, original, candidate.relationship_kind);
+          const kind = songFamilyKind(member, original);
           const badge = kind === "Cover" && currentKind === "Cover"
             ? "Sibling Cover" as const
             : kind === "Remix" && currentKind === "Remix"
@@ -10322,6 +10863,7 @@ export function App() {
           return {
             member,
             badge,
+            qualifier: songFamilyQualifier(member, original, kind),
             originalArtists: original.artists ?? [],
           };
         });
@@ -10330,7 +10872,7 @@ export function App() {
       .filter((item, index, members) => members.findIndex((candidate) => candidate.member.release_track_id === item.member.release_track_id) === index)
     : [];
   const selectedPreviewRelationRows = {
-    recording: selectedPreviewOtherRecordingMembers,
+    recording: selectedPreviewAlsoAppearsOnRecordingMembers,
     songFamily: selectedPreviewFamilyRelationMembers,
   };
   const selectedPreviewDisplayRelationRows = selectedPreviewRelationRows;
@@ -10381,15 +10923,27 @@ export function App() {
       preferredDetailView: detailView,
     });
   };
+  function recordingMemberPreferredAlbumVersion(member: RecordingTrackCandidateMember) {
+    return member.album_versions?.find((version) => Boolean(version.spotify_album_id && version.is_direct_source_album))
+      ?? member.album_versions?.find((version) => Boolean(version.spotify_album_id))
+      ?? member.album_versions?.[0]
+      ?? null;
+  }
+  const recordingMemberAlbumName = (member: RecordingTrackCandidateMember) => (
+    recordingMemberPreferredAlbumVersion(member)?.name ?? member.album
+  );
   const recordingMemberReleaseYear = (member: RecordingTrackCandidateMember) => {
-    const rawDate = member.album_release_dates?.find((value) => /^\d{4}/.test(String(value ?? "")));
+    const rawDate = recordingMemberPreferredAlbumVersion(member)?.release_date
+      ?? member.album_release_dates?.find((value) => /^\d{4}/.test(String(value ?? "")));
     return rawDate ? String(rawDate).slice(0, 4) : null;
   };
   const recordingMemberDurationLabel = (member: RecordingTrackCandidateMember) => {
     const durations = member.duration_values_ms?.length ? member.duration_values_ms : member.duration_ms ? [member.duration_ms] : [];
     return durations.length > 0 ? durations.map((duration) => formatDurationMs(duration)).join(", ") : "No duration";
   };
-  const recordingMemberAlbumImageUrl = (member: RecordingTrackCandidateMember) => member.album_image_urls?.find(Boolean) ?? null;
+  const recordingMemberAlbumImageUrl = (member: RecordingTrackCandidateMember) => (
+    recordingMemberPreferredAlbumVersion(member)?.image_url ?? member.album_image_urls?.find(Boolean) ?? null
+  );
   const variationSubtitleFromTitle = (title: string | null | undefined) => {
     const rawTitle = title?.trim();
     if (!rawTitle) {
@@ -10526,7 +11080,7 @@ export function App() {
   }
 
   const displayHomeAlbumTrackEntries = sortedAlbumTrackEntries(homeAlbumTrackEntries, homeAlbumTrackLastSortMode);
-  const displayAlbumTrackEntries = sortedAlbumTrackEntries(albumTrackEntries, albumTrackLastSortMode);
+  const displayAlbumTrackEntries = sortedAlbumTrackEntries(albumTrackEntries, albumTrackLastSortMode, selectedPreviewDetailView);
 
   return (
     <>
@@ -10574,7 +11128,6 @@ export function App() {
                       setBrandMenuOpen((current) => !current);
                       setExperimentalMenuOpen(false);
                       setProfileMenuOpen(false);
-                      setRateLimitMenuOpen(false);
                     }}
                     type="button"
                   >
@@ -10603,58 +11156,6 @@ export function App() {
                     </section>
                   ) : null}
                 </div>
-                {showRateLimitReload ? (
-                  <div className="profile-menu-shell profile-menu-shell-inline" ref={rateLimitMenuRef}>
-                    <button
-                      aria-expanded={rateLimitMenuOpen}
-                      className={`bar-trigger bar-trigger-cooldown${reloadReady ? " bar-trigger-cooldown-ready" : ""}`}
-                      onClick={() => {
-                        setRateLimitMenuOpen((current) => !current);
-                        setBrandMenuOpen(false);
-                        setExperimentalMenuOpen(false);
-                        setPlayerMenuOpen(false);
-                        setProfileMenuOpen(false);
-                      }}
-                      type="button"
-                    >
-                      <span className="cooldown-chip-record" aria-hidden="true">
-                        <span className="cooldown-chip-record-center" />
-                      </span>
-                      <span className="cooldown-chip-label">{reloadReady ? "Ready" : "Cooldown"}</span>
-                    </button>
-
-                    {rateLimitMenuOpen ? (
-                      <section className="profile-card top-profile-card profile-menu-card rate-limit-menu-card">
-                        <div className="profile-panel-top">
-                          <div>
-                            <h2>Spotify cooldown</h2>
-                            <p className="empty-copy">
-                              {reloadReady
-                                ? "Cooldown completed. Spotify sync actions are available again."
-                                : `Spotify requests are paused for ${formatCooldownTimerLabel(reloadSecondsRemaining)}.`}
-                            </p>
-                            <p className="empty-copy">Local sections stay available while cooldown is active.</p>
-                          </div>
-                        </div>
-                        <div className="actions actions-right actions-in-card">
-                          <button
-                            className="secondary-button"
-                            disabled={!reloadReady || loadingProfile || loadingRecentSection || loadingExtendedProfile}
-                            onClick={() => {
-                              setReloadCooldownUntil(null);
-                              setReloadCooldownDurationMs(60_000);
-                              setRateLimitMenuOpen(false);
-                              void refreshRecentSection(recentRange);
-                            }}
-                            type="button"
-                          >
-                            Retry Spotify sync
-                          </button>
-                        </div>
-                      </section>
-                    ) : null}
-                  </div>
-                ) : null}
               </div>
 
               <div className="sticky-bar-center">
@@ -10668,7 +11169,6 @@ export function App() {
                       setBrandMenuOpen(false);
                       setPlayerMenuOpen(false);
                       setProfileMenuOpen(false);
-                      setRateLimitMenuOpen(false);
                     }}
                     type="button"
                   >
@@ -10714,11 +11214,9 @@ export function App() {
                     </section>
                   ) : null}
                 </div>
-                {experienceMode === "full" ? (
-                  <button className="jump-link" onClick={() => openAndScrollToSection("recent", "activity")} type="button">
-                    Activity
-                  </button>
-                ) : null}
+                <button className="jump-link" onClick={() => openAndScrollToSection("recent", "activity")} type="button">
+                  Activity
+                </button>
                 <button className="jump-link" onClick={() => openAndScrollToSection("tracks", "tracks")} type="button">
                   Tracks
                 </button>
@@ -10738,7 +11236,7 @@ export function App() {
               </div>
 
               <div className="sticky-bar-right">
-                {hasPremiumPlayback ? (
+                {experienceMode === "full" && hasPremiumPlayback ? (
                 <div className="profile-menu-shell profile-menu-shell-inline" ref={playerMenuRef}>
                   <button
                     aria-expanded={playerMenuOpen}
@@ -10748,7 +11246,6 @@ export function App() {
                       setProfileMenuOpen(false);
                       setBrandMenuOpen(false);
                       setExperimentalMenuOpen(false);
-                      setRateLimitMenuOpen(false);
                     }}
                     type="button"
                   >
@@ -11332,7 +11829,6 @@ export function App() {
                       setBrandMenuOpen(false);
                       setExperimentalMenuOpen(false);
                       setPlayerMenuOpen(false);
-                      setRateLimitMenuOpen(false);
                     }}
                     type="button"
                   >
@@ -11379,6 +11875,14 @@ export function App() {
                           </div>
                         </a>
                       </div>
+                      {showRateLimitReload ? (
+                        <SpotifyCooldownPanel
+                          loading={loadingProfile || loadingRecentSection || loadingExtendedProfile}
+                          onRetry={handleCooldownRetry}
+                          ready={reloadReady}
+                          secondsRemaining={reloadSecondsRemaining}
+                        />
+                      ) : null}
                       <div className="profile-mode-row">
                         {renderExperienceModeToggle()}
                         <button
@@ -11444,7 +11948,8 @@ export function App() {
               </div>
             </nav>
             <DashboardSections
-              activityPreviewTracks={filterAndDedupeRecentTracksForActivity(profile.recent_tracks, recentCompletionFilter, profile.recent_tracks.length, likedTrackIdsForDisplay, likedReleaseTrackIdsForDisplay, { likedOnly: recentLikedOnly, taggedOnly: recentTaggedOnly })}
+              activityRecentTracks={activityRecentTracks}
+              activityPreviewTracks={filterAndDedupeRecentTracksForActivity(activityRecentTracks, recentCompletionFilter, activityRecentTracks.length, likedTrackIdsForDisplay, likedReleaseTrackIdsForDisplay, { likedOnly: recentLikedOnly, taggedOnly: recentTaggedOnly })}
               albumCatalogLookupEnqueueError={albumCatalogLookupEnqueueError}
               albumCatalogLookupEnqueueLoading={albumCatalogLookupEnqueueLoading}
               albumCatalogLookupEnqueueResult={albumCatalogLookupEnqueueResult}
@@ -11634,6 +12139,7 @@ export function App() {
             albumTrackListRef={albumTrackListRef}
             albumTrackPreviewKey={albumTrackPreviewKey}
             albumTracklistSummaryLabel={albumTracklistSummaryLabel}
+            albumFamilyContext={selectedAlbumFamilyContext}
             artistEntriesForAlbumTrack={artistEntriesForAlbumTrack}
             artistNameMatches={artistNameMatches}
             backendSelectedPreviewArtistAlbums={backendSelectedPreviewArtistAlbums}
@@ -11646,6 +12152,7 @@ export function App() {
             formatPlaybackClock={formatPlaybackClock}
             handleAlbumPlayAll={handleAlbumPlayAll}
             handlePlaybackAction={handlePlaybackAction}
+            includeAlbumFamilyTracks={includeAlbumFamilyTracks}
             hasPremiumPlayback={hasPremiumPlayback}
             hoveredAlbumWithArtistName={hoveredAlbumWithArtistName}
             isTrackPlaying={isTrackPlaying}
@@ -11668,6 +12175,7 @@ export function App() {
             previewPlayedTrackKeys={previewPlayedTrackKeys}
             previewingTrackUri={previewingTrackUri}
             recordingMemberAlbumImageUrl={recordingMemberAlbumImageUrl}
+            recordingMemberAlbumName={recordingMemberAlbumName}
             recordingMemberReleaseYear={recordingMemberReleaseYear}
             recordingVariationStripRef={recordingVariationStripRef}
             releaseSourceVersionAlbumImageUrl={releaseSourceVersionAlbumImageUrl}
@@ -11724,6 +12232,7 @@ export function App() {
             setSelectedPreview={setSelectedPreview}
             setSelectedPreviewDetailView={setSelectedPreviewDetailView}
             spotifyTrackIdFromUri={spotifyTrackIdFromUri}
+            switchSelectedTrackAlbumVersion={switchSelectedTrackAlbumVersion}
             toggleAlbumTrackPreview={toggleAlbumTrackPreview}
             variationSubtitleFromTitle={variationSubtitleFromTitle}
           />

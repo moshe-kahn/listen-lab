@@ -53,12 +53,17 @@ class SpotifyCurrentPlaybackTests(unittest.TestCase):
             "timestamp": 1713410000000,
             "currently_playing_type": "track",
             "device": {"name": "Kitchen speaker", "type": "Speaker"},
+            "context": {
+                "type": "album",
+                "uri": "spotify:album:album-123",
+                "external_urls": {"spotify": "https://open.spotify.com/album/album-123"},
+            },
             "item": {
                 "id": "track-123",
                 "name": "Song A",
                 "duration_ms": 210000,
                 "type": "track",
-                "album": {"name": "Album A"},
+                "album": {"id": "album-123", "name": "Album A"},
                 "artists": [{"name": "Artist A"}, {"name": "Artist B"}],
             },
         }
@@ -83,6 +88,10 @@ class SpotifyCurrentPlaybackTests(unittest.TestCase):
         self.assertEqual("Song A", snapshot["name"])
         self.assertEqual(["Artist A", "Artist B"], snapshot["artist_names"])
         self.assertEqual("Album A", snapshot["album_name"])
+        self.assertEqual("album-123", snapshot["album_id"])
+        self.assertEqual("album", snapshot["context_type"])
+        self.assertEqual("spotify:album:album-123", snapshot["context_uri"])
+        self.assertEqual("https://open.spotify.com/album/album-123", snapshot["context_url"])
         self.assertEqual(12345, snapshot["progress_ms"])
         self.assertEqual(210000, snapshot["duration_ms"])
         self.assertTrue(snapshot["is_playing"])

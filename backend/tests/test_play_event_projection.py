@@ -14,6 +14,8 @@ from backend.app.db import (
     insert_listenlab_player_play,
     insert_raw_spotify_history_observation,
     insert_raw_spotify_recent_observation,
+    refresh_source_track_play_count_cache,
+    update_listenlab_player_play_progress,
 )
 from backend.app.play_event_projector import (
     backfill_fact_play_event_release_track_identity,
@@ -649,6 +651,171 @@ class PlayEventProjectionTests(unittest.TestCase):
         self.assertEqual("matched", row[1])
         self.assertEqual("track-1", row[2])
         self.assertEqual(240000, row[3])
+
+    def test_player_listen_counts_only_after_crossing_sixty_five_percent(self) -> None:
+        run_id = "run-player-threshold"
+        insert_ingest_run(
+            run_id=run_id,
+            source_type="listenlab_player",
+            started_at="2026-06-20T12:00:00Z",
+            source_ref="test",
+        )
+        inserted = insert_listenlab_player_play(
+            ingest_run_id=run_id,
+            source_row_key="player-threshold-row",
+            source_event_id="player-threshold-event",
+            user_id="user-1",
+            played_at="2026-06-20T12:00:00Z",
+            ms_played=0,
+            ms_played_confidence="in_progress",
+            spotify_track_uri="spotify:track:threshold-track",
+            spotify_track_id="threshold-track",
+            track_name_raw="Threshold Song",
+            artist_name_raw="Threshold Artist",
+            album_name_raw="Threshold Album",
+            spotify_album_id="threshold-album",
+            spotify_artist_ids_json="[]",
+            track_duration_ms=100_000,
+            raw_payload_json="{}",
+        )
+        reconcile_fact_play_events_for_ingest_run(source_type="listenlab_player", run_id=run_id)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            before = connection.execute(
+                "SELECT play_count FROM source_track_play_count_cache WHERE spotify_track_id = 'threshold-track'"
+            ).fetchone()
+        self.assertIsNone(before)
+
+        below = update_listenlab_player_play_progress(
+            row_id=int(inserted["row_id"]),
+            user_id="user-1",
+            ms_played=64_999,
+            ms_played_confidence="in_progress",
+        )
+        self.assertFalse(below["crossed_listen_threshold"])
+
+        qualified = update_listenlab_player_play_progress(
+            row_id=int(inserted["row_id"]),
+            user_id="user-1",
+            ms_played=65_000,
+            ms_played_confidence="listened",
+        )
+        self.assertTrue(qualified["crossed_listen_threshold"])
+        refresh_source_track_play_count_cache()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            after = connection.execute(
+                "SELECT play_count, last_played_at FROM source_track_play_count_cache WHERE spotify_track_id = 'threshold-track'"
+            ).fetchone()
+        self.assertEqual(1, after[0])
+        self.assertEqual("2026-06-20T12:01:05Z", after[1])
+
+    def test_play_count_combines_interrupted_same_track_fragments(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, duration_ms, fetched_at
+                ) VALUES ('fragment-track', 100000, '2026-06-20T12:00:00Z')
+                """
+            )
+            for index, (started_at, ended_at, played_ms) in enumerate(
+                (
+                    ("2026-06-20T12:00:00Z", "2026-06-20T12:00:30Z", 30000),
+                    ("2026-06-20T12:05:00Z", "2026-06-20T12:05:30Z", 30000),
+                    ("2026-06-20T12:10:00Z", "2026-06-20T12:10:30Z", 30000),
+                )
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO fact_play_event (
+                      canonical_started_at,
+                      canonical_ended_at,
+                      canonical_ms_played,
+                      ms_played_confidence,
+                      spotify_track_id,
+                      timing_source,
+                      matched_state
+                    ) VALUES (?, ?, ?, 'high', 'fragment-track', 'history', 'history_only')
+                    """,
+                    (started_at, ended_at, played_ms),
+                )
+            refresh_source_track_play_count_cache(connection)
+            combined = connection.execute(
+                """
+                SELECT play_count, last_played_at
+                FROM source_track_play_count_cache
+                WHERE spotify_track_id = 'fragment-track'
+                """
+            ).fetchone()
+            self.assertEqual((1, "2026-06-20T12:10:30Z"), combined)
+
+            connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_started_at,
+                  canonical_ended_at,
+                  canonical_ms_played,
+                  ms_played_confidence,
+                  spotify_track_id,
+                  timing_source,
+                  matched_state
+                ) VALUES (
+                  '2026-06-20T12:15:00Z',
+                  '2026-06-20T12:16:20Z',
+                  80000,
+                  'high',
+                  'fragment-track',
+                  'history',
+                  'history_only'
+                )
+                """
+            )
+            refresh_source_track_play_count_cache(connection)
+            over_full_duration = connection.execute(
+                """
+                SELECT play_count
+                FROM source_track_play_count_cache
+                WHERE spotify_track_id = 'fragment-track'
+                """
+            ).fetchone()
+            self.assertEqual((2,), over_full_duration)
+
+    def test_play_count_does_not_combine_fragments_across_another_track(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.executemany(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, duration_ms, fetched_at
+                ) VALUES (?, 100000, '2026-06-20T12:00:00Z')
+                """,
+                (("split-track",), ("intervening-track",)),
+            )
+            connection.executemany(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_started_at,
+                  canonical_ended_at,
+                  canonical_ms_played,
+                  ms_played_confidence,
+                  spotify_track_id,
+                  timing_source,
+                  matched_state
+                ) VALUES (?, ?, ?, 'high', ?, 'history', 'history_only')
+                """,
+                (
+                    ("2026-06-20T12:00:00Z", "2026-06-20T12:00:40Z", 40000, "split-track"),
+                    ("2026-06-20T12:01:00Z", "2026-06-20T12:02:10Z", 70000, "intervening-track"),
+                    ("2026-06-20T12:03:00Z", "2026-06-20T12:03:40Z", 40000, "split-track"),
+                ),
+            )
+            refresh_source_track_play_count_cache(connection)
+            rows = dict(
+                connection.execute(
+                    "SELECT spotify_track_id, play_count FROM source_track_play_count_cache"
+                ).fetchall()
+            )
+            self.assertNotIn("split-track", rows)
+            self.assertEqual(1, rows["intervening-track"])
 
 
 if __name__ == "__main__":

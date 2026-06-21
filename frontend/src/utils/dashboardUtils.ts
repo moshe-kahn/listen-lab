@@ -15,6 +15,7 @@ import type {
   TrackCatalogLookupItem,
   TrackRankingMode,
 } from "../types/appTypes";
+import { displayAlbumName } from "./trackDisplayName";
 
 export type DebugSession = {
   id: string;
@@ -307,7 +308,7 @@ export function previewItems(
 ) {
   return items
     .map((item) => {
-      const label = item.name ?? item.track_name ?? item.playlist_name ?? "";
+      const sourceLabel = item.name ?? item.track_name ?? item.playlist_name ?? "";
       const isTrack = Boolean(item.track_name);
       const isPlaylist = Boolean(item.playlist_name);
       const kind: PreviewItem["kind"] = isTrack
@@ -319,6 +320,7 @@ export function previewItems(
             : item.artist_name
               ? "album"
               : "artist";
+      const label = kind === "album" ? displayAlbumName(sourceLabel) : sourceLabel;
       const meta = isTrack
         ? item.artist_name ?? null
         : isPlaylist
@@ -327,7 +329,7 @@ export function previewItems(
             : "Playlist"
           : item.artist_name ?? null;
       const detail = isTrack
-        ? item.album_name ?? null
+        ? item.album_name ? displayAlbumName(item.album_name) : null
         : item.release_year
           ? item.release_year
           : isPlaylist
@@ -361,7 +363,7 @@ export function previewItems(
           ? item.artist_name.split(",").map((name) => ({ name: name.trim() })).filter((artist) => Boolean(artist.name))
           : null,
         sourceAlbumId: kind === "album" ? item.album_id ?? null : null,
-        sourceAlbumName: kind === "album" ? label : null,
+        sourceAlbumName: kind === "album" ? sourceLabel : null,
         sourceAlbumImage: kind === "album" ? item.image_url ?? null : null,
         sourceAlbumUrl: kind === "album" ? item.url ?? item.album_url ?? "" : null,
         sourceAlbumYear: kind === "album" ? item.release_year ?? null : null,

@@ -17,6 +17,7 @@ from backend.app.auth.session import (
 )
 from backend.app.auth.token import _refresh_spotify_access_token, _require_token
 from backend.app.config import get_settings
+from backend.app.db import list_spotify_auth_users
 from backend.app.spotify_http import _fetch_spotify_profile
 from backend.app.spotify_rate_limit import (
     _spotify_cooldown_seconds_remaining,
@@ -29,6 +30,22 @@ from backend.app.utils.time_helpers import _expires_at_from_expires_in
 settings = get_settings()
 logger = logging.getLogger("listenlabs.auth")
 router = APIRouter(tags=["auth"])
+
+
+def _offline_oauth_profile(request: Request) -> dict[str, Any] | None:
+    existing_user = request.session.get("spotify_user") or {}
+    existing_id = str(existing_user.get("id") or request.session.get("user_id") or "").strip()
+    if existing_id:
+        return {
+            "id": existing_id,
+            "display_name": existing_user.get("display_name"),
+            "email": existing_user.get("email"),
+        }
+    active_users = list_spotify_auth_users(active_only=True, limit=2)
+    if len(active_users) != 1:
+        return None
+    spotify_user_id = str(active_users[0].get("spotify_user_id") or active_users[0].get("user_id") or "").strip()
+    return {"id": spotify_user_id, "display_name": None, "email": None} if spotify_user_id else None
 
 
 @router.get("/auth/login")
@@ -124,8 +141,14 @@ async def auth_callback(request: Request, code: str | None = None, state: str | 
     try:
         profile = await _fetch_spotify_profile(access_token)
     except HTTPException as exc:
-        logger.warning("Spotify profile fetch failed after token exchange: %s", exc.detail)
-        return RedirectResponse(url=_callback_redirect_url("profile_error"), status_code=302)
+        profile = _offline_oauth_profile(request) if exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS else None
+        if profile is None:
+            logger.warning("Spotify profile fetch failed after token exchange: %s", exc.detail)
+            return RedirectResponse(url=_callback_redirect_url("profile_error"), status_code=302)
+        logger.warning(
+            "Spotify profile fetch was rate-limited after token exchange; completing OAuth with existing local identity %s.",
+            profile["id"],
+        )
 
     spotify_user_id = str(profile.get("id") or "").strip()
     if not spotify_user_id:
@@ -210,6 +233,7 @@ async def auth_session(request: Request) -> dict[str, Any]:
         "display_name": user.get("display_name"),
         "spotify_user_id": user.get("id") or (str(token_state.get("spotify_user_id")) if token_state else None),
         "email": user.get("email"),
+        "spotify_cooldown_seconds_remaining": _spotify_cooldown_seconds_remaining(),
     }
 
 

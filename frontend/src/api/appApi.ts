@@ -17,6 +17,7 @@ import type {
   IdentityAuditSavedSubmissionReadResponse,
   IdentityAuditSubmissionDryRunResponse,
   LikedTracksResponse,
+  ListeningLogResponse,
   LikedTracksSyncResponse,
   MergedTrackAggregateResponse,
   ReleaseTrackDetailResponse,
@@ -45,6 +46,35 @@ const TRACK_MAPPING_FETCH_TIMEOUT_MS = 20000;
 const TRACKS_FORMULA_FETCH_LIMIT = 100;
 const LIKED_TRACKS_SYNC_FAILURE_SIMULATION_KEY = "listenlab.simulateLikedSyncFailure";
 const LIKED_TRACKS_SYNC_FAILURE_SIMULATION_QUERY = "simulate_liked_sync_failure";
+
+export async function fetchActivityListeningLog(
+  limit: number = 50,
+  offset: number = 0,
+  likedOnly: boolean = false,
+): Promise<ListeningLogResponse> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+    source_filter: "all",
+  });
+  if (likedOnly) {
+    params.set("liked_only", "true");
+  }
+  const response = await fetch(`${apiBaseUrl}/debug/listening-log?${params.toString()}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    let detail = "Failed to load filtered activity.";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      detail = payload.detail || detail;
+    } catch {
+      // Keep fallback detail.
+    }
+    throw new Error(`Activity (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as ListeningLogResponse;
+}
 
 export async function fetchLikedTracks(limit: number = 50, offset: number = 0): Promise<LikedTracksResponse> {
     const response = await fetch(
@@ -95,25 +125,18 @@ export async function fetchAllLikedTracks(pageLimit: number = 200): Promise<Like
     };
   }
 
-export async function fetchLikedTrackContains(spotifyTrackId: string): Promise<{ spotify_track_id: string; is_liked: boolean }> {
-    const response = await fetch(
-      `${apiBaseUrl}/me/liked-tracks/contains?spotify_track_id=${encodeURIComponent(spotifyTrackId)}`,
-      { credentials: "include" },
-    );
-    if (!response.ok) {
-      let detail = "Failed to check liked track.";
-      try {
-        const payload = (await response.json()) as { detail?: string };
-        if (payload.detail) {
-          detail = payload.detail;
-        }
-      } catch {
-        // ignore invalid error payloads
-      }
-      throw new Error(`Liked Track Contains (${response.status}): ${detail}`);
-    }
-    return (await response.json()) as { spotify_track_id: string; is_liked: boolean };
+export async function fetchLikedTracksContains(spotifyTrackIds: string[]): Promise<{ items: Record<string, boolean> }> {
+  const response = await fetch(`${apiBaseUrl}/me/liked-tracks/contains`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spotify_track_ids: spotifyTrackIds }),
+  });
+  if (!response.ok) {
+    throw new Error(`Liked Tracks Contains (${response.status})`);
   }
+  return (await response.json()) as { items: Record<string, boolean> };
+}
 
 export async function postLikedTracksSync(mode: "quick" | "full" = "quick"): Promise<LikedTracksSyncResponse> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };

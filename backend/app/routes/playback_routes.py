@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 
 from backend.app.artist_album_evidence import list_artist_album_evidence
+from backend.app.album_family import build_album_family_context
 from backend.app.artwork import resolve_artist_artwork
 from backend.app.catalog_identity_promotion import promote_catalog_album_tracks_to_identity
 from backend.app.auth.session import _require_local_data_session, _require_user_id
@@ -17,6 +19,7 @@ from backend.app.db import (
     complete_ingest_run,
     insert_ingest_run,
     insert_listenlab_player_play,
+    refresh_source_track_play_count_cache,
     sqlite_connection,
     update_listenlab_player_play_progress,
 )
@@ -212,6 +215,48 @@ def _cached_album_track_rows_from_track_catalog(album_id: str) -> tuple[list[dic
     ], complete
 
 
+def _enriched_album_items_with_family(
+    *,
+    album_id: str,
+    items: list[dict[str, Any]],
+    include_family: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    enriched = enrich_album_track_rows_with_release_metadata(items)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        album_row = connection.execute(
+            """
+            SELECT COALESCE(sac.name, ra.primary_name, sa.source_name_raw) AS album_name
+            FROM source_album sa
+            LEFT JOIN source_album_map sam
+              ON sam.source_album_id = sa.id
+             AND sam.status = 'accepted'
+            LEFT JOIN release_album ra ON ra.id = sam.release_album_id
+            LEFT JOIN spotify_album_catalog sac ON sac.spotify_album_id = sa.external_id
+            WHERE sa.source_name = 'spotify' AND sa.external_id = ?
+            LIMIT 1
+            """,
+            (album_id,),
+        ).fetchone()
+    album_name = str(album_row["album_name"] or "") if album_row else ""
+    if re.search(r"\b(?:remix|rmx)\b", album_name, re.IGNORECASE):
+        for item in enriched:
+            if not item.get("release_track_cluster_candidate_type"):
+                # The release itself proves remix semantics even when no single
+                # original recording can be linked safely (for example a medley).
+                item["release_track_cluster_candidate_type"] = "track_family_candidate"
+                item["release_track_cluster_relationship_kind"] = "remix"
+    if not include_family:
+        return enriched, None
+    family_context = build_album_family_context(
+        selected_spotify_album_id=album_id,
+        selected_items=enriched,
+    )
+    if family_context is None:
+        return enriched, None
+    family_payload = {key: value for key, value in family_context.items() if key != "items"}
+    return list(family_context["items"]), family_payload
+
+
 async def _fetch_and_cache_album_tracks(access_token: str, album_id: str, market: str) -> list[dict[str, Any]]:
     fetched_at = _utc_now()
     items: list[dict[str, Any]] = []
@@ -296,6 +341,7 @@ async def auth_playback_album_tracks(
     force_spotify: bool = False,
     local_only: bool = False,
     promote_identity: bool = False,
+    include_family: bool = False,
 ) -> dict[str, Any]:
     _require_user_id(request)
     track_id_candidate = track_id or _spotify_track_id_from_uri(track_uri)
@@ -315,20 +361,30 @@ async def auth_playback_album_tracks(
                 album_ids=[normalized_album_id],
                 apply=True,
             ) if promote_identity else None
+            response_items, album_family = _enriched_album_items_with_family(
+                album_id=normalized_album_id,
+                items=cached_items,
+                include_family=include_family,
+            )
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
-                "items": enrich_album_track_rows_with_release_metadata(cached_items),
+                "items": response_items,
                 "source": source,
                 "cached": True,
                 "partial": False,
                 "identity_promotion": promotion,
+                "album_family": album_family,
             }
 
         catalog_items, catalog_complete = _cached_album_track_rows_from_track_catalog(normalized_album_id)
         if len(catalog_items) > len(local_fallback_items):
             local_fallback_items = catalog_items
         if not force_spotify and (catalog_complete or (catalog_items and not cached_items)):
+            promotion = promote_catalog_album_tracks_to_identity(
+                album_ids=[normalized_album_id],
+                apply=True,
+            ) if promote_identity else None
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
@@ -336,6 +392,7 @@ async def auth_playback_album_tracks(
                 "source": "track_catalog",
                 "cached": True,
                 "partial": not catalog_complete,
+                "identity_promotion": promotion,
             }
 
     if local_only:
@@ -390,14 +447,20 @@ async def auth_playback_album_tracks(
             album_ids=[normalized_album_id],
             apply=True,
         ) if promote_identity else None
+        response_items, album_family = _enriched_album_items_with_family(
+            album_id=normalized_album_id,
+            items=cached_items,
+            include_family=include_family,
+        )
         return {
             "album_id": normalized_album_id,
             "track_id": normalized_track_id,
-            "items": enrich_album_track_rows_with_release_metadata(cached_items),
+            "items": response_items,
             "source": source,
             "cached": True,
             "partial": False,
             "identity_promotion": promotion,
+            "album_family": album_family,
         }
 
     try:
@@ -417,14 +480,20 @@ async def auth_playback_album_tracks(
         album_ids=[normalized_album_id],
         apply=True,
     ) if promote_identity else None
+    response_items, album_family = _enriched_album_items_with_family(
+        album_id=normalized_album_id,
+        items=items,
+        include_family=include_family,
+    )
     return {
         "album_id": normalized_album_id,
         "track_id": normalized_track_id,
-        "items": enrich_album_track_rows_with_release_metadata(items),
+        "items": response_items,
         "source": "spotify_album_tracks",
         "cached": False,
         "partial": False,
         "identity_promotion": promotion,
+        "album_family": album_family,
     }
 
 
@@ -449,15 +518,22 @@ async def auth_player_listen_event(request: Request, payload: dict[str, Any] = B
     confidence = str(payload.get("ms_played_confidence") or ("complete" if duration_ms and progress_ms >= duration_ms * 0.98 else "in_progress"))
 
     if payload.get("row_id") is not None:
-        updated = update_listenlab_player_play_progress(
+        update_result = update_listenlab_player_play_progress(
             row_id=int(payload["row_id"]),
             user_id=str(user_id),
             ms_played=progress_ms,
             ms_played_confidence=confidence,
         )
-        if not updated:
+        if not update_result["updated"]:
             raise HTTPException(status_code=404, detail="ListenLab player event was not found.")
-        return {"ok": True, "row_id": int(payload["row_id"]), "action": "updated"}
+        if update_result["crossed_listen_threshold"]:
+            refresh_source_track_play_count_cache()
+        return {
+            "ok": True,
+            "row_id": int(payload["row_id"]),
+            "action": "updated",
+            "listen_qualified": update_result["crossed_listen_threshold"],
+        }
 
     run_id = f"listenlab-player-{uuid.uuid4()}"
     insert_ingest_run(
@@ -500,6 +576,7 @@ async def auth_player_listen_event(request: Request, payload: dict[str, Any] = B
         "row_id": int(result["row_id"]),
         "event_id": event_id,
         "action": result.get("action"),
+        "listen_qualified": progress_ms >= (int(duration_ms * 0.65) if duration_ms and duration_ms > 0 else 30_000),
         "projection": projection,
     }
 

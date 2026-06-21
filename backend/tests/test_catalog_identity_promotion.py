@@ -129,3 +129,108 @@ class CatalogIdentityPromotionTests(unittest.TestCase):
         repeated = promote_catalog_album_tracks_to_identity(album_ids=["bitcrush-album"], apply=True)
         self.assertEqual([], repeated["touched_release_track_ids"])
         self.assertIsNone(repeated["cluster_refresh"])
+
+    def test_track_catalog_promotion_adds_missing_collaborator_credit(self) -> None:
+        black_pumas = {"id": "black-pumas", "name": "Black Pumas", "uri": "spotify:artist:black-pumas"}
+        lucius = {"id": "lucius", "name": "Lucius", "uri": "spotify:artist:lucius"}
+        with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+            black_pumas_id = _ensure_source_artist_mapping_with_connection(
+                connection,
+                external_id="black-pumas",
+                external_uri="spotify:artist:black-pumas",
+                artist_name="Black Pumas",
+                raw_payload_json=json.dumps(black_pumas),
+            )
+            release_track_id = _ensure_source_track_mapping_with_connection(
+                connection,
+                source_name="spotify",
+                external_id="strangers-track",
+                external_uri="spotify:track:strangers-track",
+                track_name="Strangers",
+                track_duration_ms=192_963,
+                raw_payload_json=json.dumps({"id": "strangers-track", "name": "Strangers"}),
+                create_match_method="test",
+                create_confidence=1.0,
+                create_explanation="test seed",
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (release_track_id, black_pumas_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, album_type, release_date, total_tracks,
+                  artists_json, raw_json, fetched_at, last_status
+                ) VALUES ('strangers-single', 'Strangers (From "Life In A Day")', 'single', '2021-02-04', 1,
+                  ?, ?, '2026-06-19T00:00:00Z', 'ok')
+                """,
+                (json.dumps([black_pumas, lucius]), json.dumps({"artists": [black_pumas, lucius]})),
+            )
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, name, duration_ms, disc_number, track_number, album_id,
+                  artists_json, raw_json, fetched_at, last_status
+                ) VALUES ('strangers-track', 'Strangers', 192963, 1, 1, 'strangers-single',
+                  ?, ?, '2026-06-19T00:00:00Z', 'ok')
+                """,
+                (json.dumps([black_pumas, lucius]), json.dumps({"artists": [black_pumas, lucius]})),
+            )
+
+        promote_catalog_album_tracks_to_identity(album_ids=["strangers-single"], apply=True)
+
+        with sqlite_connection(row_factory=sqlite3.Row) as connection:
+            artists = connection.execute(
+                """
+                SELECT a.canonical_name
+                FROM track_artist ta
+                JOIN artist a ON a.id = ta.artist_id
+                WHERE ta.release_track_id = ? AND ta.role = 'primary'
+                ORDER BY ta.billing_index, a.canonical_name
+                """,
+                (release_track_id,),
+            ).fetchall()
+        self.assertEqual(["Black Pumas", "Lucius"], [row["canonical_name"] for row in artists])
+
+    def test_existing_source_album_mapping_allows_tracklist_promotion_without_album_catalog(self) -> None:
+        radiohead = {"id": "radiohead", "name": "Radiohead", "uri": "spotify:artist:radiohead"}
+        remixer = {"id": "remixer", "name": "Remixer", "uri": "spotify:artist:remixer"}
+        with sqlite_connection(write=True) as connection:
+            release_album_id = int(connection.execute(
+                "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Remix Album', 'remix album')"
+            ).lastrowid)
+            source_album_id = int(connection.execute(
+                "INSERT INTO source_album (source_name, external_id, source_name_raw) VALUES ('spotify', 'remix-album', 'Remix Album')"
+            ).lastrowid)
+            connection.execute(
+                """
+                INSERT INTO source_album_map (
+                  source_album_id, release_album_id, match_method, confidence, status
+                ) VALUES (?, ?, 'seed', 1.0, 'accepted')
+                """,
+                (source_album_id, release_album_id),
+            )
+
+        _upsert_album_track(
+            album_id="remix-album",
+            track={
+                "id": "remix-track",
+                "name": "Song - Remixer Rmx",
+                "uri": "spotify:track:remix-track",
+                "duration_ms": 180_000,
+                "disc_number": 1,
+                "track_number": 1,
+                "artists": [radiohead, remixer],
+            },
+            market="US",
+            fetched_at="2026-06-21T00:00:00Z",
+            last_status="ok",
+            last_error=None,
+        )
+
+        result = promote_catalog_album_tracks_to_identity(album_ids=["remix-album"], apply=True)
+
+        promoted = next(item for item in result["promoted_tracks"] if item.get("spotify_track_id") == "remix-track")
+        self.assertEqual(release_album_id, promoted["release_album_id"])
+        self.assertIsInstance(promoted["release_track_id"], int)

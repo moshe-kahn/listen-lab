@@ -1540,6 +1540,20 @@ CREATE TABLE IF NOT EXISTS artist_promotion_skip_log (
 CREATE INDEX IF NOT EXISTS idx_artist_promotion_skip_log_seen
   ON artist_promotion_skip_log(last_seen_at DESC);
 """,
+    36: """
+CREATE TABLE IF NOT EXISTS album_family_review (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  album_family_id INTEGER NOT NULL REFERENCES album_family(id),
+  canonical_release_album_id INTEGER NOT NULL REFERENCES release_album(id),
+  release_album_ids_json TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_album_family_review_family
+  ON album_family_review(album_family_id, created_at DESC);
+""",
 }
 
 
@@ -1772,7 +1786,7 @@ def insert_raw_play_event(
               offline,
               conn_country,
               spotify_track_uri,
-              spotify_track_id,
+              fact_play_event.spotify_track_id,
               track_name_raw,
               artist_name_raw,
               album_name_raw,
@@ -2287,11 +2301,11 @@ def update_listenlab_player_play_progress(
     user_id: str,
     ms_played: int,
     ms_played_confidence: str,
-) -> bool:
+) -> dict[str, Any]:
     with sqlite_connection(write=True) as connection:
         row = connection.execute(
             """
-            SELECT played_at, track_duration_ms
+            SELECT played_at, track_duration_ms, ms_played
             FROM raw_listenlab_player_play
             WHERE id = ? AND user_id = ?
             LIMIT 1
@@ -2299,9 +2313,10 @@ def update_listenlab_player_play_progress(
             (int(row_id), str(user_id)),
         ).fetchone()
         if row is None:
-            return False
+            return {"updated": False, "crossed_listen_threshold": False}
         played_at = str(row[0])
         duration_ms = row[1]
+        previous_ms_played = max(0, int(row[2] or 0))
         safe_ms_played = max(0, int(ms_played))
         if duration_ms is not None:
             safe_ms_played = min(safe_ms_played, max(0, int(duration_ms)))
@@ -2344,7 +2359,15 @@ def update_listenlab_player_play_progress(
             )
         except ValueError:
             pass
-        return cursor.rowcount == 1
+        listen_threshold_ms = (
+            int(max(0, int(duration_ms)) * 0.65)
+            if duration_ms is not None and int(duration_ms) > 0
+            else 30_000
+        )
+        return {
+            "updated": cursor.rowcount == 1,
+            "crossed_listen_threshold": previous_ms_played < listen_threshold_ms <= safe_ms_played,
+        }
 
 
 def _ms_played_method_rank(method: str | None) -> int:
@@ -2967,15 +2990,27 @@ def query_album_family_grouping_candidates(
         ).fetchall()
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    anchor_candidates_by_artist: dict[str, set[str]] = {}
+    for row in rows:
+        candidate_anchor = _album_family_anchor_key(str(row["primary_name"] or ""))
+        candidate_artist = str(row["primary_artist_signature"] or "").strip().lower()
+        if candidate_anchor:
+            anchor_candidates_by_artist.setdefault(candidate_artist, set()).add(candidate_anchor)
     for row in rows:
         release_album_id = int(row["release_album_id"])
         primary_name = str(row["primary_name"] or "")
         if not primary_name:
             continue
-        anchor_key = _album_family_anchor_key(primary_name)
-        if not anchor_key:
+        own_anchor_key = _album_family_anchor_key(primary_name)
+        if not own_anchor_key:
             continue
         artist_signature = str(row["primary_artist_signature"] or "").strip().lower()
+        prefix_anchors = [
+            candidate
+            for candidate in anchor_candidates_by_artist.get(artist_signature, set())
+            if own_anchor_key != candidate and own_anchor_key.startswith(f"{candidate} ")
+        ]
+        anchor_key = max(prefix_anchors, key=len) if prefix_anchors else own_anchor_key
         group_key = (anchor_key, artist_signature)
         grouped.setdefault(group_key, []).append(
             {
@@ -2987,6 +3022,7 @@ def query_album_family_grouping_candidates(
                 "primary_artist_id_signature": str(row["primary_artist_id_signature"] or ""),
                 "track_count": int(row["track_count"] or 0),
                 "effective_album_family_id": int(row["effective_album_family_id"]),
+                "anchor_inferred_from_prefix": anchor_key != own_anchor_key,
             }
         )
 
@@ -3053,6 +3089,8 @@ def query_album_family_grouping_candidates(
             warning_flags.append("weak_title_match")
         if all(int(item.get("track_count") or 0) <= 0 for item in albums):
             warning_flags.append("missing_track_evidence")
+        if any(bool(item.get("anchor_inferred_from_prefix")) for item in albums):
+            warning_flags.append("unverified_title_prefix_extension")
         normalized_names_blob = " ".join(str(item.get("normalized_name") or "") for item in albums).strip()
         if normalized_names_blob and _COMPILATION_RISK_PATTERN.search(normalized_names_blob):
             warning_flags.append("compilation_risk")
@@ -3077,7 +3115,13 @@ def query_album_family_grouping_candidates(
         if "different_artist" in warning_flags or "weak_title_match" in warning_flags:
             recommended_decision = "reject"
         elif any(
-            flag in warning_flags for flag in ["large_year_gap", "missing_track_evidence", "compilation_risk", "soundtrack_risk"]
+            flag in warning_flags for flag in [
+                "large_year_gap",
+                "missing_track_evidence",
+                "compilation_risk",
+                "soundtrack_risk",
+                "unverified_title_prefix_extension",
+            ]
         ):
             recommended_decision = "needs_more_evidence"
         elif confidence_score >= 0.8:
@@ -6300,15 +6344,114 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
               last_played_at,
               updated_at
             )
+            WITH base_events AS (
+              SELECT
+                fact_play_event.id,
+                fact_play_event.spotify_track_id,
+                fact_play_event.canonical_started_at,
+                fact_play_event.canonical_ended_at,
+                fact_play_event.canonical_ms_played,
+                fact_play_event.timing_source,
+                COALESCE(recent.track_duration_ms, player.track_duration_ms, catalog.duration_ms, 0) AS duration_ms
+              FROM fact_play_event
+              LEFT JOIN fact_play_event_recent_link recent_link
+                ON recent_link.fact_play_event_id = fact_play_event.id
+               AND recent_link.is_primary = 1
+              LEFT JOIN raw_spotify_recent recent
+                ON recent.id = recent_link.raw_spotify_recent_id
+              LEFT JOIN fact_play_event_player_link player_link
+                ON player_link.fact_play_event_id = fact_play_event.id
+               AND player_link.is_primary = 1
+              LEFT JOIN raw_listenlab_player_play player
+                ON player.id = player_link.raw_listenlab_player_play_id
+              LEFT JOIN spotify_track_catalog catalog
+                ON catalog.spotify_track_id = fact_play_event.spotify_track_id
+              WHERE fact_play_event.spotify_track_id IS NOT NULL
+                AND trim(fact_play_event.spotify_track_id) != ''
+            ),
+            ordered_events AS (
+              SELECT
+                base_events.*,
+                lag(spotify_track_id) OVER event_order AS previous_track_id,
+                lag(canonical_ended_at) OVER event_order AS previous_ended_at
+              FROM base_events
+              WINDOW event_order AS (ORDER BY canonical_ended_at, id)
+            ),
+            marked_events AS (
+              SELECT
+                ordered_events.*,
+                CASE
+                  WHEN canonical_ms_played IS NOT NULL
+                   AND duration_ms > 0
+                   AND spotify_track_id = previous_track_id
+                   AND (
+                     julianday(COALESCE(
+                       canonical_started_at,
+                       datetime(canonical_ended_at, printf('-%f seconds', canonical_ms_played / 1000.0))
+                     )) - julianday(previous_ended_at)
+                   ) * 86400.0 <= 14400.0
+                  THEN 0
+                  ELSE 1
+                END AS starts_session
+              FROM ordered_events
+            ),
+            session_events AS (
+              SELECT
+                marked_events.*,
+                sum(starts_session) OVER (ORDER BY canonical_ended_at, id) AS session_id
+              FROM marked_events
+            ),
+            known_sessions AS (
+              SELECT
+                spotify_track_id,
+                session_id,
+                max(duration_ms) AS duration_ms,
+                CASE
+                  WHEN min(CASE WHEN timing_source = 'recent_fallback' THEN 1 ELSE 0 END) = 1
+                  THEN min(sum(max(0, canonical_ms_played)), max(duration_ms))
+                  ELSE sum(max(0, canonical_ms_played))
+                END AS listened_ms,
+                min(canonical_ended_at) AS first_played_at,
+                max(canonical_ended_at) AS last_played_at
+              FROM session_events
+              WHERE canonical_ms_played IS NOT NULL
+                AND duration_ms > 0
+              GROUP BY spotify_track_id, session_id
+            ),
+            qualified_known_sessions AS (
+              SELECT
+                spotify_track_id,
+                CAST(listened_ms / duration_ms AS INTEGER)
+                  + CASE
+                      WHEN (listened_ms % duration_ms) >= 0.65 * duration_ms THEN 1
+                      ELSE 0
+                    END AS play_count,
+                first_played_at,
+                last_played_at
+              FROM known_sessions
+            ),
+            counted_events AS (
+              SELECT spotify_track_id, play_count, first_played_at, last_played_at
+              FROM qualified_known_sessions
+              WHERE play_count > 0
+              UNION ALL
+              SELECT spotify_track_id, 1, canonical_ended_at, canonical_ended_at
+              FROM base_events
+              WHERE canonical_ms_played IS NOT NULL
+                AND duration_ms <= 0
+                AND canonical_ms_played >= 30000
+              UNION ALL
+              SELECT spotify_track_id, 1, canonical_ended_at, canonical_ended_at
+              FROM base_events
+              WHERE canonical_ms_played IS NULL
+            )
             SELECT
               spotify_track_id,
-              count(*) AS play_count,
-              min(canonical_ended_at) AS first_played_at,
-              max(canonical_ended_at) AS last_played_at,
+              sum(play_count) AS play_count,
+              min(first_played_at) AS first_played_at,
+              max(last_played_at) AS last_played_at,
               strftime('%Y-%m-%dT%H:%M:%fZ','now') AS updated_at
-            FROM fact_play_event
-            WHERE spotify_track_id IS NOT NULL
-              AND trim(spotify_track_id) != ''
+            FROM counted_events
             GROUP BY spotify_track_id
             """
         )

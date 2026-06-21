@@ -117,34 +117,81 @@ def _album_row(connection: sqlite3.Connection, album_id: str) -> sqlite3.Row | N
     ).fetchone()
 
 
+def _mapped_release_album_row(connection: sqlite3.Connection, album_id: str) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT ra.id AS release_album_id, ra.primary_name, ra.release_year
+        FROM source_album sa
+        JOIN source_album_map sam
+          ON sam.source_album_id = sa.id
+         AND sam.status = 'accepted'
+        JOIN release_album ra ON ra.id = sam.release_album_id
+        WHERE sa.source_name = 'spotify'
+          AND sa.external_id = ?
+        ORDER BY sam.confidence DESC, sam.id ASC
+        LIMIT 1
+        """,
+        (album_id,),
+    ).fetchone()
+
+
 def _album_track_rows(connection: sqlite3.Connection, album_id: str) -> list[sqlite3.Row]:
     return connection.execute(
         """
+        WITH catalog_tracks AS (
+          SELECT
+            sat.spotify_album_id,
+            sat.spotify_track_id,
+            sat.disc_number,
+            sat.track_number,
+            sat.name,
+            sat.duration_ms,
+            sat.artists_json,
+            sat.raw_json
+          FROM spotify_album_track sat
+          WHERE sat.spotify_album_id = ?
+          UNION ALL
+          SELECT
+            stc.album_id AS spotify_album_id,
+            stc.spotify_track_id,
+            stc.disc_number,
+            stc.track_number,
+            stc.name,
+            stc.duration_ms,
+            stc.artists_json,
+            stc.raw_json
+          FROM spotify_track_catalog stc
+          WHERE stc.album_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM spotify_album_track existing_sat
+              WHERE existing_sat.spotify_album_id = stc.album_id
+                AND existing_sat.spotify_track_id = stc.spotify_track_id
+            )
+        )
         SELECT
-          sat.spotify_album_id,
-          sat.spotify_track_id,
-          sat.disc_number,
-          sat.track_number,
-          sat.name,
-          sat.duration_ms,
-          sat.artists_json,
-          sat.raw_json,
+          ct.spotify_album_id,
+          ct.spotify_track_id,
+          ct.disc_number,
+          ct.track_number,
+          ct.name,
+          ct.duration_ms,
+          ct.artists_json,
+          ct.raw_json,
           st.id AS source_track_id,
           stm.release_track_id,
           rt.primary_name AS release_track_name
-        FROM spotify_album_track sat
+        FROM catalog_tracks ct
         LEFT JOIN source_track st
           ON st.source_name = 'spotify'
-         AND st.external_id = sat.spotify_track_id
+         AND st.external_id = ct.spotify_track_id
         LEFT JOIN source_track_map stm
           ON stm.source_track_id = st.id
          AND stm.status = 'accepted'
         LEFT JOIN release_track rt
           ON rt.id = stm.release_track_id
-        WHERE sat.spotify_album_id = ?
-        ORDER BY COALESCE(sat.disc_number, 1), COALESCE(sat.track_number, 999999), sat.spotify_track_id
+        ORDER BY COALESCE(ct.disc_number, 1), COALESCE(ct.track_number, 999999), ct.spotify_track_id
         """,
-        (album_id,),
+        (album_id, album_id),
     ).fetchall()
 
 
@@ -340,22 +387,26 @@ def promote_catalog_album_tracks_to_identity(
         for album_id in normalized_album_ids:
             album = _album_row(connection, album_id)
             if album is None:
-                promoted_tracks.append(
-                    {
-                        "spotify_album_id": album_id,
-                        "status": "skipped_missing_album_catalog",
-                    }
+                mapped_album = _mapped_release_album_row(connection, album_id)
+                if mapped_album is None:
+                    promoted_tracks.append(
+                        {
+                            "spotify_album_id": album_id,
+                            "status": "skipped_missing_album_catalog_and_mapping",
+                        }
+                    )
+                    continue
+                release_album_id = int(mapped_album["release_album_id"])
+                release_year = int(mapped_album["release_year"]) if mapped_album["release_year"] is not None else None
+            else:
+                release_album_id = _ensure_source_album_mapping_with_connection(
+                    connection,
+                    external_id=album_id,
+                    external_uri=f"spotify:album:{album_id}",
+                    album_name=str(album["name"] or "") or None,
+                    raw_payload_json=album["raw_json"],
                 )
-                continue
-
-            release_album_id = _ensure_source_album_mapping_with_connection(
-                connection,
-                external_id=album_id,
-                external_uri=f"spotify:album:{album_id}",
-                album_name=str(album["name"] or "") or None,
-                raw_payload_json=album["raw_json"],
-            )
-            release_year = _release_year(str(album["release_date"] or "") if album["release_date"] else None)
+                release_year = _release_year(str(album["release_date"] or "") if album["release_date"] else None)
             if release_year is not None:
                 connection.execute(
                     """
@@ -365,12 +416,13 @@ def promote_catalog_album_tracks_to_identity(
                     """,
                     (release_year, release_album_id),
                 )
-            _ensure_album_artist_links(
-                connection,
-                release_album_id=release_album_id,
-                artists_json=album["artists_json"],
-                raw_payload_json=album["raw_json"],
-            )
+            if album is not None:
+                _ensure_album_artist_links(
+                    connection,
+                    release_album_id=release_album_id,
+                    artists_json=album["artists_json"],
+                    raw_payload_json=album["raw_json"],
+                )
 
             for row in _album_track_rows(connection, album_id):
                 spotify_track_id = str(row["spotify_track_id"] or "").strip()

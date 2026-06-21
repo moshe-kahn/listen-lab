@@ -270,6 +270,39 @@ class AlbumFamilyGroupingCandidateTests(unittest.TestCase):
         self.assertIsInstance(item.get("warning_flags"), list)
         self.assertIn(item.get("recommended_decision"), {"accept", "reject", "needs_more_evidence"})
 
+    def test_title_prefix_extension_is_surfaced_for_evidence_review(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            artist_id = int(connection.execute(
+                "INSERT INTO artist (canonical_name, sort_name) VALUES ('Radiohead', 'radiohead')"
+            ).lastrowid)
+            album_ids = []
+            for name, year in (("OK Computer", 1997), ("OK Computer OKNOTOK 1997 2017", 2017)):
+                album_id = int(connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name, release_year) VALUES (?, lower(?), ?)",
+                    (name, name, year),
+                ).lastrowid)
+                album_ids.append(album_id)
+                connection.execute(
+                    "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                    (album_id, artist_id),
+                )
+                family_id = int(connection.execute(
+                    "INSERT INTO album_family (primary_name, normalized_name, release_year, canonical_release_album_id) VALUES (?, lower(?), ?, ?)",
+                    (name, name, year, album_id),
+                ).lastrowid)
+                connection.execute(
+                    "INSERT INTO album_family_map (release_album_id, album_family_id, match_method, confidence, status) VALUES (?, ?, 'seed', 1.0, 'accepted')",
+                    (album_id, family_id),
+                )
+            connection.commit()
+
+        payload = query_album_family_grouping_candidates(limit=50, offset=0)
+        item = next(candidate for candidate in payload["items"] if candidate["anchor_key"] == "ok computer")
+
+        self.assertEqual(album_ids, item["release_album_ids"])
+        self.assertIn("unverified_title_prefix_extension", item["warning_flags"])
+        self.assertEqual("needs_more_evidence", item["recommended_decision"])
+
 
 if __name__ == "__main__":
     unittest.main()

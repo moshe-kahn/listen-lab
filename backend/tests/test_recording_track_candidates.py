@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend.app.db import apply_pending_migrations, ensure_sqlite_db, refresh_source_track_play_count_cache, sqlite_connection
+from backend.app.db import (
+    apply_pending_migrations,
+    ensure_sqlite_db,
+    mark_generated_recording_track_clusters_dirty_with_connection,
+    refresh_source_track_play_count_cache,
+    sqlite_connection,
+)
 from backend.app.main import app
 from backend.app.recording_track_candidates import (
     RecordingTrackCandidateMember,
@@ -65,6 +71,17 @@ def _member(
 
 
 class RecordingTrackClassifierTests(unittest.TestCase):
+    def test_remix_album_context_links_artist_parenthetical_to_original(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Codex", artist="Radiohead", album="The King Of Limbs"),
+                _member(2, "Codex (Illum Sphere)", artist="Radiohead", album="TKOL RMX 1234567"),
+            ]
+        )
+
+        self.assertEqual("track_family_candidate", item["candidate_type"])
+        self.assertEqual("remix", item["relationship_kind"])
+
     def test_same_isrc_album_single_is_recording_safe_candidate(self) -> None:
         item = classify_recording_track_candidate_group(
             [
@@ -533,6 +550,11 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
                 """,
                 (source_track_id, release_track_id),
             )
+            mark_generated_recording_track_clusters_dirty_with_connection(
+                connection,
+                [release_track_id],
+                reason="test_seed",
+            )
             return release_track_id
 
     def test_query_returns_evidence_and_representative_without_mutating_identity(self) -> None:
@@ -616,6 +638,64 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
         self.assertEqual("derived_version", family["relationship_kind"])
         self.assertEqual({original_id, version_id}, {member["release_track_id"] for member in family["members"]})
 
+    def test_album_editions_keep_core_and_live_recordings_separate_beneath_family(self) -> None:
+        studio_ids = {
+            self._seed_release_track(
+                title="Edition Split Song",
+                artist="Edition Artist",
+                album="Edition Album",
+                spotify_id="edition-studio-original",
+                isrc=None,
+                duration_ms=240_000,
+            ),
+            self._seed_release_track(
+                title="Edition Split Song",
+                artist="Edition Artist",
+                album="Edition Album (Deluxe Edition)",
+                spotify_id="edition-studio-deluxe",
+                isrc=None,
+                duration_ms=240_000,
+            ),
+            self._seed_release_track(
+                title="Edition Split Song",
+                artist="Edition Artist",
+                album="Edition Album (Expanded Deluxe Edition)",
+                spotify_id="edition-studio-expanded",
+                isrc=None,
+                duration_ms=240_000,
+            ),
+        }
+        live_ids = {
+            self._seed_release_track(
+                title="Edition Split Song - Live In Studio",
+                artist="Edition Artist",
+                album="Edition Album (Deluxe Edition)",
+                spotify_id="edition-live-deluxe",
+                isrc=None,
+                duration_ms=260_000,
+            ),
+            self._seed_release_track(
+                title="Edition Split Song - Live In Studio",
+                artist="Edition Artist",
+                album="Edition Album (Expanded Deluxe Edition)",
+                spotify_id="edition-live-expanded",
+                isrc=None,
+                duration_ms=260_000,
+            ),
+        }
+
+        payload = query_recording_track_candidates(q="Edition Split Song", limit=20)
+        recording_member_sets = {
+            frozenset(member["release_track_id"] for member in item["members"])
+            for item in payload["items"]
+            if item["candidate_type"] == "recording_track_candidate"
+        }
+        family = next(item for item in payload["items"] if item["candidate_type"] == "track_family_candidate")
+
+        self.assertIn(frozenset(studio_ids), recording_member_sets)
+        self.assertIn(frozenset(live_ids), recording_member_sets)
+        self.assertEqual(studio_ids | live_ids, {member["release_track_id"] for member in family["members"]})
+
     def test_unique_cached_album_name_hydrates_missing_release_album_art(self) -> None:
         first_id = self._seed_release_track(
             title="Artwork Song",
@@ -637,10 +717,15 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO spotify_album_catalog (
-                  spotify_album_id, name, album_type, release_date, images_json, fetched_at, last_status
-                ) VALUES (?, ?, 'album', '2024-01-02', ?, '2026-06-17T00:00:00Z', 'ok')
+                  spotify_album_id, name, album_type, release_date, artists_json, images_json, fetched_at, last_status
+                ) VALUES (?, ?, 'album', '2024-01-02', ?, ?, '2026-06-17T00:00:00Z', 'ok')
                 """,
-                ("artwork-album-id", "Artwork Album", json.dumps([{"url": "https://images.example/artwork.jpg"}])),
+                (
+                    "artwork-album-id",
+                    "Artwork Album",
+                    json.dumps([{"name": "Artwork Artist"}]),
+                    json.dumps([{"url": "https://images.example/artwork.jpg"}]),
+                ),
             )
 
         rebuild_generated_recording_track_clusters()
@@ -649,6 +734,45 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
 
         self.assertEqual(["artwork-album-id"], first_member["spotify_album_ids"])
         self.assertEqual(["https://images.example/artwork.jpg"], first_member["album_image_urls"])
+
+    def test_unique_cached_album_name_does_not_cross_primary_artists(self) -> None:
+        first_id = self._seed_release_track(
+            title="Strangers",
+            artist="Black Pumas",
+            album="Strangers",
+            spotify_id="black-pumas-strangers",
+            isrc="USBLACKPUMAS1",
+            duration_ms=192_963,
+        )
+        self._seed_release_track(
+            title='Strangers - From "Life In A Day"',
+            artist="Black Pumas",
+            album="Black Pumas (Expanded Deluxe Edition)",
+            spotify_id="black-pumas-strangers-expanded",
+            isrc="USBLACKPUMAS1",
+            duration_ms=192_963,
+        )
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_album_catalog (
+                  spotify_album_id, name, album_type, release_date, artists_json,
+                  images_json, fetched_at, last_status
+                ) VALUES (?, 'Strangers', 'single', '2020-12-09', ?, ?, '2026-06-19T00:00:00Z', 'ok')
+                """,
+                (
+                    "roosevelt-strangers-album",
+                    json.dumps([{"name": "Roosevelt"}]),
+                    json.dumps([{"url": "https://images.example/roosevelt.jpg"}]),
+                ),
+            )
+
+        rebuild_generated_recording_track_clusters()
+        candidate = get_recording_track_candidate_for_release_track(first_id)
+        first_member = next(member for member in candidate["members"] if member["release_track_id"] == first_id)
+
+        self.assertNotIn("roosevelt-strangers-album", first_member["spotify_album_ids"])
+        self.assertNotIn("https://images.example/roosevelt.jpg", first_member["album_image_urls"])
 
     def test_query_sums_member_play_counts_from_source_tracks(self) -> None:
         first_release_track_id = self._seed_release_track(
@@ -943,6 +1067,27 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
         )
         self.assertEqual(["https://images.example/hydrated-candidate-album.jpg"], first_member["album_image_urls"])
         self.assertEqual(["2026-06-02"], first_member["album_release_dates"])
+
+    def test_clean_track_without_generated_candidate_does_not_scan_all_tracks(self) -> None:
+        release_track_id = self._seed_release_track(
+            title="Standalone Song",
+            artist="Standalone Artist",
+            album="Standalone Album",
+            spotify_id="standalone-track",
+            isrc=None,
+            duration_ms=180_000,
+        )
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                "DELETE FROM generated_recording_track_cluster_dirty WHERE release_track_id = ?",
+                (release_track_id,),
+            )
+
+        with patch("backend.app.recording_track_candidates._candidate_items") as candidate_items:
+            candidates = get_recording_track_candidates_for_release_track(release_track_id)
+
+        self.assertEqual([], candidates)
+        candidate_items.assert_not_called()
 
     def test_same_isrc_with_conflicting_title_downgrades_to_needs_review(self) -> None:
         self._seed_release_track(

@@ -25,6 +25,56 @@ Worktree at handoff:
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
 
+## Immediate Next Task: Recover Orphan History Projection
+The user discovered that `Radiohead - Paranoid Android` incorrectly had no qualified listen. A raw-title search found the missing complete play:
+- raw history row `70164`
+- `2025-10-08T23:04:12Z`
+- Spotify track `6LgJvl0Xdtc73RJ1mmpotq`
+- `387355` ms played
+- `reason_end=trackdone`
+- no `fact_play_event_history_link`, so it never reached canonical history or `source_track_play_count_cache`
+
+Root cause:
+- `backend/scripts/ingest_history_with_checkpoints.py` commits raw rows at checkpoints but projects facts only after the entire import completes.
+- two early checkpoint runs stopped before projection:
+  - `36c8c0f2-2555-44a4-ac5d-ca5f5d53fcd1`: 3,750 raw rows
+  - `196a5f2c-d80f-49fb-a755-02416d97b097`: 6,000 raw rows, including Paranoid Android
+- later retries saw those source rows as duplicates, but raw rows retained the failed run IDs. Projection is scoped by ingest run, so retries did not recover them.
+- stale-run startup recovery only marked runs failed; it did not project their durable raw checkpoints.
+- current DB audit: 9,980 unprojected raw history rows belonging to failed runs, plus 24 unprojected rows belonging to completed runs.
+
+Implement next:
+1. Add an idempotent orphan-history projection/backfill that selects eligible `raw_spotify_history` rows lacking `fact_play_event_history_link`, regardless of original run status/ID.
+2. Run it against the full local DB, rebuild source-track play counts, and verify Paranoid Android gains the 2025-10-08 listen.
+3. Harden checkpoint ingestion:
+   - project each committed checkpoint or enqueue it durably;
+   - update heartbeat and run counters each checkpoint;
+   - make retry/finalization sweep global eligible orphans, not only rows owned by the current run;
+   - make stale-run recovery enqueue orphan projection;
+   - add a crash-after-checkpoint/resume regression test and an invariant audit for eligible unlinked rows.
+4. Preserve raw rows and canonical idempotency; do not reimport or duplicate source observations.
+
+Do not confuse this with the proposed listen-threshold change. The current cache uses 65%. The user has not yet confirmed changing it to 50%/four minutes. The newly found 387355 ms event qualifies even under 65%, so orphan recovery should fix this case without changing threshold policy.
+
+## Latest UI/Identity Work This Session
+- General album-family inference now supports complete title-prefix expansions and explicit `Disc N` / `Disk N` companion releases.
+- Local mappings applied:
+  - `In Rainbows` + `In Rainbows (Disk 2)`
+  - `OK Computer` + `OK Computer OKNOTOK 1997 2017`
+- Companion family tracklists project Disc 1 before Disc 2 even when Disc 2 is selected.
+- Gray companion tracks now say `Switch to include these tracks`; clicking includes/ungrays them without changing selected album. Play All excludes them until included. Queue rows retain source album art/title when playback crosses releases.
+- `Rmx` is recognized as remix. Full `TKOL RMX 1234567` identity was promoted; remix-album context supplies remix semantics where a safe single-song original cannot be linked.
+- Song Family artist display deduplicates equal normalized artist names (`Radiohead, Radiohead` fix).
+- Activity `Liked` now filters canonical history before the limit, returning the latest 50 matching listens rather than filtering the latest 50 total.
+- Album-context Spotify queue now uses fixed album order from track 1 through the final track and does not display wrapped duplicate cycles.
+- Play-count cache currently combines consecutive interrupted same-track fragments within four hours and counts full durations plus a >=65% remainder; exact-history changes were applied retroactively.
+
+Latest checks passed during this session:
+- `python -m unittest backend.tests.test_album_family_review` (7 tests)
+- combined focused backend suites up to 64 tests passed during album/remix work
+- frontend `npm run build` passed repeatedly; existing large-chunk warning remains
+- `git diff --check` passed
+
 ## Current Uncommitted Batch
 Activity and recent-sync changes:
 - Activity completion filtering is now `Completed` / `All`, with independent `Liked` and `Tagged` toggles.

@@ -51,6 +51,7 @@ class ListeningLogPayload(TypedDict):
     offset: int
     has_more: bool
     source_filter: ListeningLogSourceFilter
+    liked_only: bool
 
 
 def _parse_payload(raw_payload_json: str | None) -> dict[str, Any]:
@@ -121,6 +122,8 @@ def query_listening_log(
     limit: int = 50,
     offset: int = 0,
     source_filter: ListeningLogSourceFilter = "all",
+    user_id: str | None = None,
+    liked_only: bool = False,
 ) -> ListeningLogPayload:
     bounded_limit = max(1, min(int(limit), 200))
     bounded_offset = max(0, int(offset))
@@ -128,13 +131,29 @@ def query_listening_log(
         source_filter if source_filter in {"all", "api", "history", "both"} else "all"
     )
 
-    where_clause = ""
+    where_clauses: list[str] = []
+    query_parameters: list[Any] = []
     if normalized_source_filter == "api":
-        where_clause = "AND v.raw_spotify_recent_id IS NOT NULL AND v.raw_spotify_history_id IS NULL"
+        where_clauses.append("v.raw_spotify_recent_id IS NOT NULL AND v.raw_spotify_history_id IS NULL")
     elif normalized_source_filter == "history":
-        where_clause = "AND v.raw_spotify_history_id IS NOT NULL AND v.raw_spotify_recent_id IS NULL"
+        where_clauses.append("v.raw_spotify_history_id IS NOT NULL AND v.raw_spotify_recent_id IS NULL")
     elif normalized_source_filter == "both":
-        where_clause = "AND v.raw_spotify_recent_id IS NOT NULL AND v.raw_spotify_history_id IS NOT NULL"
+        where_clauses.append("v.raw_spotify_recent_id IS NOT NULL AND v.raw_spotify_history_id IS NOT NULL")
+    apply_liked_filter = bool(liked_only and user_id)
+    if apply_liked_filter:
+        where_clauses.append(
+            """
+            EXISTS (
+              SELECT 1
+              FROM spotify_liked_track_cache liked
+              WHERE liked.user_id = ?
+                AND liked.spotify_track_id = v.spotify_track_id
+                AND liked.is_liked = 1
+            )
+            """
+        )
+        query_parameters.append(str(user_id))
+    where_clause = "".join(f" AND ({clause})" for clause in where_clauses)
 
     with sqlite_connection(row_factory=None) as connection:
         rows = connection.execute(
@@ -184,7 +203,7 @@ def query_listening_log(
             LIMIT ?
             OFFSET ?
             """,
-            (bounded_limit + 1, bounded_offset),
+            (*query_parameters, bounded_limit + 1, bounded_offset),
         ).fetchall()
 
     has_more = len(rows) > bounded_limit
@@ -298,4 +317,5 @@ def query_listening_log(
         "offset": bounded_offset,
         "has_more": has_more,
         "source_filter": normalized_source_filter,
+        "liked_only": apply_liked_filter,
     }
