@@ -16,10 +16,10 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- `Refine track detail source history`
+- `Refine album edition and track family behavior`
 
 Worktree at handoff:
-- dirty and staged-ready after the combined Activity/recent-sync, artist-promotion audit, and track relationship/album promotion batch
+- clean after the album edition / track-family behavior commit
 - do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in the commit
 
 Important local instruction:
@@ -62,8 +62,39 @@ Local DB result:
 
 Do not confuse this with the proposed listen-threshold change. The current cache uses 65%. The user has not yet confirmed changing it to 50%/four minutes. The newly found 387355 ms event qualifies even under 65%, so orphan recovery should fix this case without changing threshold policy.
 
-## Immediate Next Task: Paranoid Android Relationship Display
-Paranoid Android has an `R` tag but does not show `Also Appears On` in one album context. Switching to the other album shows the first album as a remaster. User's final sentence was incomplete (`but remaster should be ...`), so confirm intended remaster/recording relationship behavior before changing identity logic.
+## Completed: Album Edition And Track-Family Behavior
+This batch resolves the Paranoid Android, OK Computer edition, related-track artwork, and Fog representative issues.
+
+Backend:
+- an unmapped duplicate album identity can inherit one unambiguous reviewed album family for display when normalized album title and primary artist match
+- inferred family context substitutes the selected Spotify album identity into the equivalent family version without merging durable album identities
+- scoped recording-cluster refresh expands across duplicate exact-normalized artist identities, so incremental refresh matches full rebuild behavior
+- release-album raw payload supplies album image, release date, and album type when catalog and individual track payload metadata are absent
+- related tracks sharing one release album therefore share its artwork, including `Little By Little (Shed)` on `TKOL RMX 1234567`
+- representative ranking prevents explicit derived variants from outranking a clean base-title recording solely because the variant has album context
+- full-album appearance remains preferred within one recording; single/EP is fallback when no album appearance exists
+- `Fog` (2001) is now Original; `Fog - Again Again Version` (2021) is Version
+
+Frontend:
+- remaster/rerelease editions stay in the album edition selector and are excluded from duplicate `Also Appears On` navigation
+- track modal disc headers have right-aligned `Hide` / `Show` controls
+- hidden-disc tracks remain visible and gray but are excluded from album Play All and seeded album queues
+- disc visibility persists while switching versions inside the same album family
+- direct track-header playback remains available when the selected track is gray/excluded in the album tracklist
+
+Local data and checks:
+- generated recording clusters rebuilt: 1,452 clusters / 3,213 members after final representative update
+- OK Computer original and expanded contexts show one Airbag and one Paranoid Android row, with both editions attached
+- focused backend suites: 53 tests passed
+- frontend production build passed; existing large-chunk warning remains
+- `git diff --check` passed
+
+## Immediate Next Task
+Restart backend, hard refresh, and manually QA:
+- OK Computer original/expanded switching with one row per core song
+- per-disc Hide/Show, gray rows, Play All exclusion, and direct header playback
+- TKOL RMX related-track artwork in both navigation directions
+- Fog Original/Version order
 
 ## Latest UI/Identity Work This Session
 - General album-family inference now supports complete title-prefix expansions and explicit `Disc N` / `Disk N` companion releases.
@@ -411,4 +442,4 @@ Recommended project-level next steps:
 - Keep catalog backfill enrichment-only; identity mutation belongs in explicit dry-run/apply repair or promotion flows.
 
 ## Resume Prompt
-Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. The current batch adds Activity completion markers and independent filters, best-effort Listen Log recent sync, artist-promotion skip telemetry/UI, cross-credit Track Family candidates, `Song Family` relationship badges, a collapsible album-box `Also Appears On` footer, explicit track-overlay catalog identity promotion, and separate recording-group album-row history. Focused backend tests (66), `py_compile`, frontend build, and `git diff --check` passed. The unresolved first task is the user report that BITCRUSH shows the wrong tracks: direct backend inspection of Spotify album `6LU67HlNUaukF21Tr6ymuD` still returns `BITCRUSH`, `MOUNTAIN LION // ADORE`, and `PARALYSIS GHOSTS`, so capture the visible frontend rows and selected preview/source album ids before changing identity data.
+Continue in `/Users/kahntra/Programming/Personal Projects/ListenLab/listen-lab-main`. Read `AGENTS.md` and `docs/current-handoff.md` first. Branch is `frontend-app-refactor`. Latest batch fixes equivalent duplicate-album family context, exact-name duplicate-artist scoped cluster refresh, shared release-album artwork hydration, derived-version representative ordering, and per-disc Hide/Show playback exclusion. Local generated clusters were rebuilt to 1,452 clusters / 3,213 members. Focused backend tests (53), frontend build, and `git diff --check` passed. First task: restart backend, hard refresh, and manually QA OK Computer edition switching, disc Hide/Show playback behavior, TKOL RMX related artwork, and Fog Original/Version ordering.

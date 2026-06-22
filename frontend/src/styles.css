@@ -5447,6 +5447,10 @@ h1 {
 }
 
 .detail-album-track-disc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   list-style: none;
   padding: 8px 8px 3px;
   color: rgba(223, 248, 232, 0.7);
@@ -5454,6 +5458,23 @@ h1 {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.detail-album-track-disc-toggle {
+  appearance: none;
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: rgba(223, 248, 232, 0.78);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.detail-album-track-disc-toggle:hover,
+.detail-album-track-disc-toggle:focus-visible {
+  color: #7dffac;
 }
 
 .detail-album-track-row-selected {

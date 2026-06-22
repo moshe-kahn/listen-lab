@@ -5799,8 +5799,11 @@ export function App() {
     }
   }
 
-  async function handleAlbumPlayAll(action: PlaybackAction = "play_now") {
-    const firstPlayableTrack = albumTrackEntries
+  async function handleAlbumPlayAll(
+    action: PlaybackAction = "play_now",
+    entries: AlbumTrackEntry[] = albumTrackEntries,
+  ) {
+    const firstPlayableTrack = entries
       .filter((track) => !track.familyExclusive)
       .map((track) => ({ track, uri: trackUriWithFallback(track.uri, track.id) }))
       .find((item) => Boolean(item.uri));
@@ -5808,7 +5811,7 @@ export function App() {
       setPlayerError("This album does not have a playable first song.");
       return;
     }
-    const albumQueue = buildAlbumPlaybackQueue(firstPlayableTrack.uri);
+    const albumQueue = buildAlbumPlaybackQueue(firstPlayableTrack.uri, entries);
     await handlePlaybackAction(action, {
       trackUri: firstPlayableTrack.uri,
       optimisticTrack: playerSummaryFromAlbumTrack(firstPlayableTrack.track),

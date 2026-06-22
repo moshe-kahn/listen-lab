@@ -106,7 +106,7 @@ type DetailPreviewModalProps = {
   displayAlbumTrackEntries: AlbumTrackEntry[];
   formatCompactRelativeAge: (value: string | null | undefined) => string | null;
   formatPlaybackClock: (positionMs: number) => string;
-  handleAlbumPlayAll: (action?: PlaybackAction) => Promise<void>;
+  handleAlbumPlayAll: (action?: PlaybackAction, entries?: AlbumTrackEntry[]) => Promise<void>;
   handlePlaybackAction: (action: PlaybackAction, request: PlaybackActionRequest) => Promise<void>;
   includeAlbumFamilyTracks: (spotifyAlbumId: string) => void;
   hasPremiumPlayback: boolean;
@@ -308,16 +308,31 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     toggleAlbumTrackPreview,
     variationSubtitleFromTitle,
   } = props;
-  const [showAlbumEditionExtras, setShowAlbumEditionExtras] = useState(true);
+  const [hiddenAlbumDiscNumbers, setHiddenAlbumDiscNumbers] = useState<Set<number>>(() => new Set());
 
   useEffect(() => {
-    setShowAlbumEditionExtras(true);
-  }, [albumFamilyContext?.selected_spotify_album_id, selectedPreview?.trackId]);
+    setHiddenAlbumDiscNumbers(new Set());
+  }, [albumFamilyContext?.album_family_id]);
 
   const selectedPreviewIsTrack = selectedPreview?.kind === "track";
-  const visibleTrackPanelAlbumEntries = albumFamilyContext && !showAlbumEditionExtras
-    ? displayAlbumTrackEntries.filter((track) => !track.familyExclusive)
-    : displayAlbumTrackEntries;
+  const visibleTrackPanelAlbumEntries = displayAlbumTrackEntries;
+  const trackIsHiddenByDisc = (track: AlbumTrackEntry) => (
+    track.discNumber != null && hiddenAlbumDiscNumbers.has(track.discNumber)
+  );
+  const playableTrackPanelAlbumEntries = visibleTrackPanelAlbumEntries.filter(
+    (track) => !track.familyExclusive && !trackIsHiddenByDisc(track),
+  );
+  const toggleAlbumDisc = (discNumber: number) => {
+    setHiddenAlbumDiscNumbers((current) => {
+      const next = new Set(current);
+      if (next.has(discNumber)) {
+        next.delete(discNumber);
+      } else {
+        next.add(discNumber);
+      }
+      return next;
+    });
+  };
   const selectedReleaseSourceVersion = selectedPreviewReleaseSourceVersions.find(
     (version) => version.spotify_track_id === selectedPreviewCurrentSpotifyTrackId,
   ) ?? selectedPreviewReleaseSourceVersions[0] ?? null;
@@ -514,7 +529,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     isPlaying={isTrackPlaying(selectedPreviewPlaybackTrackUri)}
                     placement="overlay-trigger"
                     onAction={(action) => {
-                      const albumQueue = buildAlbumPlaybackQueue(selectedPreviewPlaybackTrackUri);
+                      const albumQueue = buildAlbumPlaybackQueue(selectedPreviewPlaybackTrackUri, playableTrackPanelAlbumEntries);
                       return handlePlaybackAction(action, {
                         trackUri: selectedPreviewPlaybackTrackUri,
                         optimisticTrack: selectedPreviewTrackOptimisticSummary,
@@ -811,7 +826,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                       ariaLabel="Album playback options"
                                       buttonClassName="detail-album-play-all-button"
                                       placement={selectedPreview.kind === "track" ? "overlay-trigger" : "adjacent"}
-                                      onAction={(action) => handleAlbumPlayAll(action)}
+                                      onAction={(action) => handleAlbumPlayAll(action, playableTrackPanelAlbumEntries)}
                                     >
                                       Play all
                                     </PlaybackActionMenu>
@@ -822,8 +837,6 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                     <AlbumVersionTrackSummary
                                       context={albumFamilyContext}
                                       entries={albumTrackEntries}
-                                      onToggleExtraTracks={() => setShowAlbumEditionExtras((current) => !current)}
-                                      showExtraTracks={showAlbumEditionExtras}
                                     />
                                   ) : (
                                     <span className="detail-modal-album-title-header">{albumTracklistSummaryLabel(albumTrackEntries)}</span>
@@ -962,30 +975,42 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                         ?? "another edition";
                                       const rowFamilyTitle = track.familyExclusive
                                         ? `Switch to include these tracks from ${rowFamilyAvailabilityLabel}.`
-                                        : undefined;
+                                        : trackIsHiddenByDisc(track) && track.discNumber != null
+                                          ? `Disc ${track.discNumber} is hidden from playback.`
+                                          : undefined;
+                                      const rowExcludedFromPlayback = track.familyExclusive || trackIsHiddenByDisc(track);
                                       return (
                                         <Fragment key={track.id ?? track.name}>
                                           {trackPanelHasMultipleDiscs
                                             && track.discNumber != null
                                             && visibleTrackPanelAlbumEntries.findIndex((candidate) => candidate.discNumber === track.discNumber) === trackIndex ? (
                                               <li className="detail-album-track-disc-row">
-                                                Disc {track.discNumber}
-                                                {discEditionLabel(track.discNumber) ? ` - ${discEditionLabel(track.discNumber)}` : ""}
+                                                <span>
+                                                  Disc {track.discNumber}
+                                                  {discEditionLabel(track.discNumber) ? ` - ${discEditionLabel(track.discNumber)}` : ""}
+                                                </span>
+                                                <button
+                                                  className="detail-album-track-disc-toggle"
+                                                  onClick={() => toggleAlbumDisc(track.discNumber!)}
+                                                  type="button"
+                                                >
+                                                  {hiddenAlbumDiscNumbers.has(track.discNumber) ? "Show" : "Hide"}
+                                                </button>
                                               </li>
                                             ) : null}
                                           <li
-                                            className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}${rowMatchesHighlightedArtist || rowMatchesHoveredWithArtist ? " detail-album-track-row-artist-highlighted" : ""}${track.familyExclusive ? " detail-album-track-row-family-exclusive" : ""}`}
+                                            className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}${rowMatchesHighlightedArtist || rowMatchesHoveredWithArtist ? " detail-album-track-row-artist-highlighted" : ""}${rowExcludedFromPlayback ? " detail-album-track-row-family-exclusive" : ""}`}
                                             title={rowFamilyTitle}
                                           >
                                             {hasPremiumPlayback ? (
                                               <PlaybackActionMenu
                                               ariaLabel={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
                                               buttonClassName={`secondary-button detail-album-track-play-button${rowPlaying ? " detail-icon-button-playing" : ""}`}
-                                              disabled={!rowTrackUri || track.familyExclusive}
+                                              disabled={!rowTrackUri || rowExcludedFromPlayback}
                                               isPlaying={rowPlaying}
                                               placement="overlay-trigger"
                                               onAction={(action) => {
-                                                const albumQueue = buildAlbumPlaybackQueue(rowTrackUri);
+                                                const albumQueue = buildAlbumPlaybackQueue(rowTrackUri, playableTrackPanelAlbumEntries);
                                                 return handlePlaybackAction(action, {
                                                   trackUri: rowTrackUri,
                                                   optimisticTrack: playerSummaryFromAlbumTrack(track),
@@ -1020,6 +1045,10 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                             onClick={() => {
                                               if (track.familyExclusive && track.familySwitchAlbumId) {
                                                 includeAlbumFamilyTracks(track.familySwitchAlbumId);
+                                                return;
+                                              }
+                                              if (trackIsHiddenByDisc(track) && track.discNumber != null) {
+                                                toggleAlbumDisc(track.discNumber);
                                                 return;
                                               }
                                               openAlbumTrackPreview(track);

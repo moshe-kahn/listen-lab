@@ -147,6 +147,48 @@ def _album_track_base_titles(connection: sqlite3.Connection, release_album_id: i
     return {_base_title(str(row["primary_name"] or "")) for row in rows if str(row["primary_name"] or "").strip()}
 
 
+def _equivalent_reviewed_family_id(
+    connection: sqlite3.Connection,
+    *,
+    release_album_id: int,
+    album_name: str,
+) -> int | None:
+    """Resolve duplicate album identity to one unambiguous reviewed family for display only."""
+    selected_artist_names = {
+        _normalize(row["canonical_name"])
+        for row in connection.execute(
+            """
+            SELECT a.canonical_name
+            FROM album_artist aa
+            JOIN artist a ON a.id = aa.artist_id
+            WHERE aa.release_album_id = ? AND aa.role = 'primary'
+            """,
+            (release_album_id,),
+        ).fetchall()
+        if _normalize(row["canonical_name"])
+    }
+    if not selected_artist_names:
+        return None
+    rows = connection.execute(
+        """
+        SELECT afm.album_family_id, ra.id AS release_album_id, ra.primary_name, a.canonical_name
+        FROM album_family_map afm
+        JOIN release_album ra ON ra.id = afm.release_album_id
+        JOIN album_artist aa ON aa.release_album_id = ra.id AND aa.role = 'primary'
+        JOIN artist a ON a.id = aa.artist_id
+        WHERE afm.status = 'accepted' AND ra.id != ?
+        """,
+        (release_album_id,),
+    ).fetchall()
+    matching_family_ids = {
+        int(row["album_family_id"])
+        for row in rows
+        if _normalize(row["primary_name"]) == _normalize(album_name)
+        and _normalize(row["canonical_name"]) in selected_artist_names
+    }
+    return next(iter(matching_family_ids)) if len(matching_family_ids) == 1 else None
+
+
 def preview_album_family_grouping(
     *,
     release_album_ids: list[int],
@@ -364,7 +406,17 @@ def build_album_family_context(
         selected_name = str(selected["primary_name"] or "")
         selected_core_name = _core_album_name(selected_name)
         selected_label = _edition_label(selected_name, selected_core_name)
-        if selected["album_family_id"] is None:
+        selected_release_album_id = int(selected["release_album_id"])
+        selected_family_id = int(selected["album_family_id"]) if selected["album_family_id"] is not None else None
+        inferred_equivalent_family = False
+        if selected_family_id is None:
+            selected_family_id = _equivalent_reviewed_family_id(
+                connection,
+                release_album_id=selected_release_album_id,
+                album_name=selected_name,
+            )
+            inferred_equivalent_family = selected_family_id is not None
+        if selected_family_id is None:
             if selected_label == "Original":
                 return None
             catalog = connection.execute(
@@ -418,7 +470,7 @@ def build_album_family_context(
                 "versions": [version],
                 "items": items,
             }
-        family_id = int(selected["album_family_id"])
+        family_id = selected_family_id
         family = connection.execute(
             "SELECT primary_name, canonical_release_album_id FROM album_family WHERE id = ?",
             (family_id,),
@@ -475,6 +527,19 @@ def build_album_family_context(
             }
             for row in version_rows
         ]
+        if inferred_equivalent_family and not any(version["is_selected"] for version in versions):
+            equivalent_version = next((
+                version
+                for version in versions
+                if _normalize(version["name"]) == _normalize(selected_name)
+            ), None)
+            if equivalent_version is not None:
+                equivalent_version["release_album_id"] = selected_release_album_id
+                equivalent_version["spotify_album_id"] = selected_spotify_album_id
+                equivalent_version["name"] = selected_name
+                equivalent_version["label"] = selected_label
+                equivalent_version["menu_label"] = _edition_menu_label(selected_name, selected_label)
+                equivalent_version["is_selected"] = True
         items_by_album = {
             version["spotify_album_id"]: enrich_album_track_rows_with_release_metadata(
                 selected_items if version["spotify_album_id"] == selected_spotify_album_id else _cached_album_items(connection, version["spotify_album_id"])

@@ -470,14 +470,16 @@ def _representative_variant_rank(member: RecordingTrackCandidateMember) -> int:
 
 
 def _representative_member(members: list[RecordingTrackCandidateMember]) -> tuple[RecordingTrackCandidateMember, int | None, str]:
-    def sort_key(member: RecordingTrackCandidateMember) -> tuple[int, int, int, int, int, int]:
+    def sort_key(member: RecordingTrackCandidateMember) -> tuple[int, int, int, int, int, int, int]:
         playable = 1 if member["source_track_uris"] or member["source_track_ids"] else 0
         context = _member_album_context(member)
         release_year = _earliest_release_year(member)
+        variant_rank = _representative_variant_rank(member)
         return (
             -playable,
+            1 if variant_rank >= 3 else 0,
             _representative_context_rank(context),
-            _representative_variant_rank(member),
+            variant_rank,
             9999 if release_year is None else release_year,
             -_member_metadata_score(member),
             member["release_track_id"],
@@ -825,9 +827,30 @@ def _candidate_source_rows(
               ra.primary_name AS album_name,
               COALESCE(sam_source.external_id, name_catalog.spotify_album_id) AS spotify_album_id,
               CASE WHEN sam_source.external_id IS NOT NULL THEN 1 ELSE 0 END AS is_direct_source_album,
-              json_extract(COALESCE(sac.images_json, name_catalog.images_json), '$[0].url') AS album_image_url,
-              COALESCE(sac.release_date, name_catalog.release_date) AS album_release_date,
-              COALESCE(sac.album_type, name_catalog.album_type) AS album_type
+              COALESCE(
+                json_extract(sac.images_json, '$[0].url'),
+                CASE WHEN json_valid(sam_source.raw_payload_json) THEN COALESCE(
+                  json_extract(sam_source.raw_payload_json, '$.track.album.images[0].url'),
+                  json_extract(sam_source.raw_payload_json, '$.images[0].url')
+                ) ELSE NULL END,
+                json_extract(name_catalog.images_json, '$[0].url')
+              ) AS album_image_url,
+              COALESCE(
+                sac.release_date,
+                CASE WHEN json_valid(sam_source.raw_payload_json) THEN COALESCE(
+                  json_extract(sam_source.raw_payload_json, '$.track.album.release_date'),
+                  json_extract(sam_source.raw_payload_json, '$.release_date')
+                ) ELSE NULL END,
+                name_catalog.release_date
+              ) AS album_release_date,
+              COALESCE(
+                sac.album_type,
+                CASE WHEN json_valid(sam_source.raw_payload_json) THEN COALESCE(
+                  json_extract(sam_source.raw_payload_json, '$.track.album.album_type'),
+                  json_extract(sam_source.raw_payload_json, '$.album_type')
+                ) ELSE NULL END,
+                name_catalog.album_type
+              ) AS album_type
             FROM album_track at
             JOIN release_album ra ON ra.id = at.release_album_id
             LEFT JOIN source_album_map sam ON sam.release_album_id = ra.id AND sam.status = 'accepted'
@@ -1459,6 +1482,25 @@ def refresh_generated_recording_track_clusters_for_release_tracks(
         if not artist_ids:
             clear_generated_recording_track_cluster_dirty_with_connection(connection, target_ids)
             return {"refreshed": True, "cluster_count": 0, "member_count": 0, "generated_at": generated_at}
+
+        # Text-history and provider-backed artist rows can retain separate internal
+        # IDs even when their exact normalized names match. Scoped regeneration must
+        # span those equivalent IDs or it creates partial recording groups that differ
+        # from a full rebuild.
+        target_artist_names = {
+            _normalize_text(row["canonical_name"])
+            for row in connection.execute(
+                f"SELECT canonical_name FROM artist WHERE id IN ({','.join('?' for _ in artist_ids)})",
+                tuple(sorted(artist_ids)),
+            ).fetchall()
+            if _normalize_text(row["canonical_name"])
+        }
+        if target_artist_names:
+            artist_ids.update(
+                int(row["id"])
+                for row in connection.execute("SELECT id, canonical_name FROM artist").fetchall()
+                if _normalize_text(row["canonical_name"]) in target_artist_names
+            )
 
         rows = _candidate_source_rows(connection, artist_ids=artist_ids)
         scoped_release_track_ids = {

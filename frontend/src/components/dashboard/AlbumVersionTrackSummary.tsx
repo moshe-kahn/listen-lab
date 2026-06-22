@@ -5,8 +5,6 @@ import type { AlbumFamilyContext, AlbumTrackEntry } from "../../types/appTypes";
 type AlbumVersionTrackSummaryProps = {
   context: AlbumFamilyContext;
   entries: AlbumTrackEntry[];
-  onToggleExtraTracks: () => void;
-  showExtraTracks: boolean;
 };
 
 function durationLabel(durationMs: number) {
@@ -16,7 +14,7 @@ function durationLabel(durationMs: number) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-export function AlbumVersionTrackSummary({ context, entries, onToggleExtraTracks, showExtraTracks }: AlbumVersionTrackSummaryProps) {
+export function AlbumVersionTrackSummary({ context, entries }: AlbumVersionTrackSummaryProps) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const selectedVersion = context.versions.find((version) => version.spotify_album_id === context.selected_spotify_album_id)
     ?? context.versions.find((version) => version.is_selected)
@@ -29,7 +27,6 @@ export function AlbumVersionTrackSummary({ context, entries, onToggleExtraTracks
     version.spotify_album_id !== selectedVersion.spotify_album_id
     && version.total_tracks != null
   )) : [];
-  const hasExtraTracks = comparisonVersions.some((version) => Number(version.total_tracks ?? 0) > selectedTrackCount);
 
   useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent) => {
@@ -69,11 +66,6 @@ export function AlbumVersionTrackSummary({ context, entries, onToggleExtraTracks
             </span>
           );
         })}
-        {hasExtraTracks ? (
-          <button className="detail-modal-album-expansion-toggle" onClick={onToggleExtraTracks} type="button">
-            {showExtraTracks ? "Hide extra tracks" : "Show extra tracks"}
-          </button>
-        ) : null}
       </div>
     </details>
   );

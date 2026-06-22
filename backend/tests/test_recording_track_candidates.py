@@ -24,6 +24,7 @@ from backend.app.recording_track_candidates import (
     get_recording_track_candidates_for_release_track,
     query_recording_track_candidates,
     rebuild_generated_recording_track_clusters,
+    refresh_generated_recording_track_clusters_for_release_tracks,
     summarize_recording_track_candidates,
 )
 from backend.app.release_track_metadata import release_track_metadata_for_spotify_ids
@@ -374,6 +375,33 @@ class RecordingTrackClassifierTests(unittest.TestCase):
         self.assertEqual(2, item["representative"]["release_track_id"])
         self.assertIn("clean base title preferred for display", item["representative"]["reason"])
 
+    def test_representative_prefers_clean_original_single_over_later_derived_album_version(self) -> None:
+        original = _member(
+            1,
+            "Fog",
+            album="Knives Out",
+            album_release_dates=["2001-08-06"],
+            isrc="GBORIGINAL1",
+            duration_ms=244_133,
+        )
+        original["album_types"] = ["single"]
+        later_version = _member(
+            2,
+            "Fog - Again Again Version",
+            album="KID A MNESIA",
+            album_release_dates=["2021-11-05"],
+            isrc=None,
+            duration_ms=145_443,
+        )
+        later_version["album_types"] = ["album"]
+
+        item = classify_recording_track_candidate_group([original, later_version])
+
+        self.assertEqual("track_family_candidate", item["candidate_type"])
+        self.assertEqual(1, item["representative"]["release_track_id"])
+        self.assertIn("clean base title preferred for display", item["representative"]["reason"])
+        self.assertIn("earliest release year 2001", item["representative"]["reason"])
+
     def test_representative_uses_source_backed_rerelease_before_compilation(self) -> None:
         item = classify_recording_track_candidate_group(
             [
@@ -638,6 +666,50 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
         self.assertEqual("derived_version", family["relationship_kind"])
         self.assertEqual({original_id, version_id}, {member["release_track_id"] for member in family["members"]})
 
+    def test_scoped_refresh_spans_duplicate_exact_name_artist_identities(self) -> None:
+        first_original_id = self._seed_release_track(
+            title="Scoped Identity Song",
+            artist="Scoped Identity Artist",
+            album="Scoped Identity Album",
+            spotify_id="scoped-identity-original-one",
+            isrc=None,
+            duration_ms=240_000,
+        )
+        second_original_id = self._seed_release_track(
+            title="Scoped Identity Song",
+            artist="Scoped Identity Artist",
+            album="Scoped Identity Album",
+            spotify_id="scoped-identity-original-two",
+            isrc=None,
+            duration_ms=240_000,
+        )
+        remaster_id = self._seed_release_track(
+            title="Scoped Identity Song - Remastered",
+            artist="Scoped Identity Artist",
+            album="Scoped Identity Album Expanded",
+            spotify_id="scoped-identity-remaster",
+            isrc=None,
+            duration_ms=243_000,
+        )
+        with sqlite_connection(write=True) as connection:
+            duplicate_artist_id = int(connection.execute(
+                "INSERT INTO artist (canonical_name, sort_name) VALUES ('Scoped Identity Artist', 'scoped identity artist')"
+            ).lastrowid)
+            connection.execute(
+                "UPDATE track_artist SET artist_id = ? WHERE release_track_id = ? AND role = 'primary'",
+                (duplicate_artist_id, first_original_id),
+            )
+
+        result = refresh_generated_recording_track_clusters_for_release_tracks([remaster_id])
+        candidates = get_recording_track_candidates_for_release_track(remaster_id)
+        recording = next(item for item in candidates if item["candidate_type"] == "recording_track_candidate")
+
+        self.assertTrue(result["refreshed"])
+        self.assertEqual(
+            {first_original_id, second_original_id, remaster_id},
+            {member["release_track_id"] for member in recording["members"]},
+        )
+
     def test_album_editions_keep_core_and_live_recordings_separate_beneath_family(self) -> None:
         studio_ids = {
             self._seed_release_track(
@@ -734,6 +806,80 @@ class RecordingTrackCandidateEndpointTests(unittest.TestCase):
 
         self.assertEqual(["artwork-album-id"], first_member["spotify_album_ids"])
         self.assertEqual(["https://images.example/artwork.jpg"], first_member["album_image_urls"])
+
+    def test_shared_release_album_payload_hydrates_art_for_every_family_member(self) -> None:
+        first_id = self._seed_release_track(
+            title="Shared Artwork Song - Remix One",
+            artist="Shared Artwork Artist",
+            album="Shared Artwork Remix Album",
+            spotify_id="shared-artwork-one",
+            isrc=None,
+            duration_ms=210_000,
+        )
+        second_id = self._seed_release_track(
+            title="Shared Artwork Song (Remix Two)",
+            artist="Shared Artwork Artist",
+            album="Temporary Duplicate Album",
+            spotify_id="shared-artwork-two",
+            isrc=None,
+            duration_ms=215_000,
+        )
+        album_payload = {
+            "track": {
+                "album": {
+                    "id": "shared-artwork-album-id",
+                    "album_type": "album",
+                    "release_date": "2024-02-03",
+                    "images": [{"url": "https://images.example/shared-artwork.jpg"}],
+                }
+            }
+        }
+        with sqlite_connection(write=True) as connection:
+            shared_album_id = int(connection.execute(
+                "SELECT release_album_id FROM album_track WHERE release_track_id = ?",
+                (first_id,),
+            ).fetchone()[0])
+            duplicate_album_id = int(connection.execute(
+                "SELECT release_album_id FROM album_track WHERE release_track_id = ?",
+                (second_id,),
+            ).fetchone()[0])
+            connection.execute("DELETE FROM album_track WHERE release_track_id = ?", (second_id,))
+            connection.execute(
+                "INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)",
+                (shared_album_id, second_id),
+            )
+            connection.execute("DELETE FROM release_album WHERE id = ?", (duplicate_album_id,))
+            source_album_id = int(connection.execute(
+                """
+                INSERT INTO source_album (
+                  source_name, external_id, external_uri, source_name_raw, raw_payload_json
+                ) VALUES ('spotify', ?, ?, ?, ?)
+                """,
+                (
+                    "shared-artwork-album-id",
+                    "spotify:album:shared-artwork-album-id",
+                    "Shared Artwork Remix Album",
+                    json.dumps(album_payload),
+                ),
+            ).lastrowid)
+            connection.execute(
+                """
+                INSERT INTO source_album_map (
+                  source_album_id, release_album_id, match_method, confidence, status, explanation
+                ) VALUES (?, ?, 'seed', 1.0, 'accepted', 'test')
+                """,
+                (source_album_id, shared_album_id),
+            )
+
+        payload = query_recording_track_candidates(q="Shared Artwork Song", limit=10)
+        family = next(item for item in payload["items"] if item["candidate_type"] == "track_family_candidate")
+
+        self.assertEqual({first_id, second_id}, {member["release_track_id"] for member in family["members"]})
+        for member in family["members"]:
+            self.assertEqual(["https://images.example/shared-artwork.jpg"], member["album_image_urls"])
+            self.assertEqual(["2024-02-03"], member["album_release_dates"])
+            self.assertEqual(["album"], member["album_types"])
+            self.assertEqual("https://images.example/shared-artwork.jpg", member["album_versions"][0]["image_url"])
 
     def test_unique_cached_album_name_does_not_cross_primary_artists(self) -> None:
         first_id = self._seed_release_track(

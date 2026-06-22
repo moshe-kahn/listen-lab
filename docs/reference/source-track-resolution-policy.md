@@ -175,7 +175,9 @@ Potential same-`recording_track` relationships include:
 
 Do not use `recording_track` to hide provenance. A `recording_track` should preserve each release appearance, album context, source Spotify identity, and evidence reason. It may choose a representative release track and a separate concrete playable source track, but Spotify source track id/URI remain the playback identity.
 
-Representative selection should prefer a source-backed original album appearance when available. Use rereleases/remasters, singles, soundtracks, and compilations as progressively weaker fallbacks, and prefer a clean base title over format/remaster suffixes for display when the evidence is otherwise compatible. Compilation appearances should not become the representative only because they have playable source metadata if an original album appearance is also source-backed.
+Representative selection should prefer a source-backed original album appearance when available. Use rereleases/remasters, singles, soundtracks, and compilations as progressively weaker fallbacks. Within a Track Family, an explicit derived label such as remix, live, rework, alternate version, or `Again Again Version` must not outrank an available clean base-title recording merely because the derived version has album context. Within one recording, collapse single/EP and album appearances to one recording representative: prefer the first full-album appearance, then use single/EP as fallback when no album appearance exists. Prefer a clean base title over format/remaster suffixes when evidence is otherwise compatible. Compilation appearances should not become the representative only because they have playable source metadata if an original album appearance is also source-backed.
+
+Incremental generated-cluster refresh must match full-rebuild grouping. When exact normalized artist names are split across provider-backed and text-history artist IDs, scoped refresh should include every exact-name identity before rebuilding candidates. This expansion is candidate-cache scope only; it does not merge durable artist identities.
 
 Current debug candidate evidence buckets:
 

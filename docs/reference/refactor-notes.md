@@ -321,7 +321,18 @@ Current backend behavior:
 - Recent/history projection refreshes `source_track_play_count_cache` after touched fact rows are reloaded.
 - `GET /debug/tracks/recording-track-candidates/by-release/{release_track_id}` returns cached generated candidate items for track overlays and falls back to live candidate generation when needed.
 - Generated recording candidate members include source-derived play counts and first/last listened dates so recording view can aggregate without scanning the fact view in the frontend.
+- Scoped cluster refresh expands across duplicate exact-normalized artist IDs so incremental generation matches a full rebuild.
+- Candidate album metadata falls back to shared `source_album.raw_payload_json`, allowing every member on one release album to inherit cover/date/type evidence.
+- Explicit derived versions cannot become Track Family representatives ahead of a clean base-title recording solely because they have album context.
 - The generated tables remain evidence caches only; they do not promote, apply, or mutate canonical identity.
+
+## Album Edition Disc Controls
+- Track-modal album-family disc headers expose right-aligned `Hide` / `Show` controls.
+- Hidden disc rows remain mounted and render gray; selected edition does not change.
+- Hidden rows are excluded from album Play All and seeded album queues.
+- Disc inclusion state persists while switching editions in the same album family.
+- Direct playback from the selected track header remains available even when that track is gray in album context.
+- Duplicate equivalent Spotify albums may inherit one unambiguous reviewed family for display through exact normalized album-title and primary-artist evidence; this does not merge durable album identities.
 
 ## Activity and Listen Log UI State
 Current recent-listening behavior:

@@ -319,3 +319,65 @@ class AlbumFamilyReviewTests(unittest.TestCase):
         self.assertIsNotNone(context)
         self.assertEqual("Chutes Too Narrow", context["core_name"])
         self.assertEqual(["Remaster"], [version["label"] for version in context["versions"]])
+
+    def test_duplicate_original_album_inherits_unambiguous_reviewed_family_context(self) -> None:
+        original_id = self._seed_album("OK Computer", "ok-original", 1997, ["Airbag", "Paranoid Android"])
+        expanded_id = self._seed_album(
+            "OK Computer OKNOTOK 1997 2017",
+            "ok-expanded",
+            2017,
+            ["Airbag - Remastered", "Paranoid Android - Remastered", "I Promise"],
+        )
+        duplicate_original_id = self._seed_album(
+            "OK Computer",
+            "ok-original-duplicate",
+            1997,
+            ["Airbag", "Paranoid Android"],
+        )
+        with sqlite_connection(write=True) as connection:
+            family_ids = [
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT album_family_id FROM album_family_map WHERE release_album_id IN (?, ?, ?)",
+                    (original_id, expanded_id, duplicate_original_id),
+                ).fetchall()
+            ]
+            connection.execute(
+                "DELETE FROM album_family_map WHERE release_album_id IN (?, ?, ?)",
+                (original_id, expanded_id, duplicate_original_id),
+            )
+            if family_ids:
+                placeholders = ",".join("?" for _ in family_ids)
+                connection.execute(f"DELETE FROM album_family WHERE id IN ({placeholders})", tuple(family_ids))
+
+        applied = apply_reviewed_album_family_grouping(
+            release_album_ids=[original_id, expanded_id],
+            canonical_release_album_id=original_id,
+            rationale="Reviewed original and expanded edition",
+            apply=True,
+        )
+        self.assertTrue(applied["applied"])
+
+        context = build_album_family_context(
+            selected_spotify_album_id="ok-original-duplicate",
+            selected_items=[
+                {"id": "ok-original-duplicate-track-1", "name": "Airbag"},
+                {"id": "ok-original-duplicate-track-2", "name": "Paranoid Android"},
+            ],
+        )
+
+        self.assertIsNotNone(context)
+        assert context is not None
+        self.assertEqual("ok-original-duplicate", context["selected_spotify_album_id"])
+        self.assertEqual(
+            ["ok-original-duplicate", "ok-expanded"],
+            [version["spotify_album_id"] for version in context["versions"]],
+        )
+        self.assertEqual(
+            {duplicate_original_id, expanded_id},
+            set(context["release_album_ids"]),
+        )
+        paranoid_rows = [item for item in context["items"] if "paranoid android" in item["name"].lower()]
+        self.assertEqual(1, len(paranoid_rows))
+        self.assertFalse(paranoid_rows[0]["family_exclusive"])
+        self.assertEqual(2, len(paranoid_rows[0]["family_available_versions"]))
