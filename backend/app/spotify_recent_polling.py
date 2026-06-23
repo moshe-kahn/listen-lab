@@ -93,6 +93,7 @@ async def poll_recent_for_user(user_id: str, *, force: bool = False) -> dict[str
             force=force,
             min_interval_seconds=30 * 60,
             limit=50,
+            snapshot_user_id=str(user_id),
         )
     except Exception as exc:
         message = str(exc)

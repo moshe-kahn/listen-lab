@@ -25,6 +25,7 @@ Accept signals:
   - Bonus Track Version
   - Explicit/Clean variants
   - Regional variants
+- Explicit combined-edition packages where one release contains multiple standalone albums plus extra material, if the relationship is known and intentionally modeled.
 
 Reject signals:
 - Different primary artist.
@@ -33,6 +34,7 @@ Reject signals:
 - Soundtrack/score/playlist/artist-mix ambiguity.
 - Weak title similarity with no artist/year/track support.
 - Candidate would merge albums that should remain independently visible.
+- Two standalone albums that merely appear together inside a later combined-edition package. The standalone albums should each link to the combined package, but not to each other as versions.
 
 Needs-more-evidence signals:
 - Same title and artist, but unclear whether album, single, EP, compilation, or live release.
@@ -106,6 +108,23 @@ Do not add as part of this policy:
 - UI changes
 - ranking/query behavior changes
 - `album_relationship`
+
+## Combined-Edition Exception
+
+Some releases are not a normal deluxe/remaster of one album. Example: Radiohead `KID A MNESIA` combines `Kid A`, `Amnesiac`, and extra material.
+
+Expected behavior:
+- On a standalone component album, only that album and the combined extended edition should appear in the edition selector.
+- Standalone sibling albums inside the package must not appear as direct versions of each other.
+- On the combined edition, all component albums plus the combined edition can appear as selectable versions.
+- Disc labels may be explicit human labels rather than generic edition names, for example:
+  - Disc 1: Kid A
+  - Disc 2: Amnesiac
+  - Disc 3: Extra Content
+- Switching from a component album to the combined edition may jump to the component's disc.
+- Switching from the combined edition to a standalone component should switch album context and should not force a stale disc scroll.
+
+This exception should stay explicit/configured until a durable album-relationship model exists.
 
 ## Implementation Note
 

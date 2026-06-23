@@ -432,6 +432,7 @@ async def _sync_recent_to_db_best_effort(
     *,
     force: bool = False,
     min_interval_seconds: int = 10 * 60,
+    snapshot_user_id: str | None = None,
 ) -> dict[str, Any] | None:
     try:
         return await maybe_sync_spotify_recent(
@@ -440,6 +441,7 @@ async def _sync_recent_to_db_best_effort(
             force=force,
             min_interval_seconds=min_interval_seconds,
             limit=50,
+            snapshot_user_id=snapshot_user_id,
         )
     except Exception as exc:
         logger.warning(
@@ -2668,7 +2670,12 @@ async def me_recent(
 
         try:
             _set_load_progress(request, "recent listening")
-            recent_sync_summary = await _sync_recent_to_db_best_effort(token, source_ref="me_recent_refresh", force=force_recent_sync)
+            recent_sync_summary = await _sync_recent_to_db_best_effort(
+                token,
+                source_ref="me_recent_refresh",
+                force=force_recent_sync,
+                snapshot_user_id=str(user_id) if user_id else None,
+            )
             phase_started_at = log_phase("recent_sync", phase_started_at)
             inserted_recent_count = int((recent_sync_summary or {}).get("inserted_count") or 0)
             skipped_recent_sync = bool((recent_sync_summary or {}).get("skipped"))
@@ -2798,7 +2805,11 @@ async def _build_legacy_recent_payload_for_debug(
 
     try:
         recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, SPOTIFY_RECENT_MAX_ITEMS)
-        await _sync_recent_to_db_best_effort(token, source_ref="me_recent_debug_compare")
+        await _sync_recent_to_db_best_effort(
+            token,
+            source_ref="me_recent_debug_compare",
+            snapshot_user_id=str(user_id) if user_id else None,
+        )
 
         recent_likes_tracks, recent_likes_available = await _fetch_recent_liked_tracks(token, item_limit)
 
@@ -3675,7 +3686,11 @@ async def me(
         if is_full_analysis:
             _set_load_progress(request, "recent listening")
             recent_tracks, recent_tracks_available = await _fetch_recent_tracks(token, SPOTIFY_RECENT_MAX_ITEMS)
-            await _sync_recent_to_db_best_effort(token, source_ref="me_profile_refresh")
+            await _sync_recent_to_db_best_effort(
+                token,
+                source_ref="me_profile_refresh",
+                snapshot_user_id=str(user_id) if user_id else None,
+            )
         else:
             recent_tracks, recent_tracks_available = [], False
         cached_playlists = _get_short_cache("owned_playlists", user_id, playlist_cache_limit)

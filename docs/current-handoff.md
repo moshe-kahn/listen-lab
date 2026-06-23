@@ -16,10 +16,10 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- `Refine album edition and track family behavior`
+- pending: activity snapshot invalidation, KID A MNESIA combined editions, artist-view tracks
 
 Worktree at handoff:
-- clean after the album edition / track-family behavior commit
+- current batch is verified and ready to commit
 - do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in the commit
 
 Important local instruction:
@@ -90,11 +90,21 @@ Local data and checks:
 - `git diff --check` passed
 
 ## Immediate Next Task
-Restart backend, hard refresh, and manually QA:
-- OK Computer original/expanded switching with one row per core song
-- per-disc Hide/Show, gray rows, Play All exclusion, and direct header playback
-- TKOL RMX related-track artwork in both navigation directions
-- Fog Original/Version order
+After the pending commit, restart backend, hard refresh, and manually QA:
+- Activity updates immediately after recent sync inserts rows.
+- KID A / Amnesiac / KID A MNESIA edition switching:
+  - Kid A shows Kid A + Extended Edition only.
+  - Amnesiac shows Amnesiac + Extended Edition only.
+  - KID A MNESIA shows Kid A + Amnesiac + Extended Edition.
+  - Kid A -> Extended jumps to Disc 1.
+  - Amnesiac -> Extended jumps to Disc 2.
+  - Extended -> Kid A or Amnesiac does not force a stale disc jump.
+  - disc labels are Kid A, Amnesiac, and Extra Content.
+- Artist preview:
+  - artist image appears beside artist name at top.
+  - All Tracks appears before Albums / Appears On.
+  - artist tracks open normal track detail.
+  - album rows missing cached tracklists may still be absent from All Tracks.
 
 ## Latest UI/Identity Work This Session
 - General album-family inference now supports complete title-prefix expansions and explicit `Disc N` / `Disk N` companion releases.
@@ -110,32 +120,46 @@ Restart backend, hard refresh, and manually QA:
 - Play-count cache currently combines consecutive interrupted same-track fragments within four hours and counts full durations plus a >=65% remainder; exact-history changes were applied retroactively.
 
 Latest checks passed during this session:
-- `python -m unittest backend.tests.test_album_family_review` (7 tests)
-- combined focused backend suites up to 64 tests passed during album/remix work
-- frontend `npm run build` passed repeatedly; existing large-chunk warning remains
-- `git diff --check` passed
+- `./.venv/bin/python -m unittest backend.tests.test_album_family_review backend.tests.test_spotify_recent_sync backend.tests.test_recording_track_candidates` passed, 57 tests.
+- `./.venv/bin/python -m py_compile backend/app/album_family.py backend/app/artist_album_evidence.py backend/app/main.py backend/app/routes/admin_routes.py backend/app/routes/auth_routes.py backend/app/routes/playback_routes.py backend/app/spotify_recent_polling.py backend/app/spotify_recent_sync.py` passed.
+- `cd frontend && npm run build` passed; existing large-chunk warning remains.
+- `git diff --check` passed.
 
-## Current Uncommitted Batch
+## Current Pending Commit Batch
 Activity and recent-sync changes:
-- Activity completion filtering is now `Completed` / `All`, with independent `Liked` and `Tagged` toggles.
-- Grouped Activity rows render completion markers on the progress bar; repeated identical completion points show a count.
-- Listen Log forced refresh treats Spotify recent-sync failure as best effort and returns the failure summary while preserving local log results.
+- `maybe_sync_spotify_recent` accepts an optional snapshot user id.
+- recent sync invalidates the per-user recent snapshot when new Spotify recent rows are inserted.
+- startup, auth callback, polling, and admin/cache refresh callers pass the user id into recent sync.
+- regression coverage verifies inserted rows invalidate the local recent snapshot.
+- this fixes Activity staying stale after a successful recent sync inserted new local rows.
 
-Artist identity observability:
-- SQLite schema version `35` adds `artist_promotion_skip_log`.
-- blocked text-to-provider artist promotions record stable reason/context signatures and roll up occurrence counts.
-- Identity Audit `Artists` is split into `Promotion Skips` and `Duplicate Repair` focused components.
+KID A MNESIA combined-edition behavior:
+- `backend/app/album_family.py` has an explicit combined-edition group for Radiohead:
+  - Kid A Spotify album `6GjwtEZcfenmOf6l18N7T7`
+  - Amnesiac Spotify album `1HrMmB5useeZ0F5lHrMvl0`
+  - KID A MNESIA Spotify album `6ofEQubaL265rIW6WnCU8y`
+- On Kid A, the edition dropdown contains Kid A and Extended Edition only.
+- On Amnesiac, the edition dropdown contains Amnesiac and Extended Edition only.
+- On KID A MNESIA, the dropdown contains Kid A, Amnesiac, and Extended Edition.
+- KID A MNESIA disc labels are explicit:
+  - Disc 1: Kid A
+  - Disc 2: Amnesiac
+  - Disc 3: Extra Content
+- Standalone Kid A / Amnesiac track rows are projected into matching combined-edition discs for family display.
+- Frontend edition switching scrolls to a disc only when switching from a standalone album into the combined Extended Edition.
+- Track edition dropdown now places the version label on row one and year / track count / duration on row two.
 
-Track relationship and album behavior:
-- same-title groups with overlapping primary artists can form Track Family candidates across credited-artist signature changes.
-- unique cached Spotify album names hydrate missing recording-member artwork when no explicit source-album map exists.
-- family rows collapse multiple release appearances to the representative recording.
-- track modal uses `Song Family` with `Original`, `Cover`, `Remix`, `Version`, `Rework`, `Sibling Cover`, and `Sibling Remix` badges.
-- `Also Appears On` is a collapsible bottom bar inside the album box.
-- local stars remain visible across album track rows.
-- a complete track-overlay album fetch explicitly requests conservative catalog identity promotion; newly promoted release appearances refresh generated recording clusters without canonical merges.
-- album-track payloads now expose generated recording-group history separately from exact source/release history; recording view uses the aggregate values.
-- stale frontend album-row caches without recording-history fields are invalidated.
+Artist preview behavior:
+- `/auth/artist-albums` now also returns cache-backed artist track rows from `spotify_album_track`.
+- Artist preview shows the artist image beside the artist name at top instead of in the separate left rail.
+- Artist preview renders an `All Tracks` list before Albums / Appears On.
+- Clicking an artist track opens normal track detail.
+- Important limitation: artist albums can be broader than `All Tracks`. Albums may come from Spotify album catalog or internal album-artist links without a cached Spotify album tracklist, so they may not yet contribute rows to `All Tracks`.
+- Missing album artwork can still occur when an album is internal/entity evidence without hydrated Spotify album catalog imagery.
+- Recommended future approach: keep artist view cache-only, enqueue bounded low-priority album metadata/tracklist backfill for artist-view gaps, and do not perform live Spotify loops from artist preview.
+
+Out-of-scope idea discussed but not implemented:
+- MusicBrainz + Cover Art Archive could become a future non-Spotify catalog metadata source. Integrate it as local cached metadata, not live artist-view requests.
 
 Local BITCRUSH / PARALYSIS GHOSTS state:
 - BITCRUSH Spotify album `6LU67HlNUaukF21Tr6ymuD` is cached with the correct three tracks: `BITCRUSH`, `MOUNTAIN LION // ADORE`, and `PARALYSIS GHOSTS`.

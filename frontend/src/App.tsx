@@ -4,6 +4,7 @@ import type {
   ProfileProgressResponse,
   RecentTrack,
   ArtistAlbumEvidenceItem,
+  ArtistTrackEvidenceItem,
   MatchCounts,
   TopPlaylist,
   ProfileResponse,
@@ -453,11 +454,13 @@ export function App() {
   const [recordingAlbumTracklistOpen, setRecordingAlbumTracklistOpen] = useState(false);
   const [detailOptionsOpen, setDetailOptionsOpen] = useState(false);
   const [artistAlbumEvidenceItems, setArtistAlbumEvidenceItems] = useState<ArtistAlbumEvidenceItem[] | null>(null);
+  const [artistTrackEvidenceItems, setArtistTrackEvidenceItems] = useState<ArtistTrackEvidenceItem[] | null>(null);
   const [albumTrackEntries, setAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [albumTrackEntriesLoading, setAlbumTrackEntriesLoading] = useState(false);
   const [albumTrackEntriesError, setAlbumTrackEntriesError] = useState<string | null>(null);
   const [albumTrackEntriesPartial, setAlbumTrackEntriesPartial] = useState(false);
   const [selectedAlbumFamilyContext, setSelectedAlbumFamilyContext] = useState<AlbumFamilyContext | null>(null);
+  const [albumFamilyDiscScrollTarget, setAlbumFamilyDiscScrollTarget] = useState<number | null>(null);
   const [albumTrackSpotifyFetchRequest, setAlbumTrackSpotifyFetchRequest] = useState<{
     albumId: string | null;
     trackId: string | null;
@@ -719,7 +722,7 @@ export function App() {
   const albumTrackRowsCacheRef = useRef<Map<string, { albumId: string; rows: AlbumTrackEntry[]; partial: boolean; family: AlbumFamilyContext | null }>>(new Map());
   const albumTrackSpotifyAutoFetchAttemptedRef = useRef<Set<string>>(new Set());
   const loadedHomeAlbumTracksAlbumIdRef = useRef<string | null>(null);
-  const albumTrackListRef = useRef<HTMLUListElement | null>(null);
+  const albumTrackListRef = useRef<HTMLUListElement>(null);
   const homeAlbumTrackListRef = useRef<HTMLUListElement | null>(null);
   const autoScrolledAlbumTracklistKeyRef = useRef<string | null>(null);
   const preserveRecordingAlbumTracklistOpenRef = useRef(false);
@@ -1248,6 +1251,7 @@ export function App() {
   useEffect(() => {
     if (!selectedPreviewArtistAlbumRequestKey || selectedPreview?.kind !== "artist") {
       setArtistAlbumEvidenceItems(null);
+      setArtistTrackEvidenceItems(null);
       return;
     }
     const artistNames = selectedPreviewArtists
@@ -1255,6 +1259,7 @@ export function App() {
       .filter((name): name is string => Boolean(name));
     if (artistNames.length === 0) {
       setArtistAlbumEvidenceItems(null);
+      setArtistTrackEvidenceItems(null);
       return;
     }
     let cancelled = false;
@@ -1267,6 +1272,7 @@ export function App() {
       .then((payload) => {
         if (!cancelled) {
           setArtistAlbumEvidenceItems(payload.items);
+          setArtistTrackEvidenceItems(payload.tracks ?? []);
           const enrichedArtists = uniqueArtistEntries(payload.artists, selectedPreviewArtists);
           const enrichedImage = enrichedArtists.find((artist) => Boolean(artist.image_url))?.image_url ?? null;
           if (enrichedImage && (!selectedPreview.image || selectedPreview.image === selectedPreview.sourceAlbumImage)) {
@@ -1291,6 +1297,7 @@ export function App() {
       .catch(() => {
         if (!cancelled) {
           setArtistAlbumEvidenceItems(null);
+          setArtistTrackEvidenceItems(null);
         }
       });
     return () => {
@@ -1426,6 +1433,51 @@ export function App() {
       evidence: item.evidence,
     }));
   }, [artistAlbumEvidenceItems, selectedPreview]);
+  const selectedPreviewArtistTracks = useMemo<ArtistTrackEvidenceItem[]>(() => {
+    if (selectedPreview?.kind !== "artist") {
+      return [];
+    }
+    if (artistTrackEvidenceItems) {
+      return artistTrackEvidenceItems;
+    }
+    const targetNames = selectedPreviewArtists
+      .map((artist) => artist.name?.trim())
+      .filter((name): name is string => Boolean(name));
+    if (targetNames.length === 0) {
+      return [];
+    }
+    const seen = new Set<string>();
+    return knownPlayerTracks
+      .filter((track) => targetNames.some((artistName) => artistNameMatches(track.artist_name, artistName)))
+      .map((track): ArtistTrackEvidenceItem => ({
+        track_id: track.track_id,
+        track_name: track.track_name ?? "Unknown track",
+        artist_name: track.artist_name,
+        artists: track.artists ?? null,
+        album_id: track.album_id ?? null,
+        album_name: track.album_name ?? null,
+        album_image_url: track.image_url ?? null,
+        album_release_year: track.album_release_year ?? null,
+        album_total_tracks: track.spotify_album_total_tracks ?? null,
+        duration_ms: track.duration_ms ?? null,
+        disc_number: track.spotify_disc_number ?? null,
+        track_number: track.spotify_track_number ?? null,
+        play_count: track.play_count ?? track.all_time_play_count ?? 0,
+        first_played_at: track.first_played_at ?? null,
+        last_played_at: track.last_played_at ?? track.spotify_played_at ?? null,
+        url: track.url ?? null,
+        album_url: track.album_url ?? null,
+        uri: track.uri ?? null,
+      }))
+      .filter((track) => {
+        const key = track.track_id ?? `${track.track_name}:${track.album_id ?? track.album_name ?? ""}`;
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
+  }, [artistTrackEvidenceItems, knownPlayerTracks, selectedPreview, selectedPreviewArtists]);
   const selectedPreviewSourceAlbumEntry = useMemo<ArtistAlbumEntry | null>(() => {
     if (selectedPreview?.kind !== "artist" || !selectedPreview.sourceAlbumName) {
       return null;
@@ -3004,6 +3056,9 @@ export function App() {
       }
       return;
     }
+    if (albumFamilyDiscScrollTarget != null) {
+      return;
+    }
     if (!activePreview) {
       return;
     }
@@ -3048,6 +3103,7 @@ export function App() {
     albumTrackEntries,
     albumTrackEntriesLoading,
     albumTrackLastSortMode,
+    albumFamilyDiscScrollTarget,
     selectedPreview,
     selectedPreviewDetailView,
   ]);
@@ -5459,6 +5515,10 @@ export function App() {
     if (!version) {
       return;
     }
+    const versionDiscNumbers = selectedAlbumFamilyContext.version_disc_numbers ?? {};
+    const currentDiscNumber = versionDiscNumbers[selectedAlbumFamilyContext.selected_spotify_album_id] ?? null;
+    const targetDiscNumber = versionDiscNumbers[spotifyAlbumId] == null ? currentDiscNumber : null;
+    setAlbumFamilyDiscScrollTarget(targetDiscNumber);
     setAlbumTrackLastSortMode(null);
     setSelectedPreview((current) => current?.kind === "track" ? {
       ...current,
@@ -10997,6 +11057,88 @@ export function App() {
   const heroTitle = "ListenLab";
   const heroCopy =
     "Connect your account and browse the listening, library, and profile details Spotify already makes available to ListenLab.";
+  const openArtistTrackPreview = (track: ArtistTrackEvidenceItem) => {
+    const sourceTrack: RecentTrack = {
+      track_id: track.track_id,
+      track_name: track.track_name,
+      artist_name: track.artist_name,
+      album_name: track.album_name,
+      album_release_year: track.album_release_year,
+      artists: track.artists ?? null,
+      duration_ms: track.duration_ms,
+      uri: track.uri,
+      url: track.url,
+      image_url: track.album_image_url,
+      album_id: track.album_id,
+      album_url: track.album_url,
+      spotify_track_number: track.track_number,
+      spotify_disc_number: track.disc_number,
+      spotify_album_total_tracks: track.album_total_tracks,
+      play_count: track.play_count,
+      first_played_at: track.first_played_at,
+      last_played_at: track.last_played_at,
+    };
+    setSelectedPreview({
+      image: track.album_image_url,
+      fallbackLabel: "T",
+      label: track.track_name,
+      meta: track.artist_name,
+      detail: track.album_name,
+      kind: "track",
+      entityId: track.track_id,
+      trackUri: track.uri,
+      url: track.url ?? "",
+      trackId: track.track_id,
+      albumId: track.album_id,
+      artistName: track.artist_name,
+      artists: track.artists ?? null,
+      targetArtists: null,
+      sourceAlbumId: track.album_id,
+      sourceAlbumName: track.album_name,
+      sourceAlbumImage: track.album_image_url,
+      sourceAlbumUrl: track.album_url,
+      sourceAlbumYear: track.album_release_year,
+      sourceTrack,
+      preferredDetailView: "recording",
+    });
+  };
+  const renderSelectedPreviewArtistTrackSection = () => {
+    if (selectedPreviewArtistTracks.length === 0) {
+      return <p className="empty-copy">No cached tracks found for this artist yet.</p>;
+    }
+    return (
+      <div className="detail-modal-artist-tracks">
+        <p className="detail-modal-album-title">All Tracks</p>
+        <ul className="detail-artist-track-list">
+          {selectedPreviewArtistTracks.map((track) => (
+            <li className="detail-artist-track-row" key={`${track.track_id ?? track.track_name}-${track.album_id ?? track.album_name ?? ""}`}>
+              <button className="detail-artist-track-button" onClick={() => openArtistTrackPreview(track)} type="button">
+                {track.album_image_url ? (
+                  <img alt="" className="detail-artist-track-cover" src={track.album_image_url} />
+                ) : (
+                  <span className="detail-artist-track-cover detail-artist-track-cover-fallback" aria-hidden="true">
+                    {track.track_name.slice(0, 1).toUpperCase()}
+                  </span>
+                )}
+                <span className="detail-artist-track-copy">
+                  <span className="detail-artist-track-name single-line-ellipsis">{track.track_name}</span>
+                  <span className="detail-artist-track-meta single-line-ellipsis">
+                    {[
+                      track.album_release_year,
+                      track.album_name,
+                      track.duration_ms != null ? formatPlaybackClock(track.duration_ms) : null,
+                      track.play_count > 0 ? `${track.play_count} plays` : null,
+                      formatMonthDay(track.last_played_at, true),
+                    ].filter(Boolean).join(" | ")}
+                  </span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
   const renderSelectedPreviewArtistAlbumSection = (
     title: string,
     albums: ArtistAlbumEntry[],
@@ -12125,6 +12267,7 @@ export function App() {
             albumTrackEntries={albumTrackEntries}
             albumTrackEntriesError={albumTrackEntriesError}
             albumTrackEntriesLoading={albumTrackEntriesLoading}
+            albumFamilyDiscScrollTarget={albumFamilyDiscScrollTarget}
             albumTrackFetchFromSpotifyLoading={albumTrackSpotifyFetchPending}
             albumTrackMoreOnSpotifyUrl={
               selectedPreview.kind === "track" && spotifyCooldownActive && (albumTrackEntriesPartial || Boolean(albumTrackEntriesError))
@@ -12148,6 +12291,7 @@ export function App() {
             backendSelectedPreviewArtistAlbums={backendSelectedPreviewArtistAlbums}
             buildAlbumPlaybackQueue={buildAlbumPlaybackQueue}
             clearAlbumWithArtistHighlight={clearAlbumWithArtistHighlight}
+            clearAlbumFamilyDiscScrollTarget={() => setAlbumFamilyDiscScrollTarget(null)}
             currentTrack={currentTrack}
             detailOptionsOpen={detailOptionsOpen}
             displayAlbumTrackEntries={displayAlbumTrackEntries}
@@ -12184,6 +12328,7 @@ export function App() {
             releaseSourceVersionAlbumImageUrl={releaseSourceVersionAlbumImageUrl}
             releaseSourceVersionPlayCountLabel={releaseSourceVersionPlayCountLabel}
             renderSelectedPreviewArtistAlbumSection={renderSelectedPreviewArtistAlbumSection}
+            renderSelectedPreviewArtistTrackSection={renderSelectedPreviewArtistTrackSection}
             scheduleAlbumWithArtistHighlight={scheduleAlbumWithArtistHighlight}
             scrollRecordingVariationStrip={scrollRecordingVariationStrip}
             selectedAlbumTrackMarkerTop={selectedAlbumTrackMarkerTop}

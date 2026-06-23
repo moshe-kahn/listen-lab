@@ -17,6 +17,7 @@ function albumLengthLabel(durationMs: number | null) {
 
 function versionSummary(version: AlbumFamilyVersion) {
   const parts = [
+    version.release_year,
     version.total_tracks == null ? null : `${version.total_tracks} ${version.total_tracks === 1 ? "track" : "tracks"}`,
     albumLengthLabel(version.total_duration_ms),
   ].filter(Boolean);
@@ -77,7 +78,7 @@ export function AlbumVersionSelector({ onSelect, selectedSpotifyAlbumId, version
               <span className="detail-modal-album-version-art-fallback" aria-hidden="true">{version.label.slice(0, 1)}</span>
             )}
             <span className="detail-modal-album-version-copy">
-              <strong>{version.menu_label || version.label}{version.release_year == null ? "" : ` · ${version.release_year}`}</strong>
+              <strong>{version.menu_label || version.label}</strong>
               <span>{versionSummary(version)}</span>
             </span>
           </button>

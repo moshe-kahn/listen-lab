@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 
-from backend.app.artist_album_evidence import list_artist_album_evidence
+from backend.app.artist_album_evidence import list_artist_album_evidence, list_artist_tracks
 from backend.app.album_family import build_album_family_context
 from backend.app.artwork import resolve_artist_artwork
 from backend.app.catalog_identity_promotion import promote_catalog_album_tracks_to_identity
@@ -310,6 +310,7 @@ async def auth_artist_albums(
             source_album_id=source_album_id,
             source_album_name=source_album_name,
         )
+        tracks = list_artist_tracks(normalized_artist_names)
         artists = await resolve_artist_artwork(
             _artist_entries_for_album_evidence(normalized_artist_names, artist_ids),
             access_token=token,
@@ -317,7 +318,7 @@ async def auth_artist_albums(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Artist album evidence could not be loaded.") from exc
-    return {"items": items, "artists": artists}
+    return {"items": items, "tracks": tracks, "artists": artists}
 
 
 @router.post("/auth/playback/queue-playlist/sync")

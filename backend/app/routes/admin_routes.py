@@ -86,6 +86,7 @@ async def debug_listening_log(
             force=True,
             limit=50,
             raise_on_error=False,
+            snapshot_user_id=str(user_id),
         )
         logger.info(
             "event=listening_log_phase_timing phase=recent_sync elapsed_ms=%.1f",

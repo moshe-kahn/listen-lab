@@ -261,8 +261,30 @@ export type ArtistAlbumEvidenceItem = {
   evidence: string;
 };
 
+export type ArtistTrackEvidenceItem = {
+  track_id: string | null;
+  track_name: string;
+  artist_name: string | null;
+  artists?: TrackArtistEntry[] | null;
+  album_id: string | null;
+  album_name: string | null;
+  album_image_url: string | null;
+  album_release_year: string | null;
+  album_total_tracks: number | null;
+  duration_ms: number | null;
+  disc_number: number | null;
+  track_number: number | null;
+  play_count: number;
+  first_played_at: string | null;
+  last_played_at: string | null;
+  url: string | null;
+  album_url: string | null;
+  uri: string | null;
+};
+
 export type ArtistAlbumEvidenceResponse = {
   items: ArtistAlbumEvidenceItem[];
+  tracks?: ArtistTrackEvidenceItem[];
   artists?: TrackArtistEntry[];
 };
 
@@ -1895,6 +1917,8 @@ export type AlbumFamilyContext = {
   selected_spotify_album_id: string;
   release_album_ids: number[];
   versions: AlbumFamilyVersion[];
+  disc_labels?: Record<string, string>;
+  version_disc_numbers?: Record<string, number>;
 };
 
 export type SpotifyPlayerInstance = {

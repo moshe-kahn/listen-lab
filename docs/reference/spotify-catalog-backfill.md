@@ -87,15 +87,32 @@ Current safe-equivalence rules:
 This path is still evidence-gated identity repair. Do not move it into automatic catalog backfill.
 
 ## Artist Album Evidence Fallback
-The artist album evidence route `/auth/artist-albums` primarily uses Spotify catalog album and album-track metadata, but it now falls back to internal `album_artist` links when catalog album rows are missing or incomplete.
+The artist album evidence route `/auth/artist-albums` primarily uses Spotify catalog album and album-track metadata, but it also falls back to internal `album_artist` links when catalog album rows are missing or incomplete.
 
 Behavior:
 - return catalog-derived album/appears-on evidence when available
 - append missing albums from internal `album_artist` links
 - prefer a Spotify source album ID when an internal release album has one
 - collapse duplicate same-title history/provider album rows for the same selected artist
+- return cache-backed artist track rows from `spotify_album_track` as `tracks`
+- sort artist track rows with dated album metadata first, then album/disc/track order
+- include source-track play-count cache fields where available for artist track rows
 
 This fallback reads identity links that already exist. It must not create catalog rows, repair albums, or merge identities.
+
+Current limitation:
+- The album evidence list can be broader than the artist `tracks` list.
+- Albums may appear from Spotify album catalog rows or internal album-artist links even when their Spotify album tracklist is not cached.
+- Those albums should be labeled or treated as metadata-only until a bounded background backfill fetches the missing tracklist.
+- Artist preview must remain cache-only; it should not issue live Spotify loops to complete a discography.
+
+Recommended gap-handling:
+- detect visible artist albums that have Spotify album IDs but missing/incomplete `spotify_album_track` rows
+- enqueue low-priority catalog backfill work for those album IDs
+- deduplicate by Spotify album ID
+- process with strict request limits, delay, and immediate stop on 429 / `Retry-After`
+- do not block the artist overlay on this work
+- keep future non-Spotify catalog sources such as MusicBrainz/Cover Art Archive as cached metadata inputs, not live artist-view calls
 
 ## Request Controls
 - `limit`

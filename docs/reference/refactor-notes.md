@@ -76,6 +76,9 @@ Current playback-route addition:
   - read-only cache/internal-link query for artist overlay album evidence
   - accepts repeated `artist_names` plus optional `source_album_id` / `source_album_name`
   - returns album metadata, matching track counts, all-target presence, tracklist completeness, relationship, and evidence text
+  - also returns cache-backed artist track rows from `spotify_album_track` as `tracks`
+  - artist track rows include album metadata, artwork, duration, disc/track number, URI/link, and source-track play-count cache fields when present
+  - the route remains cache-only for track rows and must not perform live Spotify discography fetches
 
 Remaining route groups:
 - `dashboard_routes.py`
@@ -239,6 +242,14 @@ Current relation UI behavior:
 - same-recording release appearances, including the same track on different albums, stay out of the Track Family list
 - family lookup for a representative track is anchored to all release-track members in the current recording group because family candidates can be attached to a sibling release track
 
+Current modal artist behavior:
+- artist preview renders the artist image inline beside the artist name at the top
+- artist preview shows an `All Tracks` list before album sections
+- `All Tracks` is cache-backed from `/auth/artist-albums.tracks`
+- artist track rows open the normal track detail view
+- album sections remain broader than `All Tracks` because album evidence can come from catalog album rows or internal album-artist links without a cached Spotify album tracklist
+- missing album artwork in artist album rows can still indicate metadata-only/internal evidence
+
 Current frontend size:
 - `frontend/src/App.tsx`: `11,223` lines / `508,612` bytes.
 - Original pre-extraction size in this branch was `13,387` lines / `566,339` bytes.
@@ -248,6 +259,7 @@ Frontend behavior constraints:
 - no backend API contract changes
 - preserve persisted reviewer state/localStorage semantics
 - preserve issue detail lazy rendering
+- keep artist preview cache-only; enqueue/fetch missing album tracklists outside the modal request path
 
 Frontend verification already passed earlier in this branch:
 - `cd frontend && npm run build`

@@ -441,6 +441,7 @@ Default behavior:
 - app/profile/recent-section loads use a 10 minute minimum interval
 - duplicate concurrent sync attempts share an async lock and skip when a sync recently completed
 - skipped sync responses report status metadata rather than pretending a Spotify page was fetched
+- when a sync inserts new recent rows, callers that know the user id invalidate that user's recent snapshot cache so Activity does not continue serving stale snapshot data
 
 Forced behavior:
 - explicit user actions can bypass the minimum interval unless Spotify rate-limit/cooldown state blocks the call
@@ -456,6 +457,7 @@ Rationale:
 - Spotify recently-played returns a limited recent window, so the app still needs periodic polling.
 - The endpoint can return the same 50 rows repeatedly; throttling avoids duplicate fetch/write work on normal page loads.
 - Manual refresh remains available when the user expects immediate Spotify data refresh.
+- Snapshot invalidation must be tied to actual inserted rows. A skipped sync or duplicate page should not churn user snapshots.
 
 ## Spotify History-Dump Ingest
 

@@ -129,6 +129,24 @@ For overlapping original-album tracks:
 
 Do not choose the original or deluxe album as a global canonical album by default.
 
+### Combined Multi-Album Edition
+
+Treat a combined package containing multiple standalone albums as a special album-family display case, not as evidence that the standalone albums are versions of each other.
+
+Example: Radiohead `KID A MNESIA` contains `Kid A` on Disc 1, `Amnesiac` on Disc 2, and extra material on Disc 3.
+
+Rules:
+
+- `Kid A` may show `KID A MNESIA` as an extended edition/version.
+- `Amnesiac` may show `KID A MNESIA` as an extended edition/version.
+- `Kid A` should not show `Amnesiac` as a version.
+- `Amnesiac` should not show `Kid A` as a version.
+- The combined edition may show both standalone albums as component versions.
+- Disc labels may use album/component names instead of generic edition suffixes.
+- Track identity for overlapping component-disc rows should use position/title/artist evidence to collapse component rows with the combined package rows for display without merging the standalone album identities.
+
+Keep this explicit until the model has a first-class album relationship layer for component/contains/expanded-package semantics.
+
 ### Release-Track Boundary
 
 Keep `release_track` tighter than `recording_track`.

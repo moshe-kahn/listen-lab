@@ -381,3 +381,91 @@ class AlbumFamilyReviewTests(unittest.TestCase):
         self.assertEqual(1, len(paranoid_rows))
         self.assertFalse(paranoid_rows[0]["family_exclusive"])
         self.assertEqual(2, len(paranoid_rows[0]["family_available_versions"]))
+
+    def test_kid_a_mnesia_combined_edition_links_both_core_albums_and_labels_discs(self) -> None:
+        kid_a_tracks = ["Everything In Its Right Place", "Kid A"]
+        amnesiac_tracks = ["Packt Like Sardines In a Crushd Tin Box", "Pyramid Song"]
+        bonus_tracks = ["Fog - Again Again Version"]
+        self._seed_album("Kid A", "6GjwtEZcfenmOf6l18N7T7", 2000, kid_a_tracks)
+        self._seed_album("Amnesiac", "1HrMmB5useeZ0F5lHrMvl0", 2001, amnesiac_tracks)
+        self._seed_album(
+            "KID A MNESIA",
+            "6ofEQubaL265rIW6WnCU8y",
+            2021,
+            kid_a_tracks + amnesiac_tracks + bonus_tracks,
+        )
+        with sqlite_connection(write=True) as connection:
+            connection.execute(
+                """
+                UPDATE spotify_album_track
+                SET disc_number = CASE
+                      WHEN track_number <= 2 THEN 1
+                      WHEN track_number <= 4 THEN 2
+                      ELSE 3
+                    END,
+                    track_number = CASE
+                      WHEN track_number <= 2 THEN track_number
+                      WHEN track_number <= 4 THEN track_number - 2
+                      ELSE track_number - 4
+                    END
+                WHERE spotify_album_id = '6ofEQubaL265rIW6WnCU8y'
+                """
+            )
+
+        all_versions = [
+            "6GjwtEZcfenmOf6l18N7T7",
+            "1HrMmB5useeZ0F5lHrMvl0",
+            "6ofEQubaL265rIW6WnCU8y",
+        ]
+        expected_versions_by_selection = {
+            "6GjwtEZcfenmOf6l18N7T7": ["6GjwtEZcfenmOf6l18N7T7", "6ofEQubaL265rIW6WnCU8y"],
+            "1HrMmB5useeZ0F5lHrMvl0": ["1HrMmB5useeZ0F5lHrMvl0", "6ofEQubaL265rIW6WnCU8y"],
+            "6ofEQubaL265rIW6WnCU8y": all_versions,
+        }
+        expected_labels_by_selection = {
+            "6GjwtEZcfenmOf6l18N7T7": ["Kid A", "Extended Edition"],
+            "1HrMmB5useeZ0F5lHrMvl0": ["Amnesiac", "Extended Edition"],
+            "6ofEQubaL265rIW6WnCU8y": ["Kid A", "Amnesiac", "Extended Edition"],
+        }
+        for selected_album_id in all_versions:
+            with sqlite_connection(row_factory=sqlite3.Row) as connection:
+                selected_items = [
+                    dict(row)
+                    for row in connection.execute(
+                        """
+                        SELECT spotify_track_id AS id, name, duration_ms, disc_number, track_number, artists_json
+                        FROM spotify_album_track
+                        WHERE spotify_album_id = ?
+                        ORDER BY disc_number, track_number
+                        """,
+                        (selected_album_id,),
+                    ).fetchall()
+                ]
+            context = build_album_family_context(
+                selected_spotify_album_id=selected_album_id,
+                selected_items=selected_items,
+            )
+
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertEqual(
+                expected_versions_by_selection[selected_album_id],
+                [version["spotify_album_id"] for version in context["versions"]],
+            )
+            self.assertEqual(
+                expected_labels_by_selection[selected_album_id],
+                [version["label"] for version in context["versions"]],
+            )
+            self.assertEqual({1: "Kid A", 2: "Amnesiac", 3: "Extra Content"}, context["disc_labels"])
+            self.assertEqual(
+                {"6GjwtEZcfenmOf6l18N7T7": 1, "1HrMmB5useeZ0F5lHrMvl0": 2},
+                context["version_disc_numbers"],
+            )
+            self.assertEqual(5, len(context["items"]))
+            self.assertEqual(
+                {1: 2, 2: 2, 3: 1},
+                {
+                    disc_number: sum(1 for item in context["items"] if item["disc_number"] == disc_number)
+                    for disc_number in (1, 2, 3)
+                },
+            )

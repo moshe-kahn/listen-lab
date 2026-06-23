@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from backend.app.config import get_settings
+from backend.app.cache.user_snapshot_cache import _invalidate_user_recent_snapshot
 from backend.app.db import get_spotify_sync_state, raw_play_event_exists
 from backend.app.spotify_recent_api import fetch_spotify_recent_play_page
 from backend.app.spotify_recent_mapper import map_spotify_recent_play_item
@@ -96,6 +97,7 @@ async def maybe_sync_spotify_recent(
     min_interval_seconds: int = 30 * 60,
     limit: int = 50,
     raise_on_error: bool = True,
+    snapshot_user_id: str | None = None,
 ) -> dict[str, Any]:
     async with _recent_sync_lock:
         now = datetime.now(UTC)
@@ -174,7 +176,9 @@ async def maybe_sync_spotify_recent(
                 "row_outcomes": [],
             }
         recording_cluster_refresh: dict[str, Any] | None = None
+        recent_snapshot_invalidated = False
         if int(summary.get("inserted_count") or 0) > 0:
+            recent_snapshot_invalidated = _invalidate_user_recent_snapshot(snapshot_user_id)
             from backend.app.recording_track_candidates import drain_generated_recording_track_cluster_dirty
 
             recording_cluster_refresh = drain_generated_recording_track_cluster_dirty(limit=50)
@@ -185,6 +189,7 @@ async def maybe_sync_spotify_recent(
             "force": force,
             "min_interval_seconds": bounded_min_interval,
             "recording_cluster_refresh": recording_cluster_refresh,
+            "recent_snapshot_invalidated": recent_snapshot_invalidated,
         }
 
 

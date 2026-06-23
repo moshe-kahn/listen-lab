@@ -23,6 +23,21 @@ _EDITION_SUFFIX = re.compile(
 )
 _COMPANION_DISC = re.compile(r"\b(?:bonus\s+)?(?:disc|disk)\s+\d+\b", re.IGNORECASE)
 _FORBIDDEN_ALBUM_CONTEXT = re.compile(r"\b(single|soundtrack|score|compilation|greatest hits|best of)\b", re.IGNORECASE)
+_COMBINED_EDITION_GROUPS = (
+    {
+        "combined_spotify_album_id": "6ofEQubaL265rIW6WnCU8y",
+        "versions": (
+            ("6GjwtEZcfenmOf6l18N7T7", "Kid A"),
+            ("1HrMmB5useeZ0F5lHrMvl0", "Amnesiac"),
+            ("6ofEQubaL265rIW6WnCU8y", "Extended Edition"),
+        ),
+        "disc_labels": {1: "Kid A", 2: "Amnesiac", 3: "Extra Content"},
+        "version_disc_numbers": {
+            "6GjwtEZcfenmOf6l18N7T7": 1,
+            "1HrMmB5useeZ0F5lHrMvl0": 2,
+        },
+    },
+)
 
 
 def _core_album_name(name: str) -> str:
@@ -66,6 +81,13 @@ def _edition_menu_label(name: str, label: str) -> str:
     if label == "Expanded Edition" and str(name or "").strip():
         return str(name).strip()
     return label
+
+
+def _combined_edition_group(spotify_album_id: str) -> dict[str, Any] | None:
+    for group in _COMBINED_EDITION_GROUPS:
+        if spotify_album_id in {version_id for version_id, _label in group["versions"]}:
+            return group
+    return None
 
 
 def _album_rows(connection: sqlite3.Connection, release_album_ids: list[int]) -> list[sqlite3.Row]:
@@ -388,6 +410,7 @@ def build_album_family_context(
     selected_spotify_album_id: str,
     selected_items: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    combined_edition_group = _combined_edition_group(selected_spotify_album_id)
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         selected = connection.execute(
             """
@@ -409,7 +432,9 @@ def build_album_family_context(
         selected_release_album_id = int(selected["release_album_id"])
         selected_family_id = int(selected["album_family_id"]) if selected["album_family_id"] is not None else None
         inferred_equivalent_family = False
-        if selected_family_id is None:
+        if combined_edition_group is not None:
+            selected_family_id = -1
+        elif selected_family_id is None:
             selected_family_id = _equivalent_reviewed_family_id(
                 connection,
                 release_album_id=selected_release_album_id,
@@ -470,37 +495,82 @@ def build_album_family_context(
                 "versions": [version],
                 "items": items,
             }
-        family_id = selected_family_id
-        family = connection.execute(
-            "SELECT primary_name, canonical_release_album_id FROM album_family WHERE id = ?",
-            (family_id,),
-        ).fetchone()
-        version_rows = connection.execute(
-            """
-            SELECT
-              afm.release_album_id,
-              ra.primary_name,
-              ra.release_year,
-              sa.external_id AS spotify_album_id,
-              sac.total_tracks,
-              durations.total_duration_ms,
-              json_extract(sac.images_json, '$[0].url') AS image_url
-            FROM album_family_map afm
-            JOIN release_album ra ON ra.id = afm.release_album_id
-            JOIN source_album_map sam ON sam.release_album_id = ra.id AND sam.status = 'accepted'
-            JOIN source_album sa ON sa.id = sam.source_album_id AND sa.source_name = 'spotify'
-            LEFT JOIN spotify_album_catalog sac ON sac.spotify_album_id = sa.external_id
-            LEFT JOIN (
-              SELECT spotify_album_id, sum(COALESCE(duration_ms, 0)) AS total_duration_ms
-              FROM spotify_album_track
-              WHERE lower(COALESCE(last_status, '')) != 'error'
-              GROUP BY spotify_album_id
-            ) durations ON durations.spotify_album_id = sa.external_id
-            WHERE afm.album_family_id = ? AND afm.status = 'accepted'
-            ORDER BY COALESCE(sac.total_tracks, 999999), ra.release_year, ra.id
-            """,
-            (family_id,),
-        ).fetchall()
+        if combined_edition_group is not None:
+            configured_album_ids = [version_id for version_id, _label in combined_edition_group["versions"]]
+            placeholders = ",".join("?" for _ in configured_album_ids)
+            raw_version_rows = connection.execute(
+                f"""
+                SELECT
+                  sam.release_album_id,
+                  ra.primary_name,
+                  ra.release_year,
+                  sa.external_id AS spotify_album_id,
+                  sac.total_tracks,
+                  durations.total_duration_ms,
+                  json_extract(sac.images_json, '$[0].url') AS image_url
+                FROM source_album sa
+                JOIN source_album_map sam ON sam.source_album_id = sa.id AND sam.status = 'accepted'
+                JOIN release_album ra ON ra.id = sam.release_album_id
+                LEFT JOIN spotify_album_catalog sac ON sac.spotify_album_id = sa.external_id
+                LEFT JOIN (
+                  SELECT spotify_album_id, sum(COALESCE(duration_ms, 0)) AS total_duration_ms
+                  FROM spotify_album_track
+                  WHERE lower(COALESCE(last_status, '')) != 'error'
+                  GROUP BY spotify_album_id
+                ) durations ON durations.spotify_album_id = sa.external_id
+                WHERE sa.source_name = 'spotify' AND sa.external_id IN ({placeholders})
+                """,
+                tuple(configured_album_ids),
+            ).fetchall()
+            version_order = {spotify_album_id: index for index, spotify_album_id in enumerate(configured_album_ids)}
+            version_rows = sorted(raw_version_rows, key=lambda row: version_order.get(str(row["spotify_album_id"]), 999))
+            combined_spotify_album_id = str(combined_edition_group["combined_spotify_album_id"])
+            if selected_spotify_album_id != combined_spotify_album_id:
+                version_rows = [
+                    row for row in version_rows
+                    if str(row["spotify_album_id"]) in {selected_spotify_album_id, combined_spotify_album_id}
+                ]
+            combined_row = next(
+                row for row in version_rows
+                if str(row["spotify_album_id"]) == combined_spotify_album_id
+            )
+            family_id = int(combined_row["release_album_id"])
+            family: sqlite3.Row | dict[str, Any] | None = {
+                "primary_name": str(combined_row["primary_name"] or ""),
+                "canonical_release_album_id": int(combined_row["release_album_id"]),
+            }
+        else:
+            family_id = selected_family_id
+            family = connection.execute(
+                "SELECT primary_name, canonical_release_album_id FROM album_family WHERE id = ?",
+                (family_id,),
+            ).fetchone()
+            version_rows = connection.execute(
+                """
+                SELECT
+                  afm.release_album_id,
+                  ra.primary_name,
+                  ra.release_year,
+                  sa.external_id AS spotify_album_id,
+                  sac.total_tracks,
+                  durations.total_duration_ms,
+                  json_extract(sac.images_json, '$[0].url') AS image_url
+                FROM album_family_map afm
+                JOIN release_album ra ON ra.id = afm.release_album_id
+                JOIN source_album_map sam ON sam.release_album_id = ra.id AND sam.status = 'accepted'
+                JOIN source_album sa ON sa.id = sam.source_album_id AND sa.source_name = 'spotify'
+                LEFT JOIN spotify_album_catalog sac ON sac.spotify_album_id = sa.external_id
+                LEFT JOIN (
+                  SELECT spotify_album_id, sum(COALESCE(duration_ms, 0)) AS total_duration_ms
+                  FROM spotify_album_track
+                  WHERE lower(COALESCE(last_status, '')) != 'error'
+                  GROUP BY spotify_album_id
+                ) durations ON durations.spotify_album_id = sa.external_id
+                WHERE afm.album_family_id = ? AND afm.status = 'accepted'
+                ORDER BY COALESCE(sac.total_tracks, 999999), ra.release_year, ra.id
+                """,
+                (family_id,),
+            ).fetchall()
         if not version_rows:
             return None
         core_name = _core_album_name(
@@ -513,10 +583,18 @@ def build_album_family_context(
                 "release_album_id": int(row["release_album_id"]),
                 "spotify_album_id": str(row["spotify_album_id"]),
                 "name": str(row["primary_name"] or ""),
-                "label": _edition_label(str(row["primary_name"] or ""), core_name),
-                "menu_label": _edition_menu_label(
-                    str(row["primary_name"] or ""),
-                    _edition_label(str(row["primary_name"] or ""), core_name),
+                "label": (
+                    dict(combined_edition_group["versions"]).get(str(row["spotify_album_id"]))
+                    if combined_edition_group is not None
+                    else _edition_label(str(row["primary_name"] or ""), core_name)
+                ),
+                "menu_label": (
+                    dict(combined_edition_group["versions"]).get(str(row["spotify_album_id"]))
+                    if combined_edition_group is not None
+                    else _edition_menu_label(
+                        str(row["primary_name"] or ""),
+                        _edition_label(str(row["primary_name"] or ""), core_name),
+                    )
                 ),
                 "release_year": int(row["release_year"]) if row["release_year"] is not None else None,
                 "total_tracks": int(row["total_tracks"]) if row["total_tracks"] is not None else None,
@@ -546,6 +624,23 @@ def build_album_family_context(
             )
             for version in versions
         }
+        if combined_edition_group is not None:
+            component_disc_numbers = {
+                spotify_album_id: index
+                for index, (spotify_album_id, _label) in enumerate(combined_edition_group["versions"], start=1)
+                if spotify_album_id != combined_edition_group["combined_spotify_album_id"]
+            }
+            for spotify_album_id, disc_number in component_disc_numbers.items():
+                for item in items_by_album.get(spotify_album_id, []):
+                    item["disc_number"] = disc_number
+            for spotify_album_id, items in items_by_album.items():
+                for item in items:
+                    disc_number = item.get("disc_number")
+                    track_number = item.get("track_number")
+                    if isinstance(disc_number, int) and isinstance(track_number, int):
+                        item["_combined_edition_position_key"] = (
+                            f"{combined_edition_group['combined_spotify_album_id']}:{disc_number}:{track_number}"
+                        )
         for version in versions:
             companion_match = _COMPANION_DISC.search(str(version["label"] or ""))
             if not companion_match:
@@ -569,6 +664,9 @@ def build_album_family_context(
     family_release_album_ids = {int(version["release_album_id"]) for version in versions}
 
     def identity_key(item: dict[str, Any]) -> str:
+        combined_position_key = item.get("_combined_edition_position_key")
+        if combined_position_key:
+            return f"combined-edition:{combined_position_key}"
         release_track_id = item.get("release_track_id")
         if isinstance(release_track_id, int):
             return f"recording:{representatives.get(release_track_id, release_track_id)}"
@@ -612,12 +710,14 @@ def build_album_family_context(
         )
         ghost_rows.append(ghost)
     combined_rows = selected_rows + ghost_rows
-    if any(_COMPANION_DISC.search(str(version.get("label") or "")) for version in versions):
+    if combined_edition_group is not None or any(_COMPANION_DISC.search(str(version.get("label") or "")) for version in versions):
         combined_rows.sort(key=lambda item: (
             int(item.get("disc_number") or 1),
             int(item.get("track_number") or 999999),
             str(item.get("name") or ""),
         ))
+    for item in combined_rows:
+        item.pop("_combined_edition_position_key", None)
     return {
         "album_family_id": family_id,
         "core_name": core_name,
@@ -625,4 +725,6 @@ def build_album_family_context(
         "release_album_ids": [version["release_album_id"] for version in versions],
         "versions": versions,
         "items": combined_rows,
+        "disc_labels": combined_edition_group.get("disc_labels", {}) if combined_edition_group is not None else {},
+        "version_disc_numbers": combined_edition_group.get("version_disc_numbers", {}) if combined_edition_group is not None else {},
     }

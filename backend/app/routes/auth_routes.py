@@ -196,6 +196,7 @@ async def auth_callback(request: Request, code: str | None = None, state: str | 
                 source_ref="oauth_recent_ingest",
                 force=True,
                 limit=50,
+                snapshot_user_id=spotify_user_id,
             )
             ingest_result.update(
                 {

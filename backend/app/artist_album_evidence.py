@@ -455,3 +455,100 @@ def list_artist_album_evidence(
         )
 
     return sorted(items, key=sort_key)
+
+
+def list_artist_tracks(
+    artist_names: list[str],
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    targets: list[str] = []
+    seen_targets: set[str] = set()
+    for name in artist_names:
+        clean_name = str(name or "").strip()
+        key = _normalize_name(clean_name)
+        if clean_name and key and key not in seen_targets:
+            seen_targets.add(key)
+            targets.append(clean_name)
+    target_keys = {_normalize_name(name) for name in targets}
+    if not target_keys:
+        return []
+
+    bounded_limit = max(1, min(int(limit or 500), 1000))
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              sat.spotify_track_id,
+              sat.name AS track_name,
+              sat.duration_ms,
+              sat.disc_number,
+              sat.track_number,
+              sat.artists_json,
+              sat.spotify_album_id,
+              sac.name AS album_name,
+              sac.release_date,
+              sac.images_json,
+              sac.total_tracks,
+              pc.play_count,
+              pc.first_played_at,
+              pc.last_played_at
+            FROM spotify_album_track sat
+            LEFT JOIN spotify_album_catalog sac
+              ON sac.spotify_album_id = sat.spotify_album_id
+             AND lower(COALESCE(sac.last_status, '')) != 'error'
+            LEFT JOIN source_track_play_count_cache pc
+              ON pc.spotify_track_id = sat.spotify_track_id
+            WHERE lower(COALESCE(sat.last_status, '')) != 'error'
+            ORDER BY
+              CASE WHEN sac.release_date IS NULL OR sac.release_date = '' THEN 1 ELSE 0 END,
+              sac.release_date,
+              sat.spotify_album_id,
+              sat.disc_number,
+              sat.track_number,
+              sat.name
+            """
+        ).fetchall()
+
+    items: list[dict[str, Any]] = []
+    seen_track_album_keys: set[str] = set()
+    for row in rows:
+        track_artist_names = _artist_names_from_json(row["artists_json"])
+        track_artist_keys = {_normalize_name(name) for name in track_artist_names}
+        if not target_keys.intersection(track_artist_keys):
+            continue
+        spotify_track_id = str(row["spotify_track_id"] or "").strip()
+        spotify_album_id = str(row["spotify_album_id"] or "").strip()
+        key = f"{spotify_track_id}:{spotify_album_id}"
+        if not spotify_track_id or key in seen_track_album_keys:
+            continue
+        seen_track_album_keys.add(key)
+        items.append(
+            {
+                "track_id": spotify_track_id,
+                "track_name": str(row["track_name"] or "").strip(),
+                "artist_name": ", ".join(track_artist_names) or None,
+                "artists": [
+                    {"name": name}
+                    for name in track_artist_names
+                    if name
+                ],
+                "album_id": spotify_album_id or None,
+                "album_name": str(row["album_name"] or "").strip() or None,
+                "album_image_url": _first_image_url(row["images_json"]),
+                "album_release_year": _release_year(row["release_date"]),
+                "album_total_tracks": int(row["total_tracks"]) if row["total_tracks"] is not None else None,
+                "duration_ms": int(row["duration_ms"]) if row["duration_ms"] is not None else None,
+                "disc_number": int(row["disc_number"]) if row["disc_number"] is not None else None,
+                "track_number": int(row["track_number"]) if row["track_number"] is not None else None,
+                "play_count": int(row["play_count"]) if row["play_count"] is not None else 0,
+                "first_played_at": row["first_played_at"],
+                "last_played_at": row["last_played_at"],
+                "url": f"https://open.spotify.com/track/{spotify_track_id}",
+                "album_url": _spotify_album_url(spotify_album_id or None),
+                "uri": f"spotify:track:{spotify_track_id}",
+            }
+        )
+        if len(items) >= bounded_limit:
+            break
+    return items
