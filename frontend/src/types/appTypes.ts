@@ -28,6 +28,7 @@ export type RecentTrack = {
   has_release_track_siblings?: boolean | null;
   release_track_cluster_candidate_type?: string | null;
   release_track_cluster_relationship_kind?: string | null;
+  recording_release_track_ids?: number[] | null;
   track_name: string | null;
   artist_name: string | null;
   album_name: string | null;
@@ -75,6 +76,12 @@ export type RecentTrack = {
   recent_play_count?: number | null;
   first_played_at?: string | null;
   last_played_at?: string | null;
+  source_play_count?: number | null;
+  source_first_played_at?: string | null;
+  source_last_played_at?: string | null;
+  recording_play_count?: number | null;
+  recording_first_played_at?: string | null;
+  recording_last_played_at?: string | null;
   listening_span_days?: number | null;
   listening_span_years?: number | null;
   active_months_count?: number | null;
@@ -84,6 +91,7 @@ export type RecentTrack = {
   has_recent_source?: boolean | null;
   has_history_source?: boolean | null;
   source_label?: "recent" | "history" | "both" | "api" | "liked_cache" | null;
+  top_tracks_source?: "spotify" | "history" | "db" | null;
   recent_source_event_count?: number | null;
   history_source_event_count?: number | null;
   matched_source_event_count?: number | null;
@@ -99,6 +107,7 @@ export type RecentTrack = {
   spotify_shuffle?: boolean | null;
   spotify_offline?: boolean | null;
   formula_rank_delta?: number | null;
+  formula_rank?: number | null;
 };
 
 export type TrackArtistEntry = NonNullable<RecentTrack["artists"]>[number];
@@ -111,6 +120,8 @@ export type ArtistAlbumEntry = {
   url: string;
   releaseYear: string | null;
   trackCount: number | null;
+  albumType?: string | null;
+  editionCount?: number | null;
   source: "album" | "track";
   isHighlighted: boolean;
   relationship?: "album" | "appears_on" | "unknown";
@@ -161,6 +172,7 @@ export type ReleaseTrackMetadataItem = {
   has_release_track_siblings: boolean;
   release_track_cluster_candidate_type?: string | null;
   release_track_cluster_relationship_kind?: string | null;
+  recording_release_track_ids?: number[] | null;
 };
 
 export type ReleaseTrackMetadataResponse = {
@@ -252,6 +264,7 @@ export type ArtistAlbumEvidenceItem = {
   url: string | null;
   release_year: string | null;
   total_tracks: number | null;
+  album_type?: string | null;
   cached_track_count: number;
   matching_artist_names: string[];
   matching_track_count_by_artist: Record<string, number>;
@@ -270,11 +283,14 @@ export type ArtistTrackEvidenceItem = {
   album_name: string | null;
   album_image_url: string | null;
   album_release_year: string | null;
+  album_type?: string | null;
   album_total_tracks: number | null;
   duration_ms: number | null;
   disc_number: number | null;
   track_number: number | null;
   play_count: number;
+  source_play_count?: number | null;
+  recording_play_count?: number | null;
   first_played_at: string | null;
   last_played_at: string | null;
   url: string | null;
@@ -338,6 +354,7 @@ export type TopAlbum = {
   name: string | null;
   artist_name: string | null;
   release_year?: string | null;
+  album_type?: string | null;
   url: string | null;
   image_url?: string | null;
   track_representation_count: number;
@@ -438,6 +455,7 @@ export type MergedTrackAggregateResponse = {
   limit: number;
   recent_window_days: number;
   source_filter: MergedTrackSourceFilter;
+  rank_by?: "all_time" | "recent";
   returned_items: number;
   excluded_unknown_identity_count: number;
   items: RecentTrack[];

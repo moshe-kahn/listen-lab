@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 import type { DashboardListCardProps, RecentTrack, SectionKey, TrackRankingMode } from "../../types/appTypes";
 import { PAGE_SIZE } from "../../constants/appConstants";
 import {
-  capTracksPerAlbum,
   emptySlots,
   formatFormulaRankDelta,
   formatTrackLongevity,
@@ -72,6 +71,19 @@ export function DashboardTrackColumn({
     section === "tracksAllTimeCurrent" || section === "tracksAllTimeNew"
       ? formatFormulaRankDelta(track)
       : null;
+  const formulaRankText = (track: RecentTrack) => {
+    const rank = Number(track.formula_rank ?? 0);
+    return (section === "tracksAllTimeCurrent" || section === "tracksAllTimeNew") && Number.isFinite(rank) && rank > 0
+      ? `#${rank}`
+      : null;
+  };
+  const recentMetricText = (track: RecentTrack) => {
+    if (section !== "tracksRecent") {
+      return null;
+    }
+    const plays = Number(track.recent_play_count ?? track.play_count ?? 0);
+    return plays > 0 ? `${plays} plays` : null;
+  };
   const completionRatio = (track: RecentTrack) =>
     section === "recent"
       ? recentTrackCompletionRatio(track)
@@ -81,6 +93,7 @@ export function DashboardTrackColumn({
       track.is_liked === true
       || track.source_label === "liked_cache"
       || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
+      || (track.recording_release_track_ids ?? []).some((releaseTrackId) => likedReleaseTrackIds?.has(releaseTrackId))
       || (track.track_id && likedTrackIds?.has(track.track_id)),
     );
   const releaseSiblingSourceCount = (track: RecentTrack) => {
@@ -94,9 +107,7 @@ export function DashboardTrackColumn({
     || Number(track.release_track_duplicate_source_count ?? 0) > 1
     || Boolean(track.release_track_cluster_candidate_type);
 
-  const cappedRows = isAllTimeTrackSection || section === "tracksRecent"
-    ? capTracksPerAlbum(rankedItems, 1)
-    : rankedItems.map((track) => ({ track, hiddenCount: 0 }));
+  const cappedRows = rankedItems.map((track) => ({ track, hiddenCount: 0 }));
   const pageRows = paged ? visibleItems(section, cappedRows) : cappedRows;
   return (
     <>
@@ -116,8 +127,8 @@ export function DashboardTrackColumn({
               releaseSiblingDuplicateSourceCount: row.track.release_track_duplicate_source_count ?? null,
               releaseTrackClusterCandidateType: row.track.release_track_cluster_candidate_type ?? null,
               releaseTrackClusterRelationshipKind: row.track.release_track_cluster_relationship_kind ?? null,
-              primaryBadgeText: formulaRankDeltaText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
-              secondaryBadgeText: row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null,
+              primaryBadgeText: formulaRankText(row.track) ?? (showSourceBadge ? formatTrackSourceBadge(row.track) : null),
+              secondaryBadgeText: formulaRankDeltaText(row.track) ?? (row.hiddenCount > 0 ? `+${row.hiddenCount} more` : null),
               secondaryText: row.track.artist_name ?? "Unknown artist",
               tertiaryText: row.track.album_name ?? "Unknown album",
               completionRatio: completionRatio(row.track),
@@ -128,7 +139,7 @@ export function DashboardTrackColumn({
                       ? `${row.track.play_count ?? 0} | ${formatTrackLongevity(row.track) ?? "0d"}`
                       : formatTrackRankingMetric(row.track, trackRankingMode)
                   )
-                : null,
+                : recentMetricText(row.track),
               trackUri: row.track.uri ?? null,
               previewTrack: row.track,
             },

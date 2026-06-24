@@ -132,6 +132,7 @@ export function filterAndDedupeRecentTracksForActivity(
         track.is_liked === true
         || track.source_label === "liked_cache"
         || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
+        || (track.recording_release_track_ids ?? []).some((releaseTrackId) => likedReleaseTrackIds?.has(releaseTrackId))
         || (track.track_id && likedTrackIds?.has(track.track_id)),
       );
       if (options.likedOnly && !isLiked) {

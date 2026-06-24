@@ -19,6 +19,7 @@ import {
 
 type FormulaLabPageProps = {
   hasProfile: boolean;
+  knownTracks: RecentTrack[];
   mergedTracks: RecentTrack[];
   mergedTracksLoaded: boolean;
   mergedTracksLoading: boolean;
@@ -46,6 +47,7 @@ type FormulaLabPageProps = {
 
 export function FormulaLabPage({
   hasProfile,
+  knownTracks,
   mergedTracks,
   mergedTracksLoaded,
   mergedTracksLoading,
@@ -65,7 +67,41 @@ export function FormulaLabPage({
     return null;
   }
 
-  const filteredMergedTracks = mergedTracks.filter((track) => {
+  const knownTrackByKey = new Map<string, RecentTrack>();
+  for (const track of knownTracks) {
+    knownTrackByKey.set(formulaTrackKey(track), track);
+  }
+  const hydrateTrack = (track: RecentTrack): RecentTrack => {
+    const knownTrack = knownTrackByKey.get(formulaTrackKey(track));
+    if (!knownTrack) {
+      return track;
+    }
+    return {
+      ...track,
+      release_track_id: track.release_track_id ?? knownTrack.release_track_id,
+      release_track_name: track.release_track_name ?? knownTrack.release_track_name,
+      release_track_source_count: track.release_track_source_count ?? knownTrack.release_track_source_count,
+      release_track_duplicate_source_count: track.release_track_duplicate_source_count ?? knownTrack.release_track_duplicate_source_count,
+      has_release_track_siblings: track.has_release_track_siblings ?? knownTrack.has_release_track_siblings,
+      release_track_cluster_candidate_type: track.release_track_cluster_candidate_type ?? knownTrack.release_track_cluster_candidate_type,
+      release_track_cluster_relationship_kind: track.release_track_cluster_relationship_kind ?? knownTrack.release_track_cluster_relationship_kind,
+      recording_release_track_ids: track.recording_release_track_ids ?? knownTrack.recording_release_track_ids,
+      album_name: track.album_name ?? knownTrack.album_name,
+      album_id: track.album_id ?? knownTrack.album_id,
+      album_url: track.album_url ?? knownTrack.album_url,
+      image_url: track.image_url ?? knownTrack.image_url,
+      url: track.url ?? knownTrack.url,
+      uri: track.uri ?? knownTrack.uri,
+      artists: track.artists ?? knownTrack.artists,
+      duration_ms: track.duration_ms ?? knownTrack.duration_ms,
+      recording_play_count: track.recording_play_count ?? knownTrack.recording_play_count,
+      recording_first_played_at: track.recording_first_played_at ?? knownTrack.recording_first_played_at,
+      recording_last_played_at: track.recording_last_played_at ?? knownTrack.recording_last_played_at,
+    };
+  };
+
+  const hydratedMergedTracks = mergedTracks.map(hydrateTrack);
+  const filteredMergedTracks = hydratedMergedTracks.filter((track) => {
     if (mergedTrackSourceFilter === "recent") {
       return track.source_label === "recent" || (track.has_recent_source && !track.has_history_source);
     }
@@ -85,12 +121,12 @@ export function FormulaLabPage({
   const candidateRankByTrackKey = new Map(
     candidateRankedTracks.map((track, index) => [formulaTrackKey(track), index + 1]),
   );
-  const annotateRankMovement = (track: RecentTrack): RecentTrack => {
+  const annotateRankMovement = (track: RecentTrack, displayRank: number): RecentTrack => {
     const key = formulaTrackKey(track);
     const baselineRank = baselineRankByTrackKey.get(key);
     const candidateRank = candidateRankByTrackKey.get(key);
     const delta = baselineRank != null && candidateRank != null ? baselineRank - candidateRank : 0;
-    return { ...track, formula_rank_delta: delta };
+    return { ...track, formula_rank_delta: delta, formula_rank: displayRank };
   };
   const rankMovementMatches = (track: RecentTrack) => {
     const delta = Number(track.formula_rank_delta ?? 0);
@@ -103,13 +139,13 @@ export function FormulaLabPage({
     return true;
   };
   const baselineDisplayTracks = baselineRankedTracks
-    .map(annotateRankMovement)
+    .map((track, index) => annotateRankMovement(track, index + 1))
     .filter(rankMovementMatches);
   const candidateDisplayTracks = candidateRankedTracks
-    .map(annotateRankMovement)
+    .map((track, index) => annotateRankMovement(track, index + 1))
     .filter(rankMovementMatches);
   const movementFilteredTracks = filteredMergedTracks
-    .map(annotateRankMovement)
+    .map((track, index) => annotateRankMovement(track, index + 1))
     .filter((track) => {
       return rankMovementMatches(track);
     });

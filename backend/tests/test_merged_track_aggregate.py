@@ -175,6 +175,62 @@ class MergedTrackAggregateTests(unittest.TestCase):
         self.assertEqual(["track-recent-only"], [item["track_id"] for item in recent_items])
         self.assertEqual(["track-history-only"], [item["track_id"] for item in history_items])
 
+    def test_recent_rank_orders_by_recent_play_count_before_all_time_count(self) -> None:
+        history_run = "history-run-recent-rank"
+        insert_ingest_run(run_id=history_run, source_type="export", started_at="2026-04-20T12:00:00Z", source_ref="test")
+
+        for index in range(30):
+            insert_raw_spotify_history_observation(
+                ingest_run_id=history_run,
+                source_row_key=f"old-popular-{index}",
+                played_at=f"2026-02-{(index % 20) + 1:02d}T10:00:00Z",
+                ms_played=190000,
+                raw_payload_json="{}",
+                spotify_track_id="old-popular",
+                spotify_track_uri="spotify:track:old-popular",
+                track_name_raw="Old Popular",
+                artist_name_raw="Popular Artist",
+                album_name_raw="Popular Album",
+            )
+        for index in range(5):
+            insert_raw_spotify_history_observation(
+                ingest_run_id=history_run,
+                source_row_key=f"low-recent-{index}",
+                played_at=f"2026-04-{10 + index:02d}T10:00:00Z",
+                ms_played=190000,
+                raw_payload_json="{}",
+                spotify_track_id="low-recent",
+                spotify_track_uri="spotify:track:low-recent",
+                track_name_raw="Low Recent",
+                artist_name_raw="Recent Artist",
+                album_name_raw="Recent Album",
+            )
+        for index in range(15):
+            insert_raw_spotify_history_observation(
+                ingest_run_id=history_run,
+                source_row_key=f"high-recent-{index}",
+                played_at=f"2026-04-{1 + index:02d}T10:00:00Z",
+                ms_played=190000,
+                raw_payload_json="{}",
+                spotify_track_id="high-recent",
+                spotify_track_uri="spotify:track:high-recent",
+                track_name_raw="High Recent",
+                artist_name_raw="Recent Artist",
+                album_name_raw="Recent Album",
+            )
+
+        reconcile_fact_play_events_for_ingest_run(source_type="export", run_id=history_run)
+
+        items = list_merged_track_aggregate(
+            limit=3,
+            recent_window_days=28,
+            rank_by="recent",
+            as_of_iso="2026-04-20T12:00:00Z",
+        )
+
+        self.assertEqual(["high-recent", "low-recent", "old-popular"], [item["track_id"] for item in items])
+        self.assertEqual([15, 5, 0], [item["recent_play_count"] for item in items])
+
     def test_unknown_identity_history_rows_are_not_projected(self) -> None:
         history_run = "history-run-3"
         insert_ingest_run(run_id=history_run, source_type="export", started_at="2026-04-20T12:00:00Z", source_ref="test")

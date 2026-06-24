@@ -9,6 +9,7 @@ from backend.app.release_track_metadata import enrich_track_rows_with_release_me
 
 MergedTrackSourceFilter = Literal["all", "recent", "history", "both"]
 MergedTrackSourceLabel = Literal["recent", "history", "both"]
+MergedTrackRankBy = Literal["all_time", "recent"]
 
 
 class MergedTrackAggregateItem(TypedDict, total=False):
@@ -52,19 +53,23 @@ def _merged_track_aggregate_payload(
     limit: int,
     recent_window_days: int,
     source_filter: str,
+    rank_by: str = "all_time",
 ) -> dict[str, Any]:
     normalized_source_filter = source_filter if source_filter in {"all", "recent", "history", "both"} else "all"
+    normalized_rank_by = rank_by if rank_by in {"all_time", "recent"} else "all_time"
     bounded_limit = max(1, min(int(limit), 500))
     bounded_recent_window_days = max(0, int(recent_window_days))
     result = get_merged_track_aggregate(
         limit=bounded_limit,
         recent_window_days=bounded_recent_window_days,
         source_filter=normalized_source_filter,
+        rank_by=normalized_rank_by,
     )
     return {
         "limit": bounded_limit,
         "recent_window_days": bounded_recent_window_days,
         "source_filter": normalized_source_filter,
+        "rank_by": normalized_rank_by,
         "returned_items": len(result["items"]),
         "excluded_unknown_identity_count": result["excluded_unknown_identity_count"],
         "items": result["items"],
@@ -95,6 +100,7 @@ def get_merged_track_aggregate(
     limit: int = 200,
     recent_window_days: int = 28,
     source_filter: MergedTrackSourceFilter = "all",
+    rank_by: MergedTrackRankBy = "all_time",
     as_of_iso: str | None = None,
 ) -> MergedTrackAggregateResult:
     bounded_limit = max(1, int(limit))
@@ -102,6 +108,7 @@ def get_merged_track_aggregate(
     normalized_source_filter: MergedTrackSourceFilter = (
         source_filter if source_filter in {"all", "recent", "history", "both"} else "all"
     )
+    normalized_rank_by: MergedTrackRankBy = rank_by if rank_by in {"all_time", "recent"} else "all_time"
     as_of_dt = (
         datetime.fromisoformat(as_of_iso.replace("Z", "+00:00"))
         if as_of_iso
@@ -194,6 +201,21 @@ def get_merged_track_aggregate(
             ).fetchone()[0]
             or 0
         )
+        order_by_sql = (
+            """
+              agg.recent_play_count DESC,
+              agg.last_played_at DESC,
+              agg.total_play_count DESC,
+              agg.track_identity ASC
+            """
+            if normalized_rank_by == "recent"
+            else
+            """
+              agg.total_play_count DESC,
+              agg.last_played_at DESC,
+              agg.track_identity ASC
+            """
+        )
         rows = connection.execute(
             f"""
             {base_cte}
@@ -221,9 +243,7 @@ def get_merged_track_aggregate(
             WHERE agg.is_unknown_identity = 0
             {source_filter_clause}
             ORDER BY
-              agg.total_play_count DESC,
-              agg.last_played_at DESC,
-              agg.track_identity ASC
+            {order_by_sql}
             LIMIT ?
             """,
             (recent_cutoff_iso, bounded_limit),
@@ -318,11 +338,13 @@ def list_merged_track_aggregate(
     limit: int = 200,
     recent_window_days: int = 28,
     source_filter: MergedTrackSourceFilter = "all",
+    rank_by: MergedTrackRankBy = "all_time",
     as_of_iso: str | None = None,
 ) -> list[MergedTrackAggregateItem]:
     return get_merged_track_aggregate(
         limit=limit,
         recent_window_days=recent_window_days,
         source_filter=source_filter,
+        rank_by=rank_by,
         as_of_iso=as_of_iso,
     )["items"]

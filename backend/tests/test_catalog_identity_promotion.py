@@ -125,6 +125,10 @@ class CatalogIdentityPromotionTests(unittest.TestCase):
         self.assertEqual(0, enriched["play_count"])
         self.assertEqual(1, enriched["recording_play_count"])
         self.assertEqual("2026-02-27T19:01:18Z", enriched["recording_last_played_at"])
+        self.assertEqual(
+            {original_release_track_id, promoted_release_track_id},
+            set(enriched["recording_release_track_ids"]),
+        )
 
         repeated = promote_catalog_album_tracks_to_identity(album_ids=["bitcrush-album"], apply=True)
         self.assertEqual([], repeated["touched_release_track_ids"])

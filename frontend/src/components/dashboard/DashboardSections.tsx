@@ -49,6 +49,7 @@ type DashboardSectionsProps = {
   albumCatalogLookupResult: any;
   albumCatalogLookupStatus: any;
   allTimeLikedMatchCount: any;
+  allTimeTopTracks: any;
   allTimeTrackIdCount: any;
   analysisMode: AnalysisMode;
   appPage: AppPage;
@@ -133,6 +134,8 @@ type DashboardSectionsProps = {
   recentLikedOnly: boolean;
   recentTaggedOnly: boolean;
   recentRange: RecentRange;
+  recentTopTracksAvailableForDisplay: any;
+  recentTopTracksForDisplay: any;
   recentUnavailableCopy: any;
   refreshRecentSection: any;
   reloadTrackRankings: any;
@@ -214,6 +217,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
     albumCatalogLookupResult,
     albumCatalogLookupStatus,
     allTimeLikedMatchCount,
+    allTimeTopTracks,
     allTimeTrackIdCount,
     analysisMode,
     appPage,
@@ -300,6 +304,8 @@ export function DashboardSections(props: DashboardSectionsProps) {
     recentLikedOnly,
     recentTaggedOnly,
     recentRange,
+    recentTopTracksAvailableForDisplay,
+    recentTopTracksForDisplay,
     recentUnavailableCopy,
     refreshRecentSection,
     reloadTrackRankings,
@@ -373,6 +379,12 @@ export function DashboardSections(props: DashboardSectionsProps) {
               <Suspense fallback={<RouteChunkFallback />}>
                 <FormulaLabPage
                   hasProfile={Boolean(profile)}
+                  knownTracks={[
+                    ...allTimeTopTracks,
+                    ...(profile.recent_top_tracks ?? []),
+                    ...(profile.recent_tracks ?? []),
+                    ...(profile.recent_likes_tracks ?? []),
+                  ]}
                   mergedTracks={mergedTracks}
                   mergedTracksLoaded={mergedTracksLoaded}
                   mergedTracksLoading={mergedTracksLoading}
@@ -724,15 +736,15 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 rightTitle={renderRecentRangeHeader()}
                 leftContent={renderTrackColumn(
                   "tracksAllTime",
-                  profile.top_tracks,
+                  allTimeTopTracks,
                   profile.top_tracks_available,
                   "Spotify returned no top tracks for this account.",
                   quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
                 )}
                 rightContent={renderTrackColumn(
                   "tracksRecent",
-                  profile.recent_top_tracks,
-                  profile.recent_top_tracks_available,
+                  recentTopTracksForDisplay,
+                  recentTopTracksAvailableForDisplay,
                   "Spotify returned no recent top tracks for this account.",
                   recentUnavailableCopy(
                     experienceMode === "local"
@@ -750,14 +762,9 @@ export function DashboardSections(props: DashboardSectionsProps) {
                     </button>
                   ) : null,
                 )}
-                previewItemsLeft={previewItems(profile.top_tracks)}
-                previewItemsRight={previewItems(profile.recent_top_tracks)}
-                collapsedPreviewItems={previewItems(
-                  collapseTrackPreviewAlbums([
-                    ...profile.top_tracks,
-                    ...profile.recent_top_tracks,
-                  ]),
-                )}
+                previewItemsLeft={previewItems(allTimeTopTracks)}
+                previewItemsRight={previewItems(recentTopTracksForDisplay)}
+                collapsedPreviewItems={previewItems(allTimeTopTracks)}
                 isOpen={openSections.tracks}
                 toggleSection={toggleSection}
                 onSelectPreview={setSelectedPreview}

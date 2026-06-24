@@ -7,6 +7,7 @@ import unittest
 
 from backend.app.artist_album_evidence import list_artist_album_evidence
 from backend.app.db import apply_pending_migrations, ensure_sqlite_db, sqlite_connection
+from backend.app.routes.playback_routes import _enqueue_incomplete_artist_album_tracklists
 
 
 def _artists(*names: str) -> str:
@@ -222,6 +223,28 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
         self.assertEqual("unknown", items[0]["relationship"])
         self.assertFalse(items[0]["tracklist_complete"])
 
+    def test_incomplete_artist_album_tracklists_enqueue_background_backfill(self) -> None:
+        items = [
+            *list_artist_album_evidence(["Unknown Guest"]),
+            *list_artist_album_evidence(["Primary Artist"]),
+        ]
+
+        payload = _enqueue_incomplete_artist_album_tracklists(items)
+
+        self.assertEqual(1, payload["enqueued"])
+        with sqlite_connection(row_factory=None) as connection:
+            rows = connection.execute(
+                """
+                SELECT entity_type, spotify_id, reason, priority, status
+                FROM spotify_catalog_backfill_queue
+                ORDER BY spotify_id
+                """
+            ).fetchall()
+        self.assertEqual(
+            [("album", "album-incomplete", "tracklist_completion", 70, "pending")],
+            rows,
+        )
+
     def test_shared_artist_filters_to_all_targets_present(self) -> None:
         items = list_artist_album_evidence(["Alpha", "Beta"])
         self.assertEqual(["album-shared"], [item["album_id"] for item in items])
@@ -267,6 +290,64 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
         self.assertEqual(1, len(matching))
         self.assertEqual("Album artist match", matching[0]["evidence"])
 
+    def test_catalog_album_dedupes_different_spotify_ids_for_same_release(self) -> None:
+        self._insert_album("duplicate-primary", "Primary Album", ("Primary Artist",), 3)
+        for index in range(1, 4):
+            self._insert_track("duplicate-primary", f"duplicate-primary-{index}", index, ("Primary Artist",))
+
+        items = list_artist_album_evidence(["Primary Artist"])
+        matching = [item for item in items if item["album_name"] == "Primary Album"]
+        self.assertEqual(1, len(matching))
+
+    def test_catalog_album_dedupes_spotify_ids_mapped_to_same_release(self) -> None:
+        release_album_id = self._insert_entity_album("Mapped Album", ("Mapped Artist",), spotify_album_id="mapped-original")
+        self._insert_album("mapped-original", "Mapped Album", ("Mapped Artist",), 2)
+        self._insert_album("mapped-duplicate", "Mapped Album", ("Mapped Artist",), 2)
+        for index in range(1, 3):
+            self._insert_track("mapped-original", f"mapped-original-{index}", index, ("Mapped Artist",))
+            self._insert_track("mapped-duplicate", f"mapped-duplicate-{index}", index, ("Mapped Artist",))
+        with sqlite_connection(write=True) as connection:
+            source_album_id = connection.execute(
+                """
+                INSERT INTO source_album (source_name, external_id, external_uri, source_name_raw)
+                VALUES ('spotify', ?, ?, ?)
+                """,
+                ("mapped-duplicate", "spotify:album:mapped-duplicate", "Mapped Album"),
+            ).lastrowid
+            connection.execute(
+                """
+                INSERT INTO source_album_map (
+                  source_album_id, release_album_id, match_method, confidence, status
+                ) VALUES (?, ?, 'provider_identity', 1.0, 'accepted')
+                """,
+                (source_album_id, release_album_id),
+            )
+
+        items = list_artist_album_evidence(["Mapped Artist"])
+        matching = [item for item in items if item["album_name"] == "Mapped Album"]
+        self.assertEqual(1, len(matching))
+
+    def test_entity_album_editions_keep_distinct_release_identity(self) -> None:
+        self._insert_entity_album("Innerworld", ("Electric Youth",), spotify_album_id="innerworld-base")
+        self._insert_entity_album("Innerworld (Deluxe Edition)", ("Electric Youth", "College"), spotify_album_id="innerworld-deluxe")
+        self._insert_entity_album(
+            "Innerworld (10th Anniversary Edition)",
+            ("Electric Youth", "College"),
+            spotify_album_id="innerworld-anniversary",
+        )
+
+        items = list_artist_album_evidence(["Electric Youth"])
+        matching = [item for item in items if item["album_name"].startswith("Innerworld")]
+        self.assertEqual(
+            [
+                "Innerworld",
+                "Innerworld (10th Anniversary Edition)",
+                "Innerworld (Deluxe Edition)",
+            ],
+            sorted(item["album_name"] for item in matching),
+        )
+        self.assertEqual({"album"}, {item["relationship"] for item in matching})
+
     def test_stable_response_shape(self) -> None:
         item = list_artist_album_evidence(["Guest Artist"])[0]
         self.assertEqual(
@@ -278,6 +359,7 @@ class ArtistAlbumEvidenceTests(unittest.TestCase):
                 "url",
                 "release_year",
                 "total_tracks",
+                "album_type",
                 "cached_track_count",
                 "matching_artist_names",
                 "matching_track_count_by_artist",

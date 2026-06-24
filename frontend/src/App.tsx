@@ -242,6 +242,7 @@ import {
   previewItems,
   primaryArtistName,
   recentRangeLabel,
+  sortedTracksForView,
   trackLookupRowCanBulkPrioritize,
 } from "./utils/dashboardUtils";
 
@@ -374,7 +375,20 @@ function albumContextTagLabel(albumType: string | null | undefined, albumName: s
   return null;
 }
 
+function editionAlbumCoreName(name: string | null | undefined) {
+  return String(name ?? "")
+    .replace(/\s*[\[(]\s*(?:expanded\s+deluxe(?:\s+edition)?|deluxe(?:\s+edition)?|expanded(?:\s+edition)?|(?:\d+(?:st|nd|rd|th)\s+)?anniversary(?:\s+remaster(?:ed)?)?(?:\s+edition)?|remaster(?:ed)?(?:\s+edition)?|mono|stereo|rework)\s*[\])]\s*$/i, "")
+    .trim();
+}
+
+function normalizedEditionAlbumCoreName(name: string | null | undefined) {
+  return editionAlbumCoreName(name).toLocaleLowerCase();
+}
+
 type LastPlayedSortMode = "recent" | "oldest" | null;
+type ArtistViewMode = "core" | "all";
+type ArtistTrackSortKey = "year" | "duration" | "plays" | "last";
+type SortDirection = "asc" | "desc";
 
 declare global {
   interface Window {
@@ -455,6 +469,12 @@ export function App() {
   const [detailOptionsOpen, setDetailOptionsOpen] = useState(false);
   const [artistAlbumEvidenceItems, setArtistAlbumEvidenceItems] = useState<ArtistAlbumEvidenceItem[] | null>(null);
   const [artistTrackEvidenceItems, setArtistTrackEvidenceItems] = useState<ArtistTrackEvidenceItem[] | null>(null);
+  const [artistViewMode, setArtistViewMode] = useState<ArtistViewMode>("core");
+  const [artistIncludeSingles, setArtistIncludeSingles] = useState(false);
+  const [artistTrackSort, setArtistTrackSort] = useState<{ key: ArtistTrackSortKey; direction: SortDirection }>({
+    key: "last",
+    direction: "desc",
+  });
   const [albumTrackEntries, setAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [albumTrackEntriesLoading, setAlbumTrackEntriesLoading] = useState(false);
   const [albumTrackEntriesError, setAlbumTrackEntriesError] = useState<string | null>(null);
@@ -644,7 +664,12 @@ export function App() {
   const [mergedTracksError, setMergedTracksError] = useState("");
   const [mergedTracksExcludedUnknownCount, setMergedTracksExcludedUnknownCount] = useState(0);
   const [mergedTracksLastLoadedAt, setMergedTracksLastLoadedAt] = useState<number | null>(null);
+  const [recentComputedTracks, setRecentComputedTracks] = useState<RecentTrack[]>([]);
+  const [recentComputedTracksLoading, setRecentComputedTracksLoading] = useState(false);
+  const [recentComputedTracksLoaded, setRecentComputedTracksLoaded] = useState(false);
+  const [recentComputedTracksError, setRecentComputedTracksError] = useState("");
   const [mergedTrackSourceFilter, setMergedTrackSourceFilter] = useState<MergedTrackSourceFilter>("all");
+  const [recentTopTracksUseSpotify, setRecentTopTracksUseSpotify] = useState(false);
   const [rankMovementFilter, setRankMovementFilter] = useState<RankMovementFilter>("all");
   const [identityAudit, setIdentityAudit] = useState<TrackIdentityAuditResponse | null>(null);
   const [identityAuditLoading, setIdentityAuditLoading] = useState(false);
@@ -846,6 +871,11 @@ export function App() {
       if (typeof track.release_track_id === "number") {
         ids.add(track.release_track_id);
       }
+      for (const releaseTrackId of track.recording_release_track_ids ?? []) {
+        if (typeof releaseTrackId === "number") {
+          ids.add(releaseTrackId);
+        }
+      }
     }
     return ids;
   }, [likedTracksForActivitySource]);
@@ -892,6 +922,9 @@ export function App() {
       ? track.release_track_id
       : releaseTrackIdForSpotifyTrackId(track?.track_id ?? fallbackTrackId);
     if (typeof releaseTrackId === "number" && likedReleaseTrackIdsForDisplay.has(releaseTrackId)) {
+      return true;
+    }
+    if ((track?.recording_release_track_ids ?? []).some((recordingReleaseTrackId) => likedReleaseTrackIdsForDisplay.has(recordingReleaseTrackId))) {
       return true;
     }
     const spotifyTrackId = track?.track_id ?? fallbackTrackId;
@@ -1108,9 +1141,12 @@ export function App() {
     : null;
   const selectedPreviewCanOpenArtist = (selectedPreview?.kind === "track" || selectedPreview?.kind === "album") && selectedPreviewArtists.length > 0;
   const selectedPreviewIsSharedArtistPage = selectedPreview?.kind === "artist" && selectedPreviewArtists.length > 1;
-  const selectedPreviewArtistAlbumRequestKey = selectedPreview?.kind === "artist"
+  const selectedPreviewArtistEvidenceArtists = selectedPreview?.kind === "album"
+    ? selectedPreviewArtists.slice(0, 1)
+    : selectedPreviewArtists;
+  const selectedPreviewArtistAlbumRequestKey = selectedPreview?.kind === "artist" || selectedPreview?.kind === "album"
     ? JSON.stringify({
-      artistNames: selectedPreviewArtists.map((artist) => artist.name?.trim()).filter(Boolean),
+      artistNames: selectedPreviewArtistEvidenceArtists.map((artist) => artist.name?.trim()).filter(Boolean),
       sourceAlbumId: selectedPreview.sourceAlbumId ?? selectedPreview.sourceTrack?.album_id ?? null,
       sourceAlbumName: selectedPreview.sourceAlbumName ?? selectedPreview.sourceTrack?.album_name ?? null,
     })
@@ -1249,12 +1285,12 @@ export function App() {
     ]
     : [];
   useEffect(() => {
-    if (!selectedPreviewArtistAlbumRequestKey || selectedPreview?.kind !== "artist") {
+    if (!selectedPreviewArtistAlbumRequestKey || (selectedPreview?.kind !== "artist" && selectedPreview?.kind !== "album")) {
       setArtistAlbumEvidenceItems(null);
       setArtistTrackEvidenceItems(null);
       return;
     }
-    const artistNames = selectedPreviewArtists
+    const artistNames = selectedPreviewArtistEvidenceArtists
       .map((artist) => artist.name?.trim())
       .filter((name): name is string => Boolean(name));
     if (artistNames.length === 0) {
@@ -1267,7 +1303,7 @@ export function App() {
       artistNames,
       selectedPreview.sourceAlbumId ?? selectedPreview.sourceTrack?.album_id ?? null,
       selectedPreview.sourceAlbumName ?? selectedPreview.sourceTrack?.album_name ?? null,
-      selectedPreviewArtists.map((artist) => artist.artist_id ?? artist.id ?? null),
+      selectedPreviewArtistEvidenceArtists.map((artist) => artist.artist_id ?? artist.id ?? null),
     )
       .then((payload) => {
         if (!cancelled) {
@@ -1275,7 +1311,7 @@ export function App() {
           setArtistTrackEvidenceItems(payload.tracks ?? []);
           const enrichedArtists = uniqueArtistEntries(payload.artists, selectedPreviewArtists);
           const enrichedImage = enrichedArtists.find((artist) => Boolean(artist.image_url))?.image_url ?? null;
-          if (enrichedImage && (!selectedPreview.image || selectedPreview.image === selectedPreview.sourceAlbumImage)) {
+          if (selectedPreview.kind === "artist" && enrichedImage && (!selectedPreview.image || selectedPreview.image === selectedPreview.sourceAlbumImage)) {
             setSelectedPreview((currentPreview) => {
               if (
                 !currentPreview
@@ -1355,6 +1391,7 @@ export function App() {
         url: album.url ?? "",
         releaseYear: album.release_year ?? null,
         trackCount: album.track_representation_count ?? null,
+        albumType: album.album_type ?? null,
         source: "album",
       });
     }
@@ -1395,6 +1432,7 @@ export function App() {
         url: track.album_url ?? spotifyEntityUrl("album", track.album_id),
         releaseYear: track.album_release_year ?? null,
         trackCount: null,
+        albumType: track.spotify_album_type ?? null,
         source: "track",
       });
     }
@@ -1421,6 +1459,7 @@ export function App() {
       url: item.url ?? "",
       releaseYear: item.release_year,
       trackCount: item.total_tracks ?? item.cached_track_count ?? null,
+      albumType: item.album_type ?? null,
       source: item.relationship === "album" ? "album" : "track",
       isHighlighted: Boolean(
         (selectedPreview.sourceAlbumId && item.album_id && selectedPreview.sourceAlbumId === item.album_id)
@@ -1457,8 +1496,9 @@ export function App() {
         album_id: track.album_id ?? null,
         album_name: track.album_name ?? null,
         album_image_url: track.image_url ?? null,
-        album_release_year: track.album_release_year ?? null,
-        album_total_tracks: track.spotify_album_total_tracks ?? null,
+      album_release_year: track.album_release_year ?? null,
+      album_type: track.spotify_album_type ?? null,
+      album_total_tracks: track.spotify_album_total_tracks ?? null,
         duration_ms: track.duration_ms ?? null,
         disc_number: track.spotify_disc_number ?? null,
         track_number: track.spotify_track_number ?? null,
@@ -1482,7 +1522,7 @@ export function App() {
     if (selectedPreview?.kind !== "artist" || !selectedPreview.sourceAlbumName) {
       return null;
     }
-    return {
+    const sourceEntry: ArtistAlbumEntry = {
       albumId: selectedPreview.sourceAlbumId ?? null,
       name: selectedPreview.sourceAlbumName,
       artistName: selectedPreview.sourceTrack?.artist_name ?? selectedPreview.artistName ?? selectedPreview.label,
@@ -1490,24 +1530,24 @@ export function App() {
       url: selectedPreview.sourceAlbumUrl ?? selectedPreview.sourceTrack?.album_url ?? spotifyEntityUrl("album", selectedPreview.sourceAlbumId),
       releaseYear: selectedPreview.sourceAlbumYear ?? selectedPreview.sourceTrack?.album_release_year ?? null,
       trackCount: null,
+      albumType: selectedPreview.sourceTrack?.spotify_album_type ?? null,
       source: "track",
       isHighlighted: true,
       relationship: "appears_on",
       evidence: "selected track context",
     };
+    return sourceEntry;
   }, [selectedPreview]);
   const selectedPreviewArtistAlbumsForDisplay = useMemo<ArtistAlbumEntry[]>(() => {
     const entries = backendSelectedPreviewArtistAlbums ?? selectedPreviewArtistAlbums;
     if (!selectedPreviewSourceAlbumEntry) {
       return entries;
     }
-    const sourceAlbumKey = selectedPreviewSourceAlbumEntry.albumId
-      ? `id:${selectedPreviewSourceAlbumEntry.albumId}`
-      : `name:${selectedPreviewSourceAlbumEntry.name.trim().toLocaleLowerCase()}`;
+    const sourceAlbumId = selectedPreviewSourceAlbumEntry.albumId?.trim() ?? "";
+    const sourceAlbumNameKey = selectedPreviewSourceAlbumEntry.name.trim().toLocaleLowerCase();
     const hasSourceAlbum = entries.some((entry) => (
-      entry.albumId
-        ? `id:${entry.albumId}` === sourceAlbumKey
-        : `name:${entry.name.trim().toLocaleLowerCase()}` === sourceAlbumKey
+      (sourceAlbumId && entry.albumId === sourceAlbumId)
+      || (sourceAlbumNameKey && entry.name.trim().toLocaleLowerCase() === sourceAlbumNameKey)
     ));
     return hasSourceAlbum ? entries : [selectedPreviewSourceAlbumEntry, ...entries];
   }, [backendSelectedPreviewArtistAlbums, selectedPreviewArtistAlbums, selectedPreviewSourceAlbumEntry]);
@@ -1517,6 +1557,43 @@ export function App() {
   const selectedPreviewAppearsOnAlbums = backendSelectedPreviewArtistAlbums && !selectedPreviewIsSharedArtistPage
     ? selectedPreviewArtistAlbumsForDisplay.filter((album) => album.relationship === "appears_on" || album.relationship === "unknown")
     : [];
+  const selectedPreviewRelatedAlbums = useMemo<ArtistAlbumEntry[]>(() => {
+    if (selectedPreview?.kind !== "album") {
+      return [];
+    }
+    const selectedAlbumId = selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? selectedPreview.entityId ?? null;
+    const selectedAlbumNameKey = selectedPreview.sourceAlbumName?.trim().toLocaleLowerCase()
+      ?? selectedPreview.label.trim().toLocaleLowerCase();
+    const selectedCoreName = normalizedEditionAlbumCoreName(selectedPreview.label) || selectedAlbumNameKey;
+    const seen = new Set<string>();
+    return selectedPreviewArtistAlbumsForDisplay
+      .filter((album) => {
+        const albumNameKey = album.name.trim().toLocaleLowerCase();
+        if ((selectedAlbumId && album.albumId === selectedAlbumId) || albumNameKey === selectedAlbumNameKey) {
+          return false;
+        }
+        const key = album.albumId ? `id:${album.albumId}` : `name:${albumNameKey}`;
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      })
+      .sort((left, right) => {
+        const leftCoreMatch = normalizedEditionAlbumCoreName(left.name) === selectedCoreName;
+        const rightCoreMatch = normalizedEditionAlbumCoreName(right.name) === selectedCoreName;
+        if (leftCoreMatch !== rightCoreMatch) {
+          return leftCoreMatch ? -1 : 1;
+        }
+        const leftSingle = artistAlbumIsSingle(left);
+        const rightSingle = artistAlbumIsSingle(right);
+        if (leftSingle !== rightSingle) {
+          return leftSingle ? 1 : -1;
+        }
+        return left.name.localeCompare(right.name);
+      })
+      .slice(0, 16);
+  }, [selectedPreview, selectedPreviewArtistAlbumsForDisplay]);
   const selectedPreviewTrackOptimisticSummary: PlayerTrackSummary | null = selectedPreview?.kind === "track"
     ? {
       name: selectedPreview.label,
@@ -1767,6 +1844,20 @@ export function App() {
     mergedTracksLoaded,
     mergedTracksLoading,
     profile,
+  ]);
+
+  useEffect(() => {
+    if (recentTopTracksUseSpotify || !profile) {
+      return;
+    }
+    if (!recentComputedTracksLoaded && !recentComputedTracksLoading) {
+      void loadRecentComputedTrackRankings();
+    }
+  }, [
+    profile,
+    recentComputedTracksLoaded,
+    recentComputedTracksLoading,
+    recentTopTracksUseSpotify,
   ]);
 
   useEffect(() => {
@@ -5508,7 +5599,7 @@ export function App() {
   }
 
   function switchSelectedTrackAlbumVersion(spotifyAlbumId: string) {
-    if (!selectedPreview || selectedPreview.kind !== "track" || !selectedAlbumFamilyContext) {
+    if (!selectedPreview || !selectedAlbumFamilyContext || (selectedPreview.kind !== "track" && selectedPreview.kind !== "album")) {
       return;
     }
     const version = selectedAlbumFamilyContext.versions.find((candidate) => candidate.spotify_album_id === spotifyAlbumId);
@@ -5520,16 +5611,36 @@ export function App() {
     const targetDiscNumber = versionDiscNumbers[spotifyAlbumId] == null ? currentDiscNumber : null;
     setAlbumFamilyDiscScrollTarget(targetDiscNumber);
     setAlbumTrackLastSortMode(null);
-    setSelectedPreview((current) => current?.kind === "track" ? {
-      ...current,
-      image: version.image_url ?? current.image,
-      albumId: version.spotify_album_id,
-      sourceAlbumId: version.spotify_album_id,
-      sourceAlbumName: version.name,
-      sourceAlbumImage: version.image_url,
-      sourceAlbumUrl: spotifyEntityUrl("album", version.spotify_album_id),
-      sourceAlbumYear: version.release_year == null ? null : String(version.release_year),
-    } : current);
+    setSelectedPreview((current) => {
+      if (!current || (current.kind !== "track" && current.kind !== "album")) {
+        return current;
+      }
+      if (current.kind === "album") {
+        return {
+          ...current,
+          image: version.image_url ?? current.image,
+          label: version.name,
+          detail: version.release_year == null ? current.detail : String(version.release_year),
+          entityId: version.spotify_album_id,
+          albumId: version.spotify_album_id,
+          sourceAlbumId: version.spotify_album_id,
+          sourceAlbumName: version.name,
+          sourceAlbumImage: version.image_url,
+          sourceAlbumUrl: spotifyEntityUrl("album", version.spotify_album_id),
+          sourceAlbumYear: version.release_year == null ? null : String(version.release_year),
+        };
+      }
+      return {
+        ...current,
+        image: version.image_url ?? current.image,
+        albumId: version.spotify_album_id,
+        sourceAlbumId: version.spotify_album_id,
+        sourceAlbumName: version.name,
+        sourceAlbumImage: version.image_url,
+        sourceAlbumUrl: spotifyEntityUrl("album", version.spotify_album_id),
+        sourceAlbumYear: version.release_year == null ? null : String(version.release_year),
+      };
+    });
   }
 
   function playerSummaryFromAlbumTrack(track: AlbumTrackEntry, contextPreview: PreviewItem | null = selectedPreview): PlayerTrackSummary {
@@ -6008,28 +6119,40 @@ export function App() {
     return (
       <div className="section-column-header">
         <h3>Recents</h3>
-        <div className="recent-range-toggle" role="group" aria-label="Recent range">
-          {showRangeRefreshSpinner ? (
-            <span className="recent-range-vinyl-spinner" aria-hidden="true">
-              <span className="recent-range-vinyl-center" />
-            </span>
-          ) : null}
-          {RECENT_RANGE_OPTIONS.map((option) => (
+        <div className="recent-header-controls">
+          <div className="recent-range-toggle" role="group" aria-label="Recent range">
+            {showRangeRefreshSpinner ? (
+              <span className="recent-range-vinyl-spinner" aria-hidden="true">
+                <span className="recent-range-vinyl-center" />
+              </span>
+            ) : null}
+            {RECENT_RANGE_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                className={`recent-range-chip${recentRange === option.value ? " recent-range-chip-active" : ""}`}
+                onClick={() => {
+                  if (option.value === recentRange || loadingRecentSection) {
+                    return;
+                  }
+                  setRecentRangeRefreshPending(true);
+                  void refreshRecentSection(option.value);
+                }}
+                type="button"
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <div className="recent-source-toggle" role="group" aria-label="Recent top tracks source">
             <button
-              key={option.value}
-              className={`recent-range-chip${recentRange === option.value ? " recent-range-chip-active" : ""}`}
-              onClick={() => {
-                if (option.value === recentRange || loadingRecentSection) {
-                  return;
-                }
-                setRecentRangeRefreshPending(true);
-                void refreshRecentSection(option.value);
-              }}
+              aria-pressed={recentTopTracksUseSpotify}
+              className={`recent-range-chip${recentTopTracksUseSpotify ? " recent-range-chip-active" : ""}`}
+              onClick={() => setRecentTopTracksUseSpotify((current) => !current)}
               type="button"
             >
-              {option.label}
+              Spotify
             </button>
-          ))}
+          </div>
         </div>
       </div>
     );
@@ -7063,7 +7186,12 @@ export function App() {
     setMergedTracksError("");
     setMergedTracksExcludedUnknownCount(0);
     setMergedTracksLastLoadedAt(null);
+    setRecentComputedTracks([]);
+    setRecentComputedTracksLoaded(false);
+    setRecentComputedTracksLoading(false);
+    setRecentComputedTracksError("");
     setMergedTrackSourceFilter("all");
+    setRecentTopTracksUseSpotify(false);
     setIdentityAudit(null);
     setIdentityAuditLoading(false);
     setIdentityAuditLoaded(false);
@@ -9193,6 +9321,27 @@ export function App() {
     void loadMergedTrackRankings(true);
   }
 
+  async function loadRecentComputedTrackRankings(reset: boolean = false) {
+    if (recentComputedTracksLoading) {
+      return;
+    }
+    if (reset) {
+      setRecentComputedTracks([]);
+      setRecentComputedTracksLoaded(false);
+    }
+    setRecentComputedTracksLoading(true);
+    setRecentComputedTracksError("");
+    try {
+      const data = await fetchMergedTrackAggregate("recent");
+      setRecentComputedTracks(data.items);
+      setRecentComputedTracksLoaded(true);
+    } catch (error) {
+      setRecentComputedTracksError(formatUiErrorMessage(error, "Failed to load computed recent tracks."));
+    } finally {
+      setRecentComputedTracksLoading(false);
+    }
+  }
+
   async function loadIdentityAudit(reset: boolean = false) {
     if (identityAuditLoading) {
       return;
@@ -10491,6 +10640,107 @@ export function App() {
     trackId ? (releaseTrackSiblingById.get(trackId) ?? 0) : 0;
   const hasReleaseSiblingForTrackId = (trackId: string | null | undefined) =>
     releaseSiblingSourceCountForTrackId(trackId) > 1;
+  const mergeReleaseMetadataIntoTrack = (track: RecentTrack): RecentTrack => {
+    const trackId = track.track_id;
+    const metadata = trackId ? releaseTrackMetadataById[trackId] : null;
+    if (!metadata) {
+      return track;
+    }
+    return {
+      ...track,
+      release_track_id: track.release_track_id ?? metadata.release_track_id,
+      release_track_name: track.release_track_name ?? metadata.release_track_name,
+      release_track_source_count: track.release_track_source_count ?? metadata.release_track_source_count,
+      release_track_duplicate_source_count: track.release_track_duplicate_source_count ?? metadata.release_track_duplicate_source_count,
+      has_release_track_siblings: track.has_release_track_siblings ?? metadata.has_release_track_siblings,
+      release_track_cluster_candidate_type: track.release_track_cluster_candidate_type ?? metadata.release_track_cluster_candidate_type,
+      release_track_cluster_relationship_kind: track.release_track_cluster_relationship_kind ?? metadata.release_track_cluster_relationship_kind,
+      recording_release_track_ids: track.recording_release_track_ids ?? metadata.recording_release_track_ids,
+    };
+  };
+  const allTimeTopTracks = useMemo(() => (
+    sortedTracksForView(
+      "tracksAllTime",
+      (profile?.top_tracks ?? []).map(mergeReleaseMetadataIntoTrack),
+      trackRankingMode,
+    )
+  ), [profile?.top_tracks, releaseTrackMetadataById, trackRankingMode]);
+  const recentTopTracksAreSpotify = (tracks: RecentTrack[]) => {
+    if (tracks.length === 0) {
+      return false;
+    }
+    const sourceLabels = tracks
+      .map((track) => track.top_tracks_source)
+      .filter((source): source is "spotify" | "history" | "db" => Boolean(source));
+    const hasLocalEvidence = tracks.some((track) => (
+      track.top_tracks_source === "history"
+      || track.top_tracks_source === "db"
+      || track.source_label === "history"
+      || track.source_label === "both"
+      || Boolean(track.first_played_at || track.last_played_at)
+      || typeof track.recent_play_count === "number"
+      || typeof track.all_time_play_count === "number"
+    ));
+    return (
+      (sourceLabels.length > 0 && sourceLabels.every((source) => source === "spotify"))
+      || (sourceLabels.length === 0 && !hasLocalEvidence)
+    );
+  };
+  const computedRecentTopTracks = useMemo(() => {
+    const knownTrackByKey = new Map<string, RecentTrack>();
+    [
+      ...allTimeTopTracks,
+      ...(profile?.recent_top_tracks ?? []),
+      ...(profile?.recent_tracks ?? []),
+      ...(profile?.recent_likes_tracks ?? []),
+    ].forEach((track) => {
+      knownTrackByKey.set(normalizedTrackArtistKey(track.track_name, track.artist_name), track);
+      if (track.track_id) {
+        knownTrackByKey.set(track.track_id, track);
+      }
+    });
+    return [...recentComputedTracks]
+      .filter((track) => Number(track.recent_play_count ?? 0) > 0)
+      .map((track) => {
+        const knownTrack = knownTrackByKey.get(track.track_id ?? "") ?? knownTrackByKey.get(normalizedTrackArtistKey(track.track_name, track.artist_name));
+        return {
+          ...track,
+          ...mergeReleaseMetadataIntoTrack(track),
+          top_tracks_source: "db" as const,
+          album_name: track.album_name ?? knownTrack?.album_name ?? null,
+          album_id: track.album_id ?? knownTrack?.album_id ?? null,
+          album_url: track.album_url ?? knownTrack?.album_url ?? null,
+          image_url: track.image_url ?? knownTrack?.image_url ?? null,
+          url: track.url ?? knownTrack?.url ?? null,
+          uri: track.uri ?? knownTrack?.uri ?? null,
+          artists: track.artists ?? knownTrack?.artists ?? null,
+        };
+      })
+      .sort((left, right) => {
+        const recentDelta = Number(right.recent_play_count ?? 0) - Number(left.recent_play_count ?? 0);
+        if (recentDelta !== 0) {
+          return recentDelta;
+        }
+        const rightLast = parseTimestampMs(right.last_played_at) ?? 0;
+        const leftLast = parseTimestampMs(left.last_played_at) ?? 0;
+        if (rightLast !== leftLast) {
+          return rightLast - leftLast;
+        }
+        return String(left.track_name ?? "").localeCompare(String(right.track_name ?? ""));
+      })
+      .slice(0, Math.max(10, profile?.recent_top_tracks?.length ?? 10));
+  }, [allTimeTopTracks, profile?.recent_likes_tracks, profile?.recent_top_tracks, profile?.recent_tracks, recentComputedTracks, releaseTrackMetadataById]);
+  const profileRecentTopTracksAreSpotify = recentTopTracksAreSpotify(profile?.recent_top_tracks ?? []);
+  const recentTopTracksForDisplay = recentTopTracksUseSpotify
+    ? (profile?.recent_top_tracks ?? []).map(mergeReleaseMetadataIntoTrack)
+    : (
+        profileRecentTopTracksAreSpotify
+          ? computedRecentTopTracks
+          : (profile?.recent_top_tracks ?? []).map(mergeReleaseMetadataIntoTrack)
+      );
+  const recentTopTracksAvailableForDisplay = recentTopTracksUseSpotify
+    ? Boolean(profile?.recent_top_tracks_available)
+    : recentTopTracksForDisplay.length > 0 || recentComputedTracksLoading;
   const recentTrackHasRelationTags = (track: RecentTrack | null | undefined) =>
     Boolean(
       track
@@ -11030,8 +11280,8 @@ export function App() {
   const scrollRecordingVariationStrip = (direction: -1 | 1) => {
     recordingVariationStripRef.current?.scrollBy({ left: direction * 224, behavior: "smooth" });
   };
-  const allTimeLikedMatchCount = (profile?.top_tracks ?? []).filter((track) => recentTrackIsKnownLiked(track)).length;
-  const allTimeTrackIdCount = (profile?.top_tracks ?? []).filter((track) => Boolean(track.track_id)).length;
+  const allTimeLikedMatchCount = allTimeTopTracks.filter((track) => recentTrackIsKnownLiked(track)).length;
+  const allTimeTrackIdCount = allTimeTopTracks.filter((track) => Boolean(track.track_id)).length;
   const likedTracksTotalCount = Number(likedTracksCache?.metadata?.last_active_count ?? (cachedLikedTracks.length > 0 ? cachedLikedTracks.length : likedTracksForActivitySource.length));
   const likedTracksTotalLabel = likedTracksTotalCount > 0 ? likedTracksTotalCount.toLocaleString() : "All";
   const likedTracksCacheStatus = (() => {
@@ -11057,6 +11307,158 @@ export function App() {
   const heroTitle = "ListenLab";
   const heroCopy =
     "Connect your account and browse the listening, library, and profile details Spotify already makes available to ListenLab.";
+  const artistTargetNameKeys = selectedPreview?.kind === "artist"
+    ? selectedPreviewArtists
+      .map((artist) => artist.name?.trim().toLocaleLowerCase())
+      .filter((name): name is string => Boolean(name))
+    : [];
+  const artistAlbumIsEdition = (album: ArtistAlbumEntry) => {
+    const coreName = normalizedEditionAlbumCoreName(album.name);
+    return Boolean(coreName && coreName !== album.name.trim().toLocaleLowerCase());
+  };
+  const artistAlbumIsSingle = (album: ArtistAlbumEntry) => {
+    const type = String(album.albumType ?? "").trim().toLocaleLowerCase();
+    const name = album.name.trim().toLocaleLowerCase();
+    return type === "single" || /\b(single|single version)\b/.test(name);
+  };
+  const artistAlbumIsEp = (album: ArtistAlbumEntry) => {
+    const name = album.name.trim().toLocaleLowerCase();
+    return /\bep\b/.test(name);
+  };
+  const artistAlbumIsSpecialRelease = (album: ArtistAlbumEntry) => {
+    const type = String(album.albumType ?? "").trim().toLocaleLowerCase();
+    const name = album.name.trim().toLocaleLowerCase();
+    return (
+      type === "compilation"
+      || artistAlbumIsSingle(album)
+      || artistAlbumIsEp(album)
+      || /\b(deluxe|expanded|anniversary|remaster(?:ed)?|remix|rmx|live|soundtrack|ost|score|compilation|greatest hits|best of)\b/.test(name)
+    );
+  };
+  const artistAlbumIsCoreAlbum = (album: ArtistAlbumEntry) => (
+    (!album.relationship || album.relationship === "album")
+    && !artistAlbumIsSpecialRelease(album)
+  );
+  const artistTrackIsSingle = (track: ArtistTrackEvidenceItem) => {
+    const type = String(track.album_type ?? "").trim().toLocaleLowerCase();
+    const albumName = String(track.album_name ?? "").trim().toLocaleLowerCase();
+    return type === "single" || /\b(single|single version)\b/.test(albumName);
+  };
+  const artistTrackIsMainArtist = (track: ArtistTrackEvidenceItem) => {
+    if (artistTargetNameKeys.length === 0) {
+      return true;
+    }
+    const firstStructuredArtist = track.artists?.find((artist) => artist.name?.trim())?.name?.trim().toLocaleLowerCase() ?? null;
+    const firstTextArtist = String(track.artist_name ?? "").split(",")[0]?.trim().toLocaleLowerCase() || null;
+    return artistTargetNameKeys.some((targetName) => firstStructuredArtist === targetName || firstTextArtist === targetName);
+  };
+  const artistTrackCoreKey = (track: ArtistTrackEvidenceItem) => (
+    `${String(track.track_name ?? "").trim().toLocaleLowerCase()}::${artistTargetNameKeys.join(",")}`
+  );
+  const chooseCoreArtistTrack = (current: ArtistTrackEvidenceItem, candidate: ArtistTrackEvidenceItem) => {
+    const currentYear = Number.parseInt(current.album_release_year ?? "", 10);
+    const candidateYear = Number.parseInt(candidate.album_release_year ?? "", 10);
+    const currentSinglePenalty = artistTrackIsSingle(current) ? 1 : 0;
+    const candidateSinglePenalty = artistTrackIsSingle(candidate) ? 1 : 0;
+    if (currentSinglePenalty !== candidateSinglePenalty) {
+      return candidateSinglePenalty < currentSinglePenalty ? candidate : current;
+    }
+    if (Number.isFinite(currentYear) && Number.isFinite(candidateYear) && currentYear !== candidateYear) {
+      return candidateYear < currentYear ? candidate : current;
+    }
+    if (!current.track_id && candidate.track_id) {
+      return candidate;
+    }
+    return current;
+  };
+  const sortArtistTracks = (tracks: ArtistTrackEvidenceItem[]) => {
+    const valueForTrack = (track: ArtistTrackEvidenceItem) => {
+      if (artistTrackSort.key === "year") {
+        return Number.parseInt(track.album_release_year ?? "", 10);
+      }
+      if (artistTrackSort.key === "duration") {
+        return track.duration_ms ?? Number.NaN;
+      }
+      if (artistTrackSort.key === "plays") {
+        return track.play_count;
+      }
+      return parseTimestampMs(track.last_played_at) ?? Number.NaN;
+    };
+    return [...tracks].sort((left, right) => {
+      const leftValue = valueForTrack(left);
+      const rightValue = valueForTrack(right);
+      const leftMissing = !Number.isFinite(leftValue);
+      const rightMissing = !Number.isFinite(rightValue);
+      if (leftMissing !== rightMissing) {
+        return leftMissing ? 1 : -1;
+      }
+      if (leftValue !== rightValue) {
+        return artistTrackSort.direction === "asc" ? leftValue - rightValue : rightValue - leftValue;
+      }
+      return left.track_name.localeCompare(right.track_name);
+    });
+  };
+  const nextArtistTrackSort = (key: ArtistTrackSortKey) => {
+    setArtistTrackSort((current) => (
+      current.key === key
+        ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: key === "year" ? "asc" : "desc" }
+    ));
+  };
+  const artistTrackSortIndicator = (key: ArtistTrackSortKey) => (
+    artistTrackSort.key === key ? (artistTrackSort.direction === "asc" ? "↑" : "↓") : ""
+  );
+  const selectedPreviewArtistTracksForDisplay = useMemo(() => {
+    let tracks = selectedPreviewArtistTracks;
+    if (!artistIncludeSingles) {
+      tracks = tracks.filter((track) => !artistTrackIsSingle(track));
+    }
+    if (artistViewMode === "core") {
+      const grouped = new Map<string, ArtistTrackEvidenceItem>();
+      for (const track of tracks.filter(artistTrackIsMainArtist)) {
+        const key = artistTrackCoreKey(track);
+        const existing = grouped.get(key);
+        grouped.set(key, existing ? chooseCoreArtistTrack(existing, track) : track);
+      }
+      tracks = [...grouped.values()];
+    }
+    return sortArtistTracks(tracks);
+  }, [artistIncludeSingles, artistTrackSort, artistViewMode, selectedPreviewArtistTracks, selectedPreviewArtists]);
+  const coreArtistAlbumsForDisplay = useMemo(() => {
+    const grouped = new Map<string, ArtistAlbumEntry[]>();
+    for (const album of selectedPreviewArtistAlbumsForDisplay) {
+      if (album.relationship && album.relationship !== "album") {
+        continue;
+      }
+      const coreName = normalizedEditionAlbumCoreName(album.name) || album.name.trim().toLocaleLowerCase();
+      const key = coreName;
+      grouped.set(key, [...(grouped.get(key) ?? []), album]);
+    }
+    const coreAlbums: ArtistAlbumEntry[] = [];
+    for (const albums of grouped.values()) {
+      const preferred = albums.find(artistAlbumIsCoreAlbum);
+      if (!preferred) {
+        continue;
+      }
+      const coreAlbum: ArtistAlbumEntry = { ...preferred, editionCount: albums.length > 1 ? albums.length : null };
+      coreAlbums.push(coreAlbum);
+    }
+    return coreAlbums.sort((left, right) => {
+        if (left.isHighlighted !== right.isHighlighted) {
+          return left.isHighlighted ? -1 : 1;
+        }
+        return left.name.localeCompare(right.name);
+      });
+  }, [selectedPreviewArtistAlbumsForDisplay]);
+  const selectedPreviewArtistAlbumsForMode = artistViewMode === "core"
+    ? coreArtistAlbumsForDisplay
+    : selectedPreviewArtistAlbumsForDisplay.filter((album) => artistIncludeSingles || !artistAlbumIsSingle(album));
+  const selectedPreviewPrimaryArtistAlbumsForMode = artistViewMode === "core"
+    ? coreArtistAlbumsForDisplay
+    : selectedPreviewPrimaryArtistAlbums.filter((album) => artistIncludeSingles || !artistAlbumIsSingle(album));
+  const selectedPreviewAppearsOnAlbumsForMode = artistViewMode === "core"
+    ? []
+    : selectedPreviewAppearsOnAlbums.filter((album) => artistIncludeSingles || !artistAlbumIsSingle(album));
   const openArtistTrackPreview = (track: ArtistTrackEvidenceItem) => {
     const sourceTrack: RecentTrack = {
       track_id: track.track_id,
@@ -11071,6 +11473,7 @@ export function App() {
       image_url: track.album_image_url,
       album_id: track.album_id,
       album_url: track.album_url,
+      spotify_album_type: track.album_type,
       spotify_track_number: track.track_number,
       spotify_disc_number: track.disc_number,
       spotify_album_total_tracks: track.album_total_tracks,
@@ -11103,14 +11506,56 @@ export function App() {
     });
   };
   const renderSelectedPreviewArtistTrackSection = () => {
-    if (selectedPreviewArtistTracks.length === 0) {
+    if (selectedPreviewArtistTracksForDisplay.length === 0) {
       return <p className="empty-copy">No cached tracks found for this artist yet.</p>;
     }
     return (
       <div className="detail-modal-artist-tracks">
+        <div className="detail-artist-view-controls">
+          <div className="detail-artist-view-mode-toggle" role="group" aria-label="Artist catalog scope">
+            <button
+              className={`recent-range-chip${artistViewMode === "core" ? " recent-range-chip-active" : ""}`}
+              onClick={() => setArtistViewMode("core")}
+              type="button"
+            >
+              Core
+            </button>
+            <button
+              className={`recent-range-chip${artistViewMode === "all" ? " recent-range-chip-active" : ""}`}
+              onClick={() => setArtistViewMode("all")}
+              type="button"
+            >
+              All
+            </button>
+          </div>
+          <label className="detail-artist-singles-toggle">
+            <input
+              checked={artistIncludeSingles}
+              onChange={(event) => setArtistIncludeSingles(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Singles</span>
+          </label>
+        </div>
         <p className="detail-modal-album-title">All Tracks</p>
-        <ul className="detail-artist-track-list">
-          {selectedPreviewArtistTracks.map((track) => (
+        <div className="detail-artist-track-grid" role="table" aria-label="Artist tracks">
+          <div className="detail-artist-track-grid-header" role="row">
+            <span role="columnheader">Track</span>
+            <button className={`detail-artist-track-sort${artistTrackSort.key === "year" ? " detail-artist-track-sort-active" : ""}`} onClick={() => nextArtistTrackSort("year")} role="columnheader" type="button">
+              Year {artistTrackSortIndicator("year")}
+            </button>
+            <button className={`detail-artist-track-sort${artistTrackSort.key === "duration" ? " detail-artist-track-sort-active" : ""}`} onClick={() => nextArtistTrackSort("duration")} role="columnheader" type="button">
+              Length {artistTrackSortIndicator("duration")}
+            </button>
+            <button className={`detail-artist-track-sort${artistTrackSort.key === "plays" ? " detail-artist-track-sort-active" : ""}`} onClick={() => nextArtistTrackSort("plays")} role="columnheader" type="button">
+              Plays {artistTrackSortIndicator("plays")}
+            </button>
+            <button className={`detail-artist-track-sort${artistTrackSort.key === "last" ? " detail-artist-track-sort-active" : ""}`} onClick={() => nextArtistTrackSort("last")} role="columnheader" type="button">
+              Last {artistTrackSortIndicator("last")}
+            </button>
+          </div>
+          <ul className="detail-artist-track-list">
+          {selectedPreviewArtistTracksForDisplay.map((track) => (
             <li className="detail-artist-track-row" key={`${track.track_id ?? track.track_name}-${track.album_id ?? track.album_name ?? ""}`}>
               <button className="detail-artist-track-button" onClick={() => openArtistTrackPreview(track)} type="button">
                 {track.album_image_url ? (
@@ -11124,18 +11569,19 @@ export function App() {
                   <span className="detail-artist-track-name single-line-ellipsis">{track.track_name}</span>
                   <span className="detail-artist-track-meta single-line-ellipsis">
                     {[
-                      track.album_release_year,
                       track.album_name,
-                      track.duration_ms != null ? formatPlaybackClock(track.duration_ms) : null,
-                      track.play_count > 0 ? `${track.play_count} plays` : null,
-                      formatMonthDay(track.last_played_at, true),
                     ].filter(Boolean).join(" | ")}
                   </span>
                 </span>
               </button>
+              <span className="detail-artist-track-cell">{track.album_release_year ?? "-"}</span>
+              <span className="detail-artist-track-cell">{track.duration_ms != null ? formatPlaybackClock(track.duration_ms) : "-"}</span>
+              <span className="detail-artist-track-cell">{track.play_count > 0 ? track.play_count.toLocaleString() : "-"}</span>
+              <span className="detail-artist-track-cell">{formatMonthDay(track.last_played_at, true) ?? "-"}</span>
             </li>
           ))}
         </ul>
+        </div>
       </div>
     );
   };
@@ -11182,7 +11628,12 @@ export function App() {
                       .join(" | ")}
                   </span>
                 </span>
-                {album.isHighlighted ? <span className="detail-artist-album-current">Selected</span> : null}
+                <span className="detail-artist-album-status">
+                  {album.editionCount && album.editionCount > 1 ? (
+                    <span className="detail-artist-album-editions">{album.editionCount} editions</span>
+                  ) : null}
+                  {album.isHighlighted ? <span className="detail-artist-album-current">Selected</span> : null}
+                </span>
               </button>
             </li>
           ))}
@@ -12105,6 +12556,7 @@ export function App() {
               albumCatalogLookupResult={albumCatalogLookupResult}
               albumCatalogLookupStatus={albumCatalogLookupStatus}
               allTimeLikedMatchCount={allTimeLikedMatchCount}
+              allTimeTopTracks={allTimeTopTracks}
               allTimeTrackIdCount={allTimeTrackIdCount}
               analysisMode={analysisMode}
               appPage={appPage}
@@ -12189,6 +12641,8 @@ export function App() {
               recentLikedOnly={recentLikedOnly}
               recentTaggedOnly={recentTaggedOnly}
               recentRange={recentRange}
+              recentTopTracksAvailableForDisplay={recentTopTracksAvailableForDisplay}
+              recentTopTracksForDisplay={recentTopTracksForDisplay}
               recentUnavailableCopy={recentUnavailableCopy}
               refreshRecentSection={refreshRecentSection}
               reloadTrackRankings={reloadTrackRankings}
@@ -12307,6 +12761,7 @@ export function App() {
             nextLastPlayedSortMode={nextLastPlayedSortMode}
             openAlbumTrackPreview={openAlbumTrackPreview}
             openAlbumWithArtistPreview={openAlbumWithArtistPreview}
+            openArtistAlbumPreview={openArtistAlbumPreview}
             openRecordingCandidateReleaseTrack={openRecordingCandidateReleaseTrack}
             openReleaseSourceVersion={openReleaseSourceVersion}
             openSelectedAlbumArtistPreview={openSelectedAlbumArtistPreview}
@@ -12338,8 +12793,8 @@ export function App() {
             selectedPreviewAlbumMainArtists={selectedPreviewAlbumMainArtists}
             selectedPreviewAlbumSummary={selectedPreviewAlbumSummary}
             selectedPreviewAlbumContextTagLabel={selectedPreviewAlbumContextTagLabel}
-            selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbums}
-            selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForDisplay}
+            selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbumsForMode}
+            selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForMode}
             selectedPreviewArtistImageUrl={selectedPreviewArtistImageUrl}
             selectedPreviewArtists={selectedPreviewArtists}
             selectedPreviewCanOpenAlbum={selectedPreviewCanOpenAlbum}
@@ -12360,7 +12815,7 @@ export function App() {
             selectedPreviewListenCountLabel={selectedPreviewListenCountLabel}
             selectedPreviewOtherRecordingMembers={selectedPreviewOtherRecordingMembers}
             selectedPreviewPlaybackTrackUri={selectedPreviewPlaybackTrackUri}
-            selectedPreviewPrimaryArtistAlbums={selectedPreviewPrimaryArtistAlbums}
+            selectedPreviewPrimaryArtistAlbums={selectedPreviewPrimaryArtistAlbumsForMode}
             selectedPreviewRecordingCandidateError={selectedPreviewRecordingCandidateError}
             selectedPreviewReleaseAlbumVariationCount={selectedPreviewReleaseAlbumVariationCount}
             selectedPreviewReleaseSiblingSourceCount={selectedPreviewReleaseSiblingSourceCount}
@@ -12368,6 +12823,7 @@ export function App() {
             selectedPreviewReleaseSourceVersions={selectedPreviewReleaseSourceVersions}
             selectedPreviewReleaseTrackDetailError={selectedPreviewReleaseTrackDetailError}
             selectedPreviewReleaseTrackDetailReady={selectedPreviewReleaseTrackDetailReady}
+            selectedPreviewRelatedAlbums={selectedPreviewRelatedAlbums}
             selectedPreviewStarTrackId={selectedPreviewStarTrackId}
             selectedPreviewTrackDurationLabel={selectedPreviewTrackDurationLabel}
             selectedPreviewTrackGuestArtists={selectedPreviewTrackGuestArtists}

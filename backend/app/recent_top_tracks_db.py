@@ -227,6 +227,7 @@ def map_recent_top_track_row_to_canonical_item(row: RecentTopTrackQueryRow) -> C
         "play_count": recent_play_count,
         "all_time_play_count": all_time_play_count,
         "recent_play_count": recent_play_count,
+        "top_tracks_source": "db",
         "first_played_at": row.get("first_played_at"),
         "last_played_at": row.get("last_played_at"),
         "listening_span_days": None,

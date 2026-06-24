@@ -762,6 +762,7 @@ def _apply_track_history_metrics(
         track["play_count"] = int(metrics.get(count_key, 0) or 0)
         track["all_time_play_count"] = int(metrics.get("play_count", 0) or 0)
         track["recent_play_count"] = int(metrics.get("recent_play_count", 0) or 0)
+        track["top_tracks_source"] = "history"
         track["first_played_at"] = metrics.get("first_played_at")
         track["last_played_at"] = metrics.get("last_played_at")
         track["listening_span_days"] = int(metrics.get("listening_span_days", 0) or 0)
@@ -1782,6 +1783,7 @@ async def _fetch_top_tracks(access_token: str, time_range: str, limit: int) -> t
     tracks = payload.get("items") or []
     normalized_tracks = enrich_track_rows_with_release_metadata([_normalize_track(track) for track in tracks])
     for track in normalized_tracks:
+        track["top_tracks_source"] = "spotify"
         _remember_track_metadata(track)
     _save_static_metadata_cache(_load_static_metadata_cache())
     return normalized_tracks, True

@@ -60,6 +60,7 @@ def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict
     from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
 
     cluster_metadata_by_release_track_id = candidate_cluster_metadata_for_release_track_ids(release_track_ids)
+    recording_release_track_ids_by_release_track_id = recording_release_track_ids_for_release_track_ids(release_track_ids)
 
     metadata: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -80,6 +81,7 @@ def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict
             "has_release_track_siblings": source_track_count > 1 or cluster_member_count > 1,
             "release_track_cluster_candidate_type": cluster_candidate_type,
             "release_track_cluster_relationship_kind": cluster_relationship_kind,
+            "recording_release_track_ids": recording_release_track_ids_by_release_track_id.get(release_track_id, [release_track_id]),
         }
     return metadata
 
@@ -195,6 +197,49 @@ def recording_play_history_for_release_track_ids(release_track_ids: list[int]) -
         }
         for row in rows
     }
+
+
+def recording_release_track_ids_for_release_track_ids(release_track_ids: list[int]) -> dict[int, list[int]]:
+    normalized_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
+    if not normalized_ids:
+        return {}
+    from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
+
+    candidate_cluster_metadata_for_release_track_ids(normalized_ids)
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            f"""
+            WITH ranked_clusters AS (
+              SELECT
+                member.release_track_id AS target_release_track_id,
+                cluster.id AS cluster_id,
+                row_number() OVER (
+                  PARTITION BY member.release_track_id
+                  ORDER BY cluster.member_count DESC, cluster.confidence DESC, cluster.id ASC
+                ) AS cluster_rank
+              FROM generated_recording_track_cluster_member member
+              JOIN generated_recording_track_cluster cluster
+                ON cluster.id = member.cluster_id
+              WHERE member.release_track_id IN ({placeholders})
+                AND cluster.candidate_type = 'recording_track_candidate'
+            )
+            SELECT
+              ranked.target_release_track_id,
+              cluster_member.release_track_id AS recording_release_track_id
+            FROM ranked_clusters ranked
+            JOIN generated_recording_track_cluster_member cluster_member
+              ON cluster_member.cluster_id = ranked.cluster_id
+            WHERE ranked.cluster_rank = 1
+            ORDER BY ranked.target_release_track_id ASC, cluster_member.release_track_id ASC
+            """,
+            normalized_ids,
+        ).fetchall()
+    result: dict[int, list[int]] = {}
+    for row in rows:
+        target_release_track_id = int(row["target_release_track_id"])
+        result.setdefault(target_release_track_id, []).append(int(row["recording_release_track_id"]))
+    return result
 
 
 def play_history_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -355,6 +400,11 @@ def enrich_track_rows_with_release_metadata(
         for row in enriched
         if isinstance(row.get("release_track_id"), int)
     ])
+    recording_release_track_ids_by_release_track_id = recording_release_track_ids_for_release_track_ids([
+        int(row["release_track_id"])
+        for row in enriched
+        if isinstance(row.get("release_track_id"), int)
+    ])
     play_history_by_track_id = play_history_for_spotify_ids([
         str(row.get(track_id_key) or "").strip()
         for row in enriched
@@ -390,6 +440,17 @@ def enrich_track_rows_with_release_metadata(
             if isinstance(release_track_id, int)
             else None
         ) or play_history
+        recording_release_track_ids = (
+            recording_release_track_ids_by_release_track_id.get(release_track_id)
+            if isinstance(release_track_id, int)
+            else None
+        )
+        if recording_release_track_ids:
+            row["recording_release_track_ids"] = recording_release_track_ids
+        elif isinstance(release_track_id, int):
+            row["recording_release_track_ids"] = [release_track_id]
+        else:
+            row["recording_release_track_ids"] = []
         if recording_history:
             row["recording_play_count"] = recording_history["play_count"]
             row["recording_first_played_at"] = recording_history["first_played_at"]

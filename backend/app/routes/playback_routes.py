@@ -29,6 +29,7 @@ from backend.app.release_track_metadata import enrich_album_track_rows_with_rele
 from backend.app.spotify_catalog_backfill import (
     _upsert_album_track,
     _upsert_track_catalog,
+    enqueue_spotify_catalog_backfill_items,
 )
 from backend.app.spotify_current_playback import get_current_playback_for_user
 from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get
@@ -105,6 +106,27 @@ def _artist_entries_for_album_evidence(artist_names: list[str], artist_ids: list
                 }
             )
     return entries
+
+
+def _enqueue_incomplete_artist_album_tracklists(items: list[dict[str, Any]]) -> dict[str, Any]:
+    queue_items: list[dict[str, Any]] = []
+    seen_album_ids: set[str] = set()
+    for item in items:
+        album_id = str(item.get("album_id") or "").strip()
+        if not album_id or album_id in seen_album_ids:
+            continue
+        seen_album_ids.add(album_id)
+        if item.get("tracklist_complete") is True:
+            continue
+        queue_items.append(
+            {
+                "entity_type": "album",
+                "spotify_id": album_id,
+                "reason": "tracklist_completion",
+                "priority": 70,
+            }
+        )
+    return enqueue_spotify_catalog_backfill_items(items=queue_items)
 
 
 @router.get("/tracks/release-track/{release_track_id}")
@@ -310,6 +332,11 @@ async def auth_artist_albums(
             source_album_id=source_album_id,
             source_album_name=source_album_name,
         )
+        try:
+            backfill_queue = _enqueue_incomplete_artist_album_tracklists(items)
+        except Exception:
+            backfill_queue = {"ok": False, "error": "artist_album_tracklist_enqueue_failed"}
+        refresh_source_track_play_count_cache()
         tracks = list_artist_tracks(normalized_artist_names)
         artists = await resolve_artist_artwork(
             _artist_entries_for_album_evidence(normalized_artist_names, artist_ids),
@@ -318,7 +345,7 @@ async def auth_artist_albums(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Artist album evidence could not be loaded.") from exc
-    return {"items": items, "tracks": tracks, "artists": artists}
+    return {"items": items, "tracks": tracks, "artists": artists, "backfill_queue": backfill_queue}
 
 
 @router.post("/auth/playback/queue-playlist/sync")

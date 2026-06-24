@@ -248,7 +248,7 @@ export function formatFormulaRankDelta(track: RecentTrack): string | null {
 
 export function formatTrackSourceBadge(track: RecentTrack): string | null {
   if (track.source_label === "both") {
-    return "Both";
+    return null;
   }
   if (track.source_label === "api") {
     return "API";
@@ -260,7 +260,7 @@ export function formatTrackSourceBadge(track: RecentTrack): string | null {
     return "History";
   }
   if (track.has_recent_source && track.has_history_source) {
-    return "Both";
+    return null;
   }
   if (track.has_recent_source) {
     return "Recent";
@@ -509,7 +509,7 @@ export function formatTrackLongevityWithConsistency(track: RecentTrack) {
 }
 
 export function getTrackPlayCount(track: RecentTrack): number {
-  return Number(track.play_count ?? 0);
+  return Number(track.recording_play_count ?? track.play_count ?? 0);
 }
 
 export function getNormalizedPlays(track: RecentTrack, maxPlays: number): number {

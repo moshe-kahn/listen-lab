@@ -44,6 +44,7 @@ import type {
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const TRACK_MAPPING_FETCH_TIMEOUT_MS = 20000;
 const TRACKS_FORMULA_FETCH_LIMIT = 100;
+const RECENT_TRACKS_COMPUTED_FETCH_LIMIT = 100;
 const LIKED_TRACKS_SYNC_FAILURE_SIMULATION_KEY = "listenlab.simulateLikedSyncFailure";
 const LIKED_TRACKS_SYNC_FAILURE_SIMULATION_QUERY = "simulate_liked_sync_failure";
 
@@ -621,9 +622,12 @@ export async function enqueueCatalogBackfillItems(
     return payload as CatalogBackfillEnqueueResponse;
   }
 
-export async function fetchMergedTrackAggregate(): Promise<MergedTrackAggregateResponse> {
+export async function fetchMergedTrackAggregate(
+  rankBy: "all_time" | "recent" = "all_time",
+): Promise<MergedTrackAggregateResponse> {
+    const limit = rankBy === "recent" ? RECENT_TRACKS_COMPUTED_FETCH_LIMIT : TRACKS_FORMULA_FETCH_LIMIT;
     const response = await fetch(
-      `${apiBaseUrl}/tracks/merged-aggregate?limit=${TRACKS_FORMULA_FETCH_LIMIT}&recent_window_days=28&source_filter=all`,
+      `${apiBaseUrl}/tracks/merged-aggregate?limit=${limit}&recent_window_days=28&source_filter=all&rank_by=${encodeURIComponent(rankBy)}`,
       { credentials: "include" },
     );
     if (!response.ok) {
