@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import uuid
@@ -17,6 +18,7 @@ from backend.app.auth.session import _require_local_data_session, _require_user_
 from backend.app.auth.token import _require_token
 from backend.app.db import (
     complete_ingest_run,
+    get_spotify_auth_record,
     insert_ingest_run,
     insert_listenlab_player_play,
     refresh_source_track_play_count_cache,
@@ -33,6 +35,7 @@ from backend.app.spotify_catalog_backfill import (
 )
 from backend.app.spotify_current_playback import get_current_playback_for_user
 from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get
+from backend.app.spotify_normalization import _normalize_track
 from backend.app.spotify_preview import (
     _fetch_album_representative_track,
     _fetch_artist_representative_track,
@@ -44,6 +47,11 @@ from backend.app.spotify_queue_playlist import (
 from backend.app.spotify_token_store import get_spotify_tokens
 
 router = APIRouter(tags=["playback"])
+logger = logging.getLogger("listenlabs.playback")
+
+
+def _scope_set(scope_text: str | None) -> set[str]:
+    return {scope.strip() for scope in str(scope_text or "").split() if scope.strip()}
 
 
 def _json_list(value: Any) -> list[Any]:
@@ -337,7 +345,7 @@ async def auth_artist_albums(
         except Exception:
             backfill_queue = {"ok": False, "error": "artist_album_tracklist_enqueue_failed"}
         refresh_source_track_play_count_cache()
-        tracks = list_artist_tracks(normalized_artist_names)
+        tracks = list_artist_tracks(normalized_artist_names, artist_ids=artist_ids)
         artists = await resolve_artist_artwork(
             _artist_entries_for_album_evidence(normalized_artist_names, artist_ids),
             access_token=token,
@@ -358,6 +366,97 @@ async def auth_sync_queue_playlist(request: Request, payload: dict[str, Any] = B
         spotify_user_id=str(user_id),
         uris=uris,
     )
+
+
+@router.get("/auth/playback/playlist-tracks")
+async def auth_playback_playlist_tracks(
+    request: Request,
+    playlist_id: str,
+    limit: int = Query(default=500, ge=1, le=500),
+) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    token = _require_token(request)
+    normalized_playlist_id = str(playlist_id or "").strip()
+    if not normalized_playlist_id:
+        raise HTTPException(status_code=400, detail="playlist_id is required.")
+
+    items: list[dict[str, Any]] = []
+    offset = 0
+    page_limit = min(100, limit)
+    total: int | None = None
+
+    while len(items) < limit:
+        try:
+            payload = await _spotify_get(
+                token,
+                f"https://api.spotify.com/v1/playlists/{normalized_playlist_id}/items",
+                {
+                    "limit": min(page_limit, limit - len(items)),
+                    "offset": offset,
+                    "fields": "items(added_at,item(id,name,uri,duration_ms,preview_url,external_urls,album(id,name,release_date,images,external_urls),artists(id,name))),total,next",
+                },
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_403_FORBIDDEN:
+                granted_scopes = _scope_set((get_spotify_auth_record(str(user_id)) or {}).get("scopes"))
+                missing_scopes = [
+                    scope
+                    for scope in ("playlist-read-private", "playlist-read-collaborative")
+                    if scope not in granted_scopes
+                ]
+                spotify_detail = str(exc.detail or "").strip().rstrip(".")
+                if missing_scopes:
+                    detail = (
+                        "Spotify denied access to this playlist's tracks because the current token is missing "
+                        f"{', '.join(missing_scopes)}. Log out and log back in to grant the updated playlist permissions."
+                    )
+                else:
+                    detail = (
+                        "Spotify denied access to this playlist's tracks even though ListenLab has the playlist scopes. "
+                        "This usually means the playlist is private to another account, no longer accessible to your Spotify user, "
+                        "or Spotify is blocking this specific playlist."
+                    )
+                    if spotify_detail:
+                        detail = f"{detail} Spotify said: {spotify_detail}."
+                logger.warning(
+                    "event=playlist_tracks_spotify_forbidden playlist_id=%s user_id=%s missing_scopes=%s spotify_detail=%s",
+                    normalized_playlist_id,
+                    user_id,
+                    ",".join(missing_scopes),
+                    spotify_detail or "",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=detail,
+                ) from exc
+            raise
+        if total is None and isinstance(payload.get("total"), int):
+            total = int(payload["total"])
+        page_items = payload.get("items") or []
+        if not page_items:
+            break
+        for item in page_items:
+            if not isinstance(item, dict):
+                continue
+            track = item.get("item") or item.get("track") or {}
+            if not isinstance(track, dict) or not track.get("id"):
+                continue
+            normalized = _normalize_track(track)
+            normalized["playlist_added_at"] = item.get("added_at")
+            items.append(normalized)
+            if len(items) >= limit:
+                break
+        offset += len(page_items)
+        if not payload.get("next"):
+            break
+
+    return {
+        "playlist_id": normalized_playlist_id,
+        "items": items,
+        "total": total if total is not None else len(items),
+        "limit": limit,
+        "has_more": total is not None and len(items) < total,
+    }
 
 
 @router.get("/auth/playback/album-tracks")
@@ -420,6 +519,20 @@ async def auth_playback_album_tracks(
                 "source": "track_catalog",
                 "cached": True,
                 "partial": not catalog_complete,
+                "identity_promotion": promotion,
+            }
+        if not force_spotify and local_fallback_items:
+            promotion = promote_catalog_album_tracks_to_identity(
+                album_ids=[normalized_album_id],
+                apply=True,
+            ) if promote_identity else None
+            return {
+                "album_id": normalized_album_id,
+                "track_id": normalized_track_id,
+                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "source": "local_partial",
+                "cached": True,
+                "partial": True,
                 "identity_promotion": promotion,
             }
 

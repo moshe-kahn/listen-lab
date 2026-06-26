@@ -134,6 +134,215 @@ class CatalogIdentityPromotionTests(unittest.TestCase):
         self.assertEqual([], repeated["touched_release_track_ids"])
         self.assertIsNone(repeated["cluster_refresh"])
 
+    def test_album_track_enrichment_falls_back_to_title_artist_history_when_spotify_relinks(self) -> None:
+        with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+            original_release_track_id = _ensure_source_track_mapping_with_connection(
+                connection,
+                source_name="spotify",
+                external_id="original-nightcall",
+                external_uri="spotify:track:original-nightcall",
+                track_name="Nightcall",
+                track_duration_ms=259_799,
+                raw_payload_json=json.dumps({"id": "original-nightcall", "name": "Nightcall"}),
+                create_match_method="test",
+                create_confidence=1.0,
+                create_explanation="test seed",
+            )
+            soundtrack_release_track_id = _ensure_source_track_mapping_with_connection(
+                connection,
+                source_name="spotify",
+                external_id="soundtrack-nightcall",
+                external_uri="spotify:track:soundtrack-nightcall",
+                track_name="Nightcall",
+                track_duration_ms=259_799,
+                raw_payload_json=json.dumps({
+                    "id": "soundtrack-nightcall",
+                    "name": "Nightcall",
+                    "artists": [
+                        {"id": "lovefoxxx", "name": "Lovefoxxx"},
+                        {"id": "kavinsky", "name": "Kavinsky"},
+                    ],
+                }),
+                create_match_method="test",
+                create_confidence=1.0,
+                create_explanation="test seed",
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_play_count_cache (
+                  spotify_track_id, play_count, first_played_at, last_played_at
+                ) VALUES ('original-nightcall', 10, '2018-05-18T20:46:52Z', '2026-06-25T03:25:31Z')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at, spotify_track_id, track_name_canonical,
+                  artist_name_canonical, timing_source, matched_state
+                ) VALUES (
+                  '2026-06-25T03:25:31Z', 'original-nightcall', 'Nightcall',
+                  'Kavinsky', 'ended_at', 'matched'
+                )
+                """
+            )
+
+        enriched = enrich_album_track_rows_with_release_metadata([
+            {
+                "id": "soundtrack-nightcall",
+                "name": "Nightcall",
+                "artists": [
+                    {"artist_id": "lovefoxxx", "name": "Lovefoxxx"},
+                    {"artist_id": "kavinsky", "name": "Kavinsky"},
+                ],
+                "duration_ms": 259_799,
+            },
+        ])[0]
+        self.assertEqual(soundtrack_release_track_id, enriched["release_track_id"])
+        self.assertEqual(0, enriched["source_play_count"])
+        self.assertEqual(0, enriched["play_count"])
+        self.assertEqual(10, enriched["recording_play_count"])
+        self.assertEqual("2026-06-25T03:25:31Z", enriched["recording_last_played_at"])
+        self.assertEqual(
+            {original_release_track_id, soundtrack_release_track_id},
+            set(enriched["recording_release_track_ids"]),
+        )
+
+    def test_album_track_enrichment_falls_back_to_variant_base_title_history(self) -> None:
+        with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+            film_edit_release_track_id = _ensure_source_track_mapping_with_connection(
+                connection,
+                source_name="spotify",
+                external_id="tick-film-edit",
+                external_uri="spotify:track:tick-film-edit",
+                track_name="Tick Of The Clock (Film Edit)",
+                track_duration_ms=259_799,
+                raw_payload_json=json.dumps({"id": "tick-film-edit", "name": "Tick Of The Clock (Film Edit)"}),
+                create_match_method="test",
+                create_confidence=1.0,
+                create_explanation="test seed",
+            )
+            soundtrack_release_track_id = _ensure_source_track_mapping_with_connection(
+                connection,
+                source_name="spotify",
+                external_id="tick-soundtrack",
+                external_uri="spotify:track:tick-soundtrack",
+                track_name="Tick of the Clock",
+                track_duration_ms=259_799,
+                raw_payload_json=json.dumps({
+                    "id": "tick-soundtrack",
+                    "name": "Tick of the Clock",
+                    "artists": [{"id": "chromatics", "name": "Chromatics"}],
+                }),
+                create_match_method="test",
+                create_confidence=1.0,
+                create_explanation="test seed",
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_play_count_cache (
+                  spotify_track_id, play_count, first_played_at, last_played_at
+                ) VALUES ('tick-film-edit', 24, '2026-01-26T02:12:05Z', '2026-06-25T03:37:24Z')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at, spotify_track_id, track_name_canonical,
+                  artist_name_canonical, timing_source, matched_state
+                ) VALUES (
+                  '2026-06-25T03:37:24Z', 'tick-film-edit', 'Tick Of The Clock (Film Edit)',
+                  'Chromatics', 'ended_at', 'matched'
+                )
+                """
+            )
+
+        enriched = enrich_album_track_rows_with_release_metadata([
+            {
+                "id": "tick-soundtrack",
+                "name": "Tick of the Clock",
+                "artists": [{"artist_id": "chromatics", "name": "Chromatics"}],
+                "duration_ms": 259_799,
+            },
+        ])[0]
+        self.assertEqual(soundtrack_release_track_id, enriched["release_track_id"])
+        self.assertEqual(24, enriched["recording_play_count"])
+        self.assertEqual("2026-06-25T03:37:24Z", enriched["recording_last_played_at"])
+        self.assertEqual(
+            {film_edit_release_track_id, soundtrack_release_track_id},
+            set(enriched["recording_release_track_ids"]),
+        )
+
+    def test_album_track_enrichment_falls_back_to_main_theme_history(self) -> None:
+        with sqlite_connection(write=True, row_factory=sqlite3.Row) as connection:
+            main_theme_release_track_id = _ensure_source_track_mapping_with_connection(
+                connection,
+                source_name="spotify",
+                external_id="oh-my-love-main-theme",
+                external_uri="spotify:track:oh-my-love-main-theme",
+                track_name="Oh My Love - Main Theme",
+                track_duration_ms=259_799,
+                raw_payload_json=json.dumps({"id": "oh-my-love-main-theme", "name": "Oh My Love - Main Theme"}),
+                create_match_method="test",
+                create_confidence=1.0,
+                create_explanation="test seed",
+            )
+            soundtrack_release_track_id = _ensure_source_track_mapping_with_connection(
+                connection,
+                source_name="spotify",
+                external_id="oh-my-love-soundtrack",
+                external_uri="spotify:track:oh-my-love-soundtrack",
+                track_name="Oh My Love (feat. Katyna Ranieri)",
+                track_duration_ms=259_799,
+                raw_payload_json=json.dumps({
+                    "id": "oh-my-love-soundtrack",
+                    "name": "Oh My Love (feat. Katyna Ranieri)",
+                    "artists": [
+                        {"id": "riz-ortolani", "name": "Riz Ortolani"},
+                        {"id": "katyna-ranieri", "name": "Katyna Ranieri"},
+                    ],
+                }),
+                create_match_method="test",
+                create_confidence=1.0,
+                create_explanation="test seed",
+            )
+            connection.execute(
+                """
+                INSERT INTO source_track_play_count_cache (
+                  spotify_track_id, play_count, first_played_at, last_played_at
+                ) VALUES ('oh-my-love-main-theme', 4, '2025-03-02T00:54:59Z', '2026-06-25T03:32:41Z')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_ended_at, spotify_track_id, track_name_canonical,
+                  artist_name_canonical, timing_source, matched_state
+                ) VALUES (
+                  '2026-06-25T03:32:41Z', 'oh-my-love-main-theme', 'Oh My Love - Main Theme',
+                  'Riz Ortolani', 'ended_at', 'matched'
+                )
+                """
+            )
+
+        enriched = enrich_album_track_rows_with_release_metadata([
+            {
+                "id": "oh-my-love-soundtrack",
+                "name": "Oh My Love (feat. Katyna Ranieri)",
+                "artists": [
+                    {"artist_id": "riz-ortolani", "name": "Riz Ortolani"},
+                    {"artist_id": "katyna-ranieri", "name": "Katyna Ranieri"},
+                ],
+                "duration_ms": 259_799,
+            },
+        ])[0]
+        self.assertEqual(soundtrack_release_track_id, enriched["release_track_id"])
+        self.assertEqual(4, enriched["recording_play_count"])
+        self.assertEqual("2026-06-25T03:32:41Z", enriched["recording_last_played_at"])
+        self.assertEqual(
+            {main_theme_release_track_id, soundtrack_release_track_id},
+            set(enriched["recording_release_track_ids"]),
+        )
+
     def test_track_catalog_promotion_adds_missing_collaborator_credit(self) -> None:
         black_pumas = {"id": "black-pumas", "name": "Black Pumas", "uri": "spotify:artist:black-pumas"}
         lucius = {"id": "lucius", "name": "Lucius", "uri": "spotify:artist:lucius"}

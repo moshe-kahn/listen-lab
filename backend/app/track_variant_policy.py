@@ -405,6 +405,16 @@ def classify_label_families(label: str | None) -> tuple[TrackVariantComponent, .
         component = _family_policy_component("rework", label, normalized)
         if component is not None:
             components.append(component)
+    if normalized == "extended" or normalized.startswith("extended "):
+        component = _family_policy_component(
+            "version",
+            label,
+            normalized,
+            semantic_override="attributed_derived_version",
+            groupable_override=False,
+        )
+        if component is not None:
+            components.append(component)
 
     edit_subtype = classify_edit_label(normalized)
     if edit_subtype is not None:

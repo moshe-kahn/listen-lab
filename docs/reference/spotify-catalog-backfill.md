@@ -65,6 +65,7 @@ Behavior:
 - `local_only=true` prevents any Spotify request and returns only complete/partial local database evidence; the frontend uses this during Spotify cooldown
 - use the same cached/local fallback path for the song overlay and homepage album expansion
 - preserve album queue context when a track is started from an album row
+- enrich album rows with exact source history, release-track history, generated recording history, and a guarded fallback based on parsed base title plus overlapping artist names when Spotify relinking or soundtrack naming leaves equivalent listened versions unmapped
 
 The fallback remains catalog enrichment-only by default. A track-overlay request explicitly sends
 `promote_identity=true` after the user opens an album context. Once the album tracklist is complete,
@@ -72,6 +73,19 @@ the route invokes the separate conservative catalog identity-promotion workflow.
 missing source/release/album membership rows, marks affected generated recording clusters dirty, and
 refreshes them. It does not merge or repair existing canonical identities. Homepage and generic catalog
 requests do not enable this flag.
+
+## Playback Playlist-Track Fallback
+The playback route `/auth/playback/playlist-tracks` loads playlist rows for the dashboard playlist overlay.
+
+Behavior:
+- request the Spotify playlist-items endpoint `/v1/playlists/{playlist_id}/items`, not the older `/tracks` endpoint
+- parse the `item` payload shape while keeping a `track` fallback for older response shapes
+- require `playlist-read-private` and `playlist-read-collaborative` in stored scopes before suggesting reauth
+- if Spotify still returns `403`, preserve the raw Spotify denial detail and log the playlist id, user id, missing scopes, and Spotify detail
+
+Reason:
+- Spotify can return metadata for a user-owned playlist and still return `403 Forbidden` for `/v1/playlists/{playlist_id}/tracks`
+- the same playlist can succeed through `/v1/playlists/{playlist_id}/items`, as seen with the local `Recent Likes` playlist
 
 ## History/Spotify Release-Album Repair
 The debug repair path for history-only release albums and Spotify-backed release albums is separate from catalog backfill. It may merge release-album rows only through explicit preview/dry-run/apply flow.

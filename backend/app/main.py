@@ -2574,6 +2574,37 @@ async def me_liked_tracks_contains_batch(request: Request, body: dict[str, Any] 
     }
 
 
+@app.get("/me/liked-albums/contains")
+async def me_liked_albums_contains(
+    request: Request,
+    spotify_album_id: str,
+) -> dict[str, Any]:
+    normalized_album_id = str(spotify_album_id or "").strip()
+    if not normalized_album_id:
+        raise HTTPException(status_code=400, detail="spotify_album_id is required.")
+    _require_local_data_session(request)
+    try:
+        token = _require_token(request)
+        spotify_result = await _spotify_get(
+            token,
+            "https://api.spotify.com/v1/me/albums/contains",
+            {"ids": normalized_album_id},
+        )
+        if isinstance(spotify_result, list) and spotify_result:
+            return {
+                "spotify_album_id": normalized_album_id,
+                "is_liked": bool(spotify_result[0]),
+                "source": "spotify",
+            }
+    except HTTPException:
+        pass
+    return {
+        "spotify_album_id": normalized_album_id,
+        "is_liked": False,
+        "source": "spotify_unavailable",
+    }
+
+
 @app.post("/tracks/release-track-metadata")
 async def tracks_release_track_metadata(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     _require_local_data_session(request)

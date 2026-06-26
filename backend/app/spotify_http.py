@@ -16,6 +16,17 @@ from backend.app.spotify_rate_limit import (
 settings = get_settings()
 
 
+def _spotify_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+        error_payload = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error_payload, dict):
+            return str(error_payload.get("message") or error_payload.get("reason") or "").strip()
+        return str(payload.get("error_description") or payload.get("error") or "").strip() if isinstance(payload, dict) else ""
+    except ValueError:
+        return response.text[:160].strip()
+
+
 async def _fetch_spotify_profile(access_token: str) -> dict[str, Any]:
     _enforce_spotify_cooldown()
     try:
@@ -90,7 +101,11 @@ async def _spotify_get(access_token: str, url: str, params: dict[str, Any] | Non
     if response.status_code == status.HTTP_401_UNAUTHORIZED:
         raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
     if response.status_code == status.HTTP_403_FORBIDDEN:
-        raise HTTPException(status_code=403, detail="Spotify scope is missing for this resource.")
+        detail = _spotify_error_detail(response)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Spotify denied access to this resource{f': {detail}' if detail else ''}.",
+        )
     if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
         retry_after_header = response.headers.get("Retry-After")
         retry_after_seconds = _parse_retry_after_seconds(retry_after_header)
@@ -123,7 +138,11 @@ async def _spotify_post(access_token: str, url: str, json_body: dict[str, Any] |
     if response.status_code == status.HTTP_401_UNAUTHORIZED:
         raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
     if response.status_code == status.HTTP_403_FORBIDDEN:
-        raise HTTPException(status_code=403, detail="Spotify scope is missing for this resource.")
+        detail = _spotify_error_detail(response)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Spotify denied access to this resource{f': {detail}' if detail else ''}.",
+        )
     if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
         retry_after_header = response.headers.get("Retry-After")
         retry_after_seconds = _parse_retry_after_seconds(retry_after_header)
@@ -158,7 +177,11 @@ async def _spotify_put(access_token: str, url: str, json_body: dict[str, Any] | 
     if response.status_code == status.HTTP_401_UNAUTHORIZED:
         raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
     if response.status_code == status.HTTP_403_FORBIDDEN:
-        raise HTTPException(status_code=403, detail="Spotify scope is missing for this resource.")
+        detail = _spotify_error_detail(response)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Spotify denied access to this resource{f': {detail}' if detail else ''}.",
+        )
     if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
         retry_after_header = response.headers.get("Retry-After")
         retry_after_seconds = _parse_retry_after_seconds(retry_after_header)
@@ -193,7 +216,11 @@ async def _spotify_get_many(access_token: str, url: str, params: dict[str, Any] 
     if response.status_code == status.HTTP_401_UNAUTHORIZED:
         raise HTTPException(status_code=401, detail="Spotify access token is no longer valid.")
     if response.status_code == status.HTTP_403_FORBIDDEN:
-        raise HTTPException(status_code=403, detail="Spotify scope is missing for this resource.")
+        detail = _spotify_error_detail(response)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Spotify denied access to this resource{f': {detail}' if detail else ''}.",
+        )
     if response.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
         retry_after_header = response.headers.get("Retry-After")
         retry_after_seconds = _parse_retry_after_seconds(retry_after_header)

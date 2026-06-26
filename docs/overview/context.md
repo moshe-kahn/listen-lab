@@ -63,7 +63,7 @@ Current note:
 - liked-track sync failure simulation exists only for local/dev QA and requires both `LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE=1` and `X-ListenLab-Debug-Sync-Failure: 1`
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
-- the dashboard now also includes a recording-first track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, release/recording view switching, variation/family album cards, and a merged-event `Listening Log` page for chronology/source inspection
+- the dashboard now also includes a recording-first track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, release/recording view switching, variation/family album cards, playlist tracklist overlays, full-width album overlay tracklists, and a merged-event `Listening Log` page for chronology/source inspection
 - track identity work now includes a conservative identity model:
   - `source_track`
   - `release_track`
@@ -77,6 +77,7 @@ Current note:
 - track overlays default to recording view on user-facing pages, separate same-recording appearances from broader `Variations`, and keep release-source versions available through the release view
 - release views show source-version albums and identify the representative source instead of listing raw source rows as primary UI
 - track overlays keep Spotify track ID/URI as the concrete playback target even when the display groups release, recording, or family evidence
+- standalone album overlays show recording-level listen history where generated recording evidence or guarded base-title/artist fallback evidence can connect soundtrack, compilation, edit, or main-theme rows to listened source versions; release view stays exact-source
 - overlay and album play controls ask for `Play now`, `Play next`, or `Add to queue` before mutating playback/queue state; queue-only actions update the frontend ListenLab queue while Spotify track IDs/URIs remain the concrete playback target
 - liked stars are release-track-aware where release identity exists
 - raw Spotify history may include podcast episode rows; keep them in raw history, but exclude them from the current music fact layer unless building podcast features

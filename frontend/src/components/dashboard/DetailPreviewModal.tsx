@@ -8,6 +8,7 @@ import type {
   PlayerQueueTrack,
   PlayerTrackSummary,
   PreviewItem,
+  RecentTrack,
   RecordingRelationRows,
   RecordingTrackCandidateMember,
   ReleaseTrackDetailResponse,
@@ -24,6 +25,7 @@ import { AlbumVersionSelector } from "./AlbumVersionSelector";
 import { displayTrackName, remasterYearFromTrackName } from "../../utils/trackDisplayName";
 import { AlbumVersionTrackSummary } from "./AlbumVersionTrackSummary";
 import { RelatedAlbumsSection } from "./RelatedAlbumsSection";
+import { PlaylistTrackList } from "./PlaylistTrackList";
 
 type AlbumPlaybackQueue = {
   playlistUris: string[];
@@ -89,6 +91,7 @@ type DetailPreviewModalProps = {
   albumTrackEntries: AlbumTrackEntry[];
   albumTrackEntriesError: string | null;
   albumTrackEntriesLoading: boolean;
+  albumTrackEntriesPartial: boolean;
   albumFamilyDiscScrollTarget: number | null;
   albumTrackFetchFromSpotifyLoading: boolean;
   albumTrackMoreOnSpotifyUrl: string | null;
@@ -121,6 +124,7 @@ type DetailPreviewModalProps = {
   openAlbumWithArtistPreview: (artist: TrackArtistEntry) => void;
   openArtistAlbumPreview: (album: ArtistAlbumEntry) => void;
   openRecordingCandidateReleaseTrack: (member: RecordingTrackCandidateMember, detailView?: "recording" | "release") => void;
+  openRecentPlayerTrackDetails: (track: RecentTrack) => void;
   openReleaseSourceVersion: (version: ReleaseTrackDetailSourceVersion, detailView?: "recording" | "release") => void;
   openSelectedAlbumArtistPreview: (artist?: TrackArtistEntry) => void;
   openSelectedArtistMemberPreview: (artist: TrackArtistEntry) => void;
@@ -130,6 +134,12 @@ type DetailPreviewModalProps = {
   playbackDurationMs: number;
   playbackPaused: boolean;
   playbackPositionMs: number;
+  playlistTrackEntries: RecentTrack[];
+  playlistTrackEntriesError: string | null;
+  playlistTrackEntriesHasMore: boolean;
+  playlistTrackEntriesLoading: boolean;
+  handlePlaylistPlayAll: (action: PlaybackAction) => Promise<void>;
+  handlePlaylistTrackPlayback: (track: RecentTrack, action: PlaybackAction) => Promise<void>;
   playerSummaryFromAlbumTrack: (track: AlbumTrackEntry) => PlayerTrackSummary;
   previewAlbumHeading: (preview: PreviewItem) => string | null;
   previewPlayedTrackKeys: Set<string>;
@@ -148,8 +158,10 @@ type DetailPreviewModalProps = {
   selectedPreview: PreviewItem | null;
   selectedPreviewAlbumGuestArtists: TrackArtistEntry[];
   selectedPreviewAlbumHasGuestArtists: boolean;
+  selectedPreviewAlbumIsSpotifyLiked: boolean;
   selectedPreviewAlbumMainArtists: TrackArtistEntry[];
   selectedPreviewAlbumSummary: string | null;
+  selectedPreviewAlbumSpotifyId: string | null;
   selectedPreviewAlbumContextTagLabel: string | null;
   selectedPreviewAppearsOnAlbums: ArtistAlbumEntry[];
   selectedPreviewArtistAlbumsForDisplay: ArtistAlbumEntry[];
@@ -195,12 +207,14 @@ type DetailPreviewModalProps = {
   setAlbumTrackLastSortMode: Dispatch<SetStateAction<"recent" | "oldest" | null>>;
   setDetailOptionsOpen: Dispatch<SetStateAction<boolean>>;
   setLocalBookmarkedTrackById: Dispatch<SetStateAction<Record<string, boolean>>>;
+  setLocalStarredAlbumById: Dispatch<SetStateAction<Record<string, boolean>>>;
   setLocalStarredTrackById: Dispatch<SetStateAction<Record<string, boolean>>>;
   setSelectedPreview: Dispatch<SetStateAction<PreviewItem | null>>;
   setSelectedPreviewDetailView: Dispatch<SetStateAction<"recording" | "release">>;
   spotifyTrackIdFromUri: (uri: string | null) => string | null;
   switchSelectedTrackAlbumVersion: (spotifyAlbumId: string) => void;
   toggleAlbumTrackPreview: (track: AlbumTrackEntry, rowTrackUri: string | null) => Promise<void>;
+  trackUriWithFallback: (uri: string | null | undefined, trackId: string | null | undefined) => string | null;
   variationSubtitleFromTitle: (title: string | null | undefined) => string | null;
 };
 
@@ -210,6 +224,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     albumTrackEntries,
     albumTrackEntriesError,
     albumTrackEntriesLoading,
+    albumTrackEntriesPartial,
     albumFamilyDiscScrollTarget,
     albumTrackFetchFromSpotifyLoading,
     albumTrackMoreOnSpotifyUrl,
@@ -242,6 +257,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     openAlbumWithArtistPreview,
     openArtistAlbumPreview,
     openRecordingCandidateReleaseTrack,
+    openRecentPlayerTrackDetails,
     openReleaseSourceVersion,
     openSelectedAlbumArtistPreview,
     openSelectedArtistMemberPreview,
@@ -251,6 +267,12 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     playbackDurationMs,
     playbackPaused,
     playbackPositionMs,
+    playlistTrackEntries,
+    playlistTrackEntriesError,
+    playlistTrackEntriesHasMore,
+    playlistTrackEntriesLoading,
+    handlePlaylistPlayAll,
+    handlePlaylistTrackPlayback,
     playerSummaryFromAlbumTrack,
     previewAlbumHeading,
     previewPlayedTrackKeys,
@@ -269,8 +291,10 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     selectedPreview,
     selectedPreviewAlbumGuestArtists,
     selectedPreviewAlbumHasGuestArtists,
+    selectedPreviewAlbumIsSpotifyLiked,
     selectedPreviewAlbumMainArtists,
     selectedPreviewAlbumSummary,
+    selectedPreviewAlbumSpotifyId,
     selectedPreviewAlbumContextTagLabel,
     selectedPreviewAppearsOnAlbums,
     selectedPreviewArtistAlbumsForDisplay,
@@ -311,12 +335,14 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     setAlbumTrackLastSortMode,
     setDetailOptionsOpen,
     setLocalBookmarkedTrackById,
+    setLocalStarredAlbumById,
     setLocalStarredTrackById,
     setSelectedPreview,
     setSelectedPreviewDetailView,
     spotifyTrackIdFromUri,
     switchSelectedTrackAlbumVersion,
     toggleAlbumTrackPreview,
+    trackUriWithFallback,
     variationSubtitleFromTitle,
   } = props;
   const [hiddenAlbumDiscNumbers, setHiddenAlbumDiscNumbers] = useState<Set<number>>(() => new Set());
@@ -490,7 +516,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
           onClick={() => setSelectedPreview(null)}
           role="dialog"
         >
-          <section className={`detail-modal${selectedPreview.kind === "track" ? " detail-modal-track-view" : ""}`} onClick={handleModalClick}>
+          <section className={`detail-modal${selectedPreview.kind === "track" ? " detail-modal-track-view" : ""}${selectedPreview.kind === "album" ? " detail-modal-album-view" : ""}`} onClick={handleModalClick}>
             {selectedPreview.kind !== "track" ? (
               <div className="detail-modal-options">
                 <button
@@ -576,7 +602,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                   </span>
                 ) : selectedPreview.kind === "track" && selectedPreviewCanonicalTrackTitle
                   ? displayTrackName(selectedPreviewCanonicalTrackTitle)
-                  : selectedPreview.kind === "album" && selectedPreview.detail ? `${selectedPreview.label} (${selectedPreview.detail})` : selectedPreview.label}
+                  : selectedPreview.label}
               </h2>
               {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewPlaybackTrackUri ? (
                 <div className="detail-modal-play-menu detail-modal-play-menu-inline">
@@ -652,6 +678,9 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
               {selectedPreview.kind === "track" ? selectedPreviewTrackArtistHeading : null}
               {selectedPreview.kind === "album" ? (
                 <div className="detail-modal-album-meta-block">
+                  {selectedPreview.detail ? (
+                    <span className="detail-modal-meta-text detail-modal-album-release-year">{selectedPreview.detail}</span>
+                  ) : null}
                   {selectedPreviewAlbumSummary ? (
                     <span className="detail-modal-meta-text detail-modal-album-summary">{selectedPreviewAlbumSummary}</span>
                   ) : null}
@@ -680,6 +709,23 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                         })}
                       </span>
                     </div>
+                  ) : null}
+                  {selectedPreviewAlbumSpotifyId ? (
+                    <button
+                      aria-label={selectedPreviewAlbumIsSpotifyLiked ? "Saved album on Spotify" : "Album not saved on Spotify"}
+                      aria-pressed={selectedPreviewAlbumIsSpotifyLiked}
+                      className={`secondary-button detail-track-action-button detail-track-star-button detail-album-star-button${selectedPreviewAlbumIsSpotifyLiked ? " detail-track-action-button-active" : ""}`}
+                      onClick={() => {
+                        setLocalStarredAlbumById((current) => ({
+                          ...current,
+                          [selectedPreviewAlbumSpotifyId]: !selectedPreviewAlbumIsSpotifyLiked,
+                        }));
+                      }}
+                      title={selectedPreviewAlbumIsSpotifyLiked ? "Saved in Spotify library." : "Not saved in Spotify library."}
+                      type="button"
+                    >
+                      <span aria-hidden="true">{selectedPreviewAlbumIsSpotifyLiked ? "★" : "☆"}</span>
+                    </button>
                   ) : null}
                   {selectedPreviewAlbumGuestArtists.length > 0 ? (
                     <p className="detail-modal-with-artists">
@@ -806,7 +852,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 </>
               ) : null}
             </div>
-            {selectedPreviewIsTrack || selectedPreview.kind === "album" ? (
+            {selectedPreviewIsTrack || selectedPreview.kind === "album" || selectedPreview.kind === "playlist" ? (
               <div className="detail-modal-track-scroll-area">
             {selectedPreview.kind === "track" && selectedPreviewDetailView === "recording" && selectedPreviewDisplayRelationRows.songFamily.length > 0 ? (
               <div className="detail-modal-recording-variations">
@@ -924,6 +970,11 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                 {!albumTrackEntriesLoading && albumTrackEntriesError && albumTrackMoreOnSpotifyUrl ? (
                                   <p className="detail-modal-preview-missing">
                                     <a href={albumTrackMoreOnSpotifyUrl} rel="noreferrer" target="_blank">More tracks on Spotify</a>
+                                  </p>
+                                ) : null}
+                                {albumTrackEntriesPartial && albumTrackEntries.length > 0 ? (
+                                  <p className="detail-modal-album-enrichment-note">
+                                    Tracklist is shown from partial local cache. Album details are still being completed.
                                   </p>
                                 ) : null}
                                 {!albumTrackEntriesError && albumTrackEntries.length > 0 ? (
@@ -1259,7 +1310,19 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     />
                   </div>
                 ) : null}
+                <div className="detail-modal-album-track-summary-row">
+                  {albumFamilyContext ? (
+                    <AlbumVersionTrackSummary
+                      context={albumFamilyContext}
+                      entries={albumTrackEntries}
+                    />
+                  ) : (
+                    <span className="detail-modal-album-title-header">{albumTracklistSummaryLabel(albumTrackEntries)}</span>
+                  )}
+                </div>
                 <div className="detail-modal-album-header">
+                  <span className="detail-modal-album-number-header">#</span>
+                  <span className="detail-modal-album-preview-header">Preview</span>
                   {hasPremiumPlayback ? (
                     <PlaybackActionMenu
                       ariaLabel="Album playback options"
@@ -1272,29 +1335,21 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                   ) : (
                     <span aria-hidden="true" />
                   )}
-                  {albumFamilyContext ? (
-                    <AlbumVersionTrackSummary
-                      context={albumFamilyContext}
-                      entries={albumTrackEntries}
-                    />
-                  ) : (
-                    <span className="detail-modal-album-title-header">{albumTracklistSummaryLabel(albumTrackEntries)}</span>
-                  )}
+                  <span className="detail-modal-album-liked-header">Liked</span>
+                  <span className="detail-modal-album-title-header">Track</span>
                   {selectedPreviewAlbumHasGuestArtists ? <span className="detail-modal-album-with-header">With</span> : null}
                   <span className="detail-modal-album-liked-header">Tags</span>
-                  <span className="detail-modal-album-actions-header">
-                    <span className="detail-modal-album-preview-header">Preview</span>
-                    <button
-                      className={`detail-modal-album-last-played-header detail-modal-album-sort-header${albumTrackLastSortMode ? " detail-modal-album-sort-header-active" : ""}`}
-                      onClick={() => setAlbumTrackLastSortMode((current) => nextLastPlayedSortMode(current))}
-                      type="button"
-                    >
-                      Last
-                      {albumTrackLastSortMode ? (
-                        <span aria-hidden="true">{albumTrackLastSortMode === "recent" ? "↓" : "↑"}</span>
-                      ) : null}
-                    </button>
-                  </span>
+                  <span className="detail-modal-album-listens-header">Listens</span>
+                  <button
+                    className={`detail-modal-album-last-played-header detail-modal-album-sort-header${albumTrackLastSortMode ? " detail-modal-album-sort-header-active" : ""}`}
+                    onClick={() => setAlbumTrackLastSortMode((current) => nextLastPlayedSortMode(current))}
+                    type="button"
+                  >
+                    Last
+                    {albumTrackLastSortMode ? (
+                      <span aria-hidden="true">{albumTrackLastSortMode === "recent" ? "↓" : "↑"}</span>
+                    ) : null}
+                  </button>
                 </div>
                 {albumTrackEntriesLoading && albumTrackEntries.length === 0 ? (
                   <p className="detail-modal-preview-missing">{albumTrackFetchFromSpotifyLoading ? "Fetching Album..." : "Loading Album..."}</p>
@@ -1305,6 +1360,11 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 {!albumTrackEntriesLoading && albumTrackEntriesError && albumTrackMoreOnSpotifyUrl ? (
                   <p className="detail-modal-preview-missing">
                     <a href={albumTrackMoreOnSpotifyUrl} rel="noreferrer" target="_blank">More tracks on Spotify</a>
+                  </p>
+                ) : null}
+                {albumTrackEntriesPartial && albumTrackEntries.length > 0 ? (
+                  <p className="detail-modal-album-enrichment-note">
+                    Tracklist is shown from partial local cache. Album details are still being completed.
                   </p>
                 ) : null}
                 {!albumTrackEntriesError && albumTrackEntries.length > 0 ? (
@@ -1328,10 +1388,10 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                       const rowPausedCurrent = Boolean(rowIsCurrentTrack && playbackPaused);
                       const rowHistoryLastPlayedAt = selectedPreviewDetailView === "release"
                         ? track.sourceLastPlayedAt === undefined ? track.lastPlayedAt : track.sourceLastPlayedAt
-                        : track.lastPlayedAt;
+                        : track.recordingLastPlayedAt === undefined ? track.lastPlayedAt : track.recordingLastPlayedAt;
                       const rowHistoryPlayCount = selectedPreviewDetailView === "release"
                         ? track.sourcePlayCount === undefined ? track.playCount : track.sourcePlayCount
-                        : track.playCount;
+                        : track.recordingPlayCount === undefined ? track.playCount : track.recordingPlayCount;
                       const rowLastPlayed = formatCompactRelativeAge(rowHistoryLastPlayedAt);
                       const rowIsUnlistened = !rowHistoryLastPlayedAt && rowHistoryPlayCount <= 0;
                       const rowRelationTagsResult = trackRelationTags({
@@ -1428,6 +1488,22 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                             className={`detail-album-track-row${track.isSelected ? " detail-album-track-row-selected" : ""}${rowMatchesHighlightedArtist || rowMatchesHoveredWithArtist ? " detail-album-track-row-artist-highlighted" : ""}${rowExcludedFromPlayback ? " detail-album-track-row-family-exclusive" : ""}`}
                             title={rowFamilyTitle}
                           >
+                            <span className="detail-album-track-number">
+                              {track.trackNumber ?? trackIndex + 1}
+                            </span>
+                            {selectedPreview.kind !== "track" && hasPremiumPlayback ? (
+                              <button
+                                aria-label={rowPreviewPlaying ? `Stop preview for ${track.name}` : `Preview ${track.name}`}
+                                className={`detail-album-track-preview-button${rowPreviewActive ? " detail-album-track-preview-button-active" : ""}${rowPreviewPlayed ? " detail-album-track-preview-button-played" : ""}`}
+                                disabled={!rowTrackUri}
+                                onClick={() => {
+                                  void toggleAlbumTrackPreview(track, rowTrackUri);
+                                }}
+                                type="button"
+                              />
+                            ) : selectedPreview.kind !== "track" ? (
+                              <span className="detail-album-track-preview-placeholder" aria-hidden="true" />
+                            ) : null}
                             {hasPremiumPlayback ? (
                               <PlaybackActionMenu
                               ariaLabel={rowPlaying ? "Currently playing in ListenLab" : rowTrackUri ? `Play ${track.name} in ListenLab` : `${track.name} is not playable`}
@@ -1466,6 +1542,13 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                               </span>
                             </PlaybackActionMenu>
                           ) : <span aria-hidden="true" />}
+                          <span className="detail-album-track-liked-cell">
+                            {rowIsLiked ? (
+                              <LikedBadge className="detail-album-track-liked-badge" />
+                            ) : (
+                              <span className="detail-album-track-liked-empty" aria-label="Not liked">-</span>
+                            )}
+                          </span>
                           <button
                             className="detail-album-track-name-button single-line-ellipsis"
                             onClick={() => {
@@ -1505,9 +1588,8 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                               })}
                             </span>
                           ) : null}
-                          <span className="detail-album-track-liked-cell">
+                          <span className="detail-album-track-tags-cell">
                             <span className="detail-album-track-badges">
-                              {rowIsLiked ? <LikedBadge className="detail-album-track-liked-badge" /> : null}
                               {rowRelationTags ? (
                                 <span
                                   className="relation-tags-badge detail-album-track-relation-badge"
@@ -1516,23 +1598,13 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                 >
                                   {rowRelationTags}
                                 </span>
-                              ) : null}
+                              ) : <span className="detail-album-track-tags-empty">-</span>}
                             </span>
                           </span>
+                          <span className="detail-album-track-listen-count">
+                            {rowHistoryPlayCount > 0 ? rowHistoryPlayCount.toLocaleString() : "-"}
+                          </span>
                           <div className="detail-album-track-actions">
-                            {selectedPreview.kind !== "track" && hasPremiumPlayback ? (
-                              <button
-                                aria-label={rowPreviewPlaying ? `Stop preview for ${track.name}` : `Preview ${track.name}`}
-                                className={`detail-album-track-preview-button${rowPreviewActive ? " detail-album-track-preview-button-active" : ""}${rowPreviewPlayed ? " detail-album-track-preview-button-played" : ""}`}
-                                disabled={!rowTrackUri}
-                                onClick={() => {
-                                  void toggleAlbumTrackPreview(track, rowTrackUri);
-                                }}
-                                type="button"
-                              />
-                            ) : selectedPreview.kind !== "track" ? (
-                              <span className="detail-album-track-preview-placeholder" aria-hidden="true" />
-                            ) : null}
                             {rowLastPlayed ? (
                               <span className="detail-album-track-last-played">{rowLastPlayed}</span>
                             ) : rowIsUnlistened ? (
@@ -1566,6 +1638,25 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                   onSelectAlbum={openArtistAlbumPreview}
                 />
               </div>
+            ) : null}
+            {selectedPreview.kind === "playlist" ? (
+              <PlaylistTrackList
+                currentTrackUri={currentTrack?.uri ?? null}
+                entries={playlistTrackEntries}
+                error={playlistTrackEntriesError}
+                formatPlaybackClock={formatPlaybackClock}
+                hasMore={playlistTrackEntriesHasMore}
+                hasPremiumPlayback={hasPremiumPlayback}
+                isTrackPlaying={isTrackPlaying}
+                loading={playlistTrackEntriesLoading}
+                onPlayAll={handlePlaylistPlayAll}
+                onPlayTrack={handlePlaylistTrackPlayback}
+                onSelectTrack={openRecentPlayerTrackDetails}
+                playbackDurationMs={playbackDurationMs}
+                playbackPaused={playbackPaused}
+                playbackPositionMs={playbackPositionMs}
+                trackUriWithFallback={trackUriWithFallback}
+              />
             ) : null}
             {selectedPreview.kind === "track" && selectedPreviewDetailView === "release" && selectedPreviewReleaseSourceVersions.length > 1 ? (
               <div className="detail-modal-recording-variations detail-modal-release-source-albums">

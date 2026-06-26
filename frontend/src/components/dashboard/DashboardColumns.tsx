@@ -6,6 +6,7 @@ import {
   formatAlbumBreadth,
   formatAlbumSummary,
   formatHistoryDebugLine,
+  spotifyPlaylistIdFromUrl,
 } from "../../utils/dashboardUtils";
 import { DashboardListCard } from "./DashboardListCard";
 import { DashboardPaging } from "./DashboardPaging";
@@ -183,25 +184,28 @@ export function DashboardPlaylistColumn({
   return (
     <>
       <div className="item-list">
-        {pageItems.map((playlist, index) => (
-          <DashboardListCard
-            key={playlist.playlist_id ?? `${playlist.name}-${index}-${section}`}
-            href={playlist.url}
-            entityId={playlist.playlist_id}
-            imageUrl={playlist.image_url}
-            imageAlt={`${playlist.name ?? "Playlist"} cover`}
-            fallbackLabel="P"
-            primaryText={playlist.name ?? "Untitled playlist"}
-            primaryClamp="two-line-clamp"
-            secondaryText={playlist.description?.trim() || null}
-            tertiaryText={
-              playlist.track_count != null ? `${playlist.track_count} tracks` : "Playlist"
-            }
-            previewKind="playlist"
-            previewTrackUri={null}
-            onSelectPreview={onSelectPreview}
-          />
-        ))}
+        {pageItems.map((playlist, index) => {
+          const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+          return (
+            <DashboardListCard
+              key={playlistId ?? `${playlist.name}-${index}-${section}`}
+              href={playlist.url}
+              entityId={playlistId}
+              imageUrl={playlist.image_url}
+              imageAlt={`${playlist.name ?? "Playlist"} cover`}
+              fallbackLabel="P"
+              primaryText={playlist.name ?? "Untitled playlist"}
+              primaryClamp="two-line-clamp"
+              secondaryText={playlist.description?.trim() || null}
+              tertiaryText={
+                playlist.track_count != null ? `${playlist.track_count} tracks` : "Playlist"
+              }
+              previewKind="playlist"
+              previewTrackUri={null}
+              onSelectPreview={onSelectPreview}
+            />
+          );
+        })}
         {Array.from({ length: emptySlots(pageItems) }).map((_, index) => (
           <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
         ))}

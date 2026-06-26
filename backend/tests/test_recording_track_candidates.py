@@ -439,6 +439,21 @@ class RecordingTrackClassifierTests(unittest.TestCase):
         self.assertEqual("variant_flag_excluded", item["evidence_bucket"])
         self.assertIn("radio/edit variant should not silently collapse into recording_track", item["why_review"])
 
+    def test_extended_overdrive_joins_tick_of_the_clock_family(self) -> None:
+        item = classify_recording_track_candidate_group(
+            [
+                _member(1, "Tick of the Clock", artist="Chromatics", duration_ms=288_200),
+                _member(2, "Tick Of The Clock (Film Edit)", artist="Chromatics", duration_ms=287_624),
+                _member(3, "Tick Of The Clock (Visione's The Stroke Of Midnight Remix)", artist="Chromatics", duration_ms=282_259),
+                _member(4, "Tick Of The Clock (Extended Overdrive)", artist="Chromatics", duration_ms=564_602),
+            ]
+        )
+
+        self.assertEqual("track_family_candidate", item["candidate_type"])
+        self.assertEqual("remix", item["relationship_kind"])
+        self.assertEqual({1, 2, 3, 4}, {member["release_track_id"] for member in item["members"]})
+        self.assertEqual("variant_flag_excluded", item["evidence_bucket"])
+
     def test_title_artist_only_missing_isrc_and_duration_needs_review(self) -> None:
         item = classify_recording_track_candidate_group(
             [

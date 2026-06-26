@@ -24,6 +24,19 @@ export type DebugSession = {
   endedAt: number | null;
 };
 
+export function spotifyPlaylistIdFromUrl(url: string | null | undefined) {
+  const value = String(url ?? "").trim();
+  if (!value) {
+    return null;
+  }
+  const uriMatch = value.match(/^spotify:playlist:([^/?#]+)/i);
+  if (uriMatch?.[1]) {
+    return uriMatch[1];
+  }
+  const urlMatch = value.match(/\/playlist\/([^/?#]+)/i);
+  return urlMatch?.[1] ?? null;
+}
+
 export function clampProgress(progressMs: number, durationMs: number) {
   const safeDuration = Math.max(0, Number(durationMs || 0));
   const safeProgress = Math.max(0, Number(progressMs || 0));
@@ -308,9 +321,12 @@ export function previewItems(
 ) {
   return items
     .map((item) => {
-      const sourceLabel = item.name ?? item.track_name ?? item.playlist_name ?? "";
+      const playlistId = item.playlist_id ?? spotifyPlaylistIdFromUrl(item.playlist_url ?? item.url);
+      const isPlaylist = Boolean(playlistId || item.playlist_name);
+      const sourceLabel = isPlaylist
+        ? item.playlist_name ?? item.name ?? ""
+        : item.name ?? item.track_name ?? "";
       const isTrack = Boolean(item.track_name);
-      const isPlaylist = Boolean(item.playlist_name);
       const kind: PreviewItem["kind"] = isTrack
         ? "track"
         : isPlaylist
@@ -345,7 +361,7 @@ export function previewItems(
         entityId: isTrack
           ? item.track_id ?? null
           : isPlaylist
-            ? item.playlist_id ?? null
+            ? playlistId
             : item.album_id ?? item.artist_id ?? null,
         trackUri: item.uri ?? null,
         url: item.url ?? item.album_url ?? item.playlist_url ?? "",

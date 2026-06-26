@@ -16,14 +16,61 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- pending: activity snapshot invalidation, KID A MNESIA combined editions, artist-view tracks
+- pending: playlist tracklists, album overlay layout, soundtrack listen-history enrichment, and related frontend/backend cleanup
 
 Worktree at handoff:
-- current batch is verified and ready to commit
-- do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in the commit
+- current playlist/album batch is verified and being committed
+- pre-existing Identity Audit UI edits are still dirty and intentionally not part of this commit unless explicitly requested:
+  - `frontend/src/components/identityAudit/*`
+  - deleted `frontend/src/components/identityAudit/ArtistPromotionSkipsTab.tsx`
+- do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in commits
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
+
+## Latest Completed: Playlist Tracklists And Album Overlay
+
+Backend:
+- Spotify OAuth default scope includes both `playlist-read-private` and `playlist-read-collaborative`.
+- `/auth/playback/playlist-tracks` now fetches `/v1/playlists/{playlist_id}/items`, not `/tracks`, because Spotify can return playlist metadata while returning `403 Forbidden` for `/tracks` on user-owned playlists.
+- Playlist 403 handling now checks stored scopes before suggesting reauth, preserves Spotify's raw denial detail, and logs playlist id/user id/missing scopes/detail.
+- Shared Spotify HTTP helpers preserve 403 details instead of always reporting missing scope.
+- `/auth/playback/album-tracks` supports partial local rows, local-only mode, force-Spotify completion, and identity promotion after user-opened album context.
+- Album row enrichment now exposes exact source history, release-track history, generated recording history, and a guarded base-title/artist fallback for Spotify relinks and soundtrack naming differences.
+- The fallback filled local Drive soundtrack rows:
+  - `Nightcall` -> 10 listens via original Nightcall source
+  - `Under Your Spell` -> 14 listens via Desire source
+  - `A Real Hero (feat. Electric Youth)` -> 18 listens via related versions
+  - `Oh My Love (feat. Katyna Ranieri)` -> 4 listens via `Oh My Love - Main Theme`
+  - `Tick of the Clock` -> 25 listens via Film Edit/remix versions
+- `Tick Of The Clock (Extended Overdrive)` is classified as a variant through the existing `extended` descriptor while preserving `overdrive` as non-generic by itself.
+
+Frontend:
+- Playlist cards open a real `PlaylistTrackList` overlay, with play-all, row playback, current-track state, loading/error/empty states, and parsed playlist ids from URLs.
+- Landing hero no longer shows the old debug buttons:
+  - `Connect Spotify and ingest recent plays`
+  - `Probe recent API before 90 days`
+  - `Probe recent API paging (50 x up to 10)`
+- Album overlay now places cover art on the left, title/year/artist/info on the right, and the album tracklist as a full-width section below.
+- Album tracklist columns are now track number, preview, play, liked, track title, optional `With`, tags, listens, and last.
+- Album liked state includes a best-effort Spotify saved-album star under the artist/info block.
+- Album partial-enrichment disclaimer appears when local partial rows are shown and disappears once complete rows are available.
+- Related album sections split `Other Versions` from broader `Related Albums`.
+
+Docs updated:
+- `README.md`
+- `docs/overview/architecture.md`
+- `docs/overview/context.md`
+- `docs/reference/spotify-catalog-backfill.md`
+- `docs/reference/source-track-resolution-policy.md`
+- `docs/reference/refactor-notes.md`
+- `docs/current-handoff.md`
+
+Latest checks for this batch:
+- `./.venv/bin/python -m unittest backend.tests.test_catalog_identity_promotion` passed, 6 tests.
+- `./.venv/bin/python -m py_compile backend/app/release_track_metadata.py backend/app/routes/playback_routes.py backend/app/spotify_http.py backend/app/main.py backend/app/config.py` passed during the session.
+- `cd frontend && npm run build` passed; existing large-chunk warning remains.
+- `git diff --check` passed on edited backend/frontend/doc files.
 
 ## Completed: Recover Orphan History Projection
 The user discovered that `Radiohead - Paranoid Android` incorrectly had no qualified listen. The missing complete play was:

@@ -181,6 +181,14 @@ class TrackVariantPolicyTests(unittest.TestCase):
             [component.normalized_label for component in interpretation.components],
         )
 
+    def test_interpret_track_variant_title_treats_overdrive_as_mix_treatment(self) -> None:
+        interpretation = interpret_track_variant_title("Tick Of The Clock (Extended Overdrive)")
+
+        self.assertEqual("Tick Of The Clock", interpretation.base_title_anchor)
+        self.assertEqual("version", interpretation.dominant_family)
+        self.assertEqual("attributed_derived_version", interpretation.dominant_semantic_category)
+        self.assertEqual(["extended overdrive"], [component.normalized_label for component in interpretation.components])
+
     def test_year_and_soundtrack_classification_use_policy_semantics(self) -> None:
         year = classify_variant_component("1973")
         placement = classify_score_soundtrack_label('From "Better Call Saul"')

@@ -139,6 +139,16 @@ export async function fetchLikedTracksContains(spotifyTrackIds: string[]): Promi
   return (await response.json()) as { items: Record<string, boolean> };
 }
 
+export async function fetchLikedAlbumContains(spotifyAlbumId: string): Promise<{ spotify_album_id: string; is_liked: boolean; source: string }> {
+  const response = await fetch(`${apiBaseUrl}/me/liked-albums/contains?spotify_album_id=${encodeURIComponent(spotifyAlbumId)}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error(`Liked Album Contains (${response.status})`);
+  }
+  return (await response.json()) as { spotify_album_id: string; is_liked: boolean; source: string };
+}
+
 export async function postLikedTracksSync(mode: "quick" | "full" = "quick"): Promise<LikedTracksSyncResponse> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const body: { mode: "quick" | "full"; simulate_failure_reason?: string } = { mode };

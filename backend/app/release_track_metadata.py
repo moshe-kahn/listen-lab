@@ -4,6 +4,162 @@ import sqlite3
 from typing import Any
 
 from backend.app.db import _normalize_fallback_artist_text, _stable_text_key, sqlite_connection
+from backend.app.track_variant_policy import interpret_track_variant_title
+
+
+def _normalize_match_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _title_match_keys(value: Any) -> set[str]:
+    raw = str(value or "").strip()
+    normalized = _normalize_match_text(raw)
+    keys = {normalized} if normalized else set()
+    if not raw:
+        return keys
+    interpretation = interpret_track_variant_title(raw)
+    base = _normalize_match_text(interpretation.base_title_anchor)
+    if base:
+        keys.add(base)
+    for suffix in (" - main theme", " main theme"):
+        if base.endswith(suffix):
+            stripped = base[: -len(suffix)].strip()
+            if stripped:
+                keys.add(stripped)
+    return keys
+
+
+def _sqlite_like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _artist_match_names_from_row(row: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    artists = row.get("artists")
+    if isinstance(artists, list):
+        for artist in artists:
+            if isinstance(artist, dict):
+                normalized = _normalize_match_text(artist.get("name"))
+                if normalized:
+                    names.add(normalized)
+            elif isinstance(artist, str):
+                normalized = _normalize_match_text(artist)
+                if normalized:
+                    names.add(normalized)
+    artist_name = row.get("artist_name")
+    if isinstance(artist_name, str):
+        for part in artist_name.replace(";", ",").split(","):
+            normalized = _normalize_match_text(part)
+            if normalized:
+                names.add(normalized)
+    return names
+
+
+def _fallback_recording_play_history_for_rows(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    targets: dict[int, dict[str, Any]] = {}
+    title_values: set[str] = set()
+    for row in rows:
+        release_track_id = row.get("release_track_id")
+        if not isinstance(release_track_id, int):
+            continue
+        title_keys = _title_match_keys(row.get("name") or row.get("release_track_name"))
+        artist_names = _artist_match_names_from_row(row)
+        if not title_keys or not artist_names:
+            continue
+        targets[release_track_id] = {
+            "title_keys": title_keys,
+            "artist_names": artist_names,
+        }
+        title_values.update(title_keys)
+    if not targets or not title_values:
+        return {}
+    placeholders = ",".join("?" for _ in title_values)
+    like_clauses = " OR ".join("lower(trim(fact.track_name_canonical)) LIKE ? ESCAPE '\\'" for _ in title_values)
+    title_filter_sql = f"(lower(trim(fact.track_name_canonical)) IN ({placeholders})"
+    if like_clauses:
+        title_filter_sql += f" OR {like_clauses}"
+    title_filter_sql += ")"
+    sorted_title_values = tuple(sorted(title_values))
+    like_values = tuple(f"{_sqlite_like_escape(value)}%" for value in sorted_title_values)
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        candidate_rows = connection.execute(
+            f"""
+            SELECT DISTINCT
+              fact.spotify_track_id,
+              fact.track_name_canonical,
+              fact.artist_name_canonical,
+              play_counts.play_count,
+              play_counts.first_played_at,
+              play_counts.last_played_at,
+              mapped.release_track_id AS mapped_release_track_id
+            FROM fact_play_event fact
+            JOIN source_track_play_count_cache play_counts
+              ON play_counts.spotify_track_id = fact.spotify_track_id
+            LEFT JOIN source_track source
+              ON source.source_name IN ('spotify', 'spotify_uri')
+             AND (
+               source.external_id = fact.spotify_track_id
+               OR source.external_id = 'spotify:track:' || fact.spotify_track_id
+             )
+            LEFT JOIN source_track_map mapped
+              ON mapped.source_track_id = source.id
+             AND mapped.status = 'accepted'
+            WHERE {title_filter_sql}
+              AND fact.spotify_track_id IS NOT NULL
+            """,
+            (*sorted_title_values, *like_values),
+        ).fetchall()
+    fallback: dict[int, dict[str, Any]] = {}
+    seen_track_ids_by_release_track_id: dict[int, set[str]] = {}
+    for candidate in candidate_rows:
+        title_keys = _title_match_keys(candidate["track_name_canonical"])
+        artist_names = {
+            _normalize_match_text(part)
+            for part in str(candidate["artist_name_canonical"] or "").replace(";", ",").split(",")
+        }
+        artist_names.discard("")
+        if not title_keys or not artist_names:
+            continue
+        spotify_track_id = str(candidate["spotify_track_id"] or "").strip()
+        if not spotify_track_id:
+            continue
+        for release_track_id, target in targets.items():
+            if not title_keys.intersection(target["title_keys"]) or not artist_names.intersection(target["artist_names"]):
+                continue
+            seen_track_ids = seen_track_ids_by_release_track_id.setdefault(release_track_id, set())
+            if spotify_track_id in seen_track_ids:
+                continue
+            seen_track_ids.add(spotify_track_id)
+            play_count = int(candidate["play_count"] or 0)
+            current = fallback.setdefault(
+                release_track_id,
+                {
+                    "play_count": 0,
+                    "first_played_at": None,
+                    "last_played_at": None,
+                    "release_track_ids": set(),
+                },
+            )
+            current["play_count"] += play_count
+            first_played_at = candidate["first_played_at"]
+            last_played_at = candidate["last_played_at"]
+            if first_played_at and (current["first_played_at"] is None or str(first_played_at) < str(current["first_played_at"])):
+                current["first_played_at"] = first_played_at
+            if last_played_at and (current["last_played_at"] is None or str(last_played_at) > str(current["last_played_at"])):
+                current["last_played_at"] = last_played_at
+            mapped_release_track_id = candidate["mapped_release_track_id"]
+            if isinstance(mapped_release_track_id, int):
+                current["release_track_ids"].add(mapped_release_track_id)
+    return {
+        release_track_id: {
+            "play_count": int(history["play_count"] or 0),
+            "first_played_at": history["first_played_at"],
+            "last_played_at": history["last_played_at"],
+            "release_track_ids": sorted(history["release_track_ids"]),
+        }
+        for release_track_id, history in fallback.items()
+        if int(history["play_count"] or 0) > 0
+    }
 
 
 def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -405,6 +561,7 @@ def enrich_track_rows_with_release_metadata(
         for row in enriched
         if isinstance(row.get("release_track_id"), int)
     ])
+    fallback_recording_history_by_release_track_id = _fallback_recording_play_history_for_rows(enriched)
     play_history_by_track_id = play_history_for_spotify_ids([
         str(row.get(track_id_key) or "").strip()
         for row in enriched
@@ -439,6 +596,10 @@ def enrich_track_rows_with_release_metadata(
             recording_history_by_release_track_id.get(release_track_id)
             if isinstance(release_track_id, int)
             else None
+        ) or (
+            fallback_recording_history_by_release_track_id.get(release_track_id)
+            if isinstance(release_track_id, int)
+            else None
         ) or play_history
         recording_release_track_ids = (
             recording_release_track_ids_by_release_track_id.get(release_track_id)
@@ -448,7 +609,12 @@ def enrich_track_rows_with_release_metadata(
         if recording_release_track_ids:
             row["recording_release_track_ids"] = recording_release_track_ids
         elif isinstance(release_track_id, int):
-            row["recording_release_track_ids"] = [release_track_id]
+            fallback_release_track_ids = (
+                fallback_recording_history_by_release_track_id.get(release_track_id, {}).get("release_track_ids", [])
+                if isinstance(release_track_id, int)
+                else []
+            )
+            row["recording_release_track_ids"] = sorted({release_track_id, *fallback_release_track_ids})
         else:
             row["recording_release_track_ids"] = []
         if recording_history:

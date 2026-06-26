@@ -78,8 +78,6 @@ import type {
   PreviewItem,
   AuthTokenResponse,
   RecentIngestResultResponse,
-  RecentBeforeProbeResponse,
-  RecentBackfillProbeResponse,
   FullAvailabilityResponse,
   CurrentPlaybackSnapshot,
   CurrentPlaybackResponse,
@@ -145,6 +143,7 @@ import {
   fetchAllLikedTracks,
   fetchActivityListeningLog,
   fetchArtistAlbumEvidence,
+  fetchLikedAlbumContains,
   fetchLikedTracksContains,
   fetchRecordingTrackCandidateByReleaseTrack,
   fetchReleaseTrackDetail,
@@ -243,6 +242,7 @@ import {
   primaryArtistName,
   recentRangeLabel,
   sortedTracksForView,
+  spotifyPlaylistIdFromUrl,
   trackLookupRowCanBulkPrioritize,
 } from "./utils/dashboardUtils";
 
@@ -409,9 +409,6 @@ export function App() {
   const [statusMessage, setStatusMessage] = useState("Checking authentication state...");
   const [statusHistory, setStatusHistory] = useState<string[]>([]);
   const [recentIngestCallbackPending, setRecentIngestCallbackPending] = useState(false);
-  const [recentIngestResult, setRecentIngestResult] = useState<RecentIngestResultResponse | null>(null);
-  const [recentBeforeProbeResult, setRecentBeforeProbeResult] = useState<RecentBeforeProbeResponse | null>(null);
-  const [recentBackfillProbeResult, setRecentBackfillProbeResult] = useState<RecentBackfillProbeResponse | null>(null);
   const [authTransitioning, setAuthTransitioning] = useState(false);
   const [loadingProfile, setLoadingProfile] = useState(false);
   const [loadingExtendedProfile, setLoadingExtendedProfile] = useState(false);
@@ -428,6 +425,9 @@ export function App() {
   const [targetedLikedTrackCheckedById, setTargetedLikedTrackCheckedById] = useState<Record<string, boolean>>({});
   const [localBookmarkedTrackById, setLocalBookmarkedTrackById] = useState<Record<string, boolean>>({});
   const [localStarredTrackById, setLocalStarredTrackById] = useState<Record<string, boolean>>({});
+  const [localStarredAlbumById, setLocalStarredAlbumById] = useState<Record<string, boolean>>({});
+  const [targetedLikedAlbumById, setTargetedLikedAlbumById] = useState<Record<string, boolean>>({});
+  const [targetedLikedAlbumCheckedById, setTargetedLikedAlbumCheckedById] = useState<Record<string, boolean>>({});
   const [trackSummaryChipCache, setTrackSummaryChipCache] = useState<Record<string, {
     durationLabel?: string | null;
     lastListenedLabel?: string | null;
@@ -469,6 +469,7 @@ export function App() {
   const [detailOptionsOpen, setDetailOptionsOpen] = useState(false);
   const [artistAlbumEvidenceItems, setArtistAlbumEvidenceItems] = useState<ArtistAlbumEvidenceItem[] | null>(null);
   const [artistTrackEvidenceItems, setArtistTrackEvidenceItems] = useState<ArtistTrackEvidenceItem[] | null>(null);
+  const [artistAlbumEvidenceLoading, setArtistAlbumEvidenceLoading] = useState(false);
   const [artistViewMode, setArtistViewMode] = useState<ArtistViewMode>("core");
   const [artistIncludeSingles, setArtistIncludeSingles] = useState(false);
   const [artistTrackSort, setArtistTrackSort] = useState<{ key: ArtistTrackSortKey; direction: SortDirection }>({
@@ -488,6 +489,11 @@ export function App() {
   } | null>(null);
   const [albumTrackSpotifyFetchPending, setAlbumTrackSpotifyFetchPending] = useState(false);
   const [albumTrackLastSortMode, setAlbumTrackLastSortMode] = useState<LastPlayedSortMode>(null);
+  const [playlistTrackEntries, setPlaylistTrackEntries] = useState<RecentTrack[]>([]);
+  const [playlistTrackEntriesLoading, setPlaylistTrackEntriesLoading] = useState(false);
+  const [playlistTrackEntriesError, setPlaylistTrackEntriesError] = useState<string | null>(null);
+  const [playlistTrackEntriesHasMore, setPlaylistTrackEntriesHasMore] = useState(false);
+  const playlistTrackEntriesCacheRef = useRef<Record<string, { items: RecentTrack[]; hasMore: boolean }>>({});
   const [hoveredAlbumWithArtistName, setHoveredAlbumWithArtistName] = useState<string | null>(null);
   const [homeAlbumExpanded, setHomeAlbumExpanded] = useState(false);
   const [homeAlbumTrackEntries, setHomeAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
@@ -772,6 +778,7 @@ export function App() {
   const listeningLogLoadInFlightRef = useRef(false);
   const releaseTrackMetadataInFlightIdsRef = useRef<Set<string>>(new Set());
   const targetedLikedInFlightIdsRef = useRef<Set<string>>(new Set());
+  const targetedLikedAlbumInFlightIdsRef = useRef<Set<string>>(new Set());
   const hasPremiumPlayback = profile?.product?.toLowerCase() === "premium";
   const usingLivePlaybackSnapshot = Boolean(livePlaybackSnapshot);
   const livePlaybackTrackSummary: PlayerTrackSummary | null = useMemo(() => (livePlaybackSnapshot
@@ -1155,6 +1162,19 @@ export function App() {
     selectedPreview?.kind === "track"
     && (selectedPreview.albumId || selectedPreview.sourceTrack?.album_id || selectedPreview.sourceTrack?.album_name || selectedPreview.detail),
   );
+  const selectedPreviewAlbumSpotifyId = selectedPreview?.kind === "album"
+    ? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? selectedPreview.entityId
+    : null;
+  const selectedPreviewAlbumIsSpotifyLiked = Boolean(
+    selectedPreviewAlbumSpotifyId
+    && (
+      localStarredAlbumById[selectedPreviewAlbumSpotifyId] === true
+      || (
+        localStarredAlbumById[selectedPreviewAlbumSpotifyId] !== false
+        && targetedLikedAlbumById[selectedPreviewAlbumSpotifyId] === true
+      )
+    ),
+  );
   const selectedPreviewMatchedAlbumTrack = selectedPreview?.kind === "track"
     ? (
       albumTrackEntries.find((row) => {
@@ -1288,6 +1308,7 @@ export function App() {
     if (!selectedPreviewArtistAlbumRequestKey || (selectedPreview?.kind !== "artist" && selectedPreview?.kind !== "album")) {
       setArtistAlbumEvidenceItems(null);
       setArtistTrackEvidenceItems(null);
+      setArtistAlbumEvidenceLoading(false);
       return;
     }
     const artistNames = selectedPreviewArtistEvidenceArtists
@@ -1296,9 +1317,11 @@ export function App() {
     if (artistNames.length === 0) {
       setArtistAlbumEvidenceItems(null);
       setArtistTrackEvidenceItems(null);
+      setArtistAlbumEvidenceLoading(false);
       return;
     }
     let cancelled = false;
+    setArtistAlbumEvidenceLoading(true);
     fetchArtistAlbumEvidence(
       artistNames,
       selectedPreview.sourceAlbumId ?? selectedPreview.sourceTrack?.album_id ?? null,
@@ -1334,6 +1357,11 @@ export function App() {
         if (!cancelled) {
           setArtistAlbumEvidenceItems(null);
           setArtistTrackEvidenceItems(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setArtistAlbumEvidenceLoading(false);
         }
       });
     return () => {
@@ -1476,7 +1504,7 @@ export function App() {
     if (selectedPreview?.kind !== "artist") {
       return [];
     }
-    if (artistTrackEvidenceItems) {
+    if (artistTrackEvidenceItems && artistTrackEvidenceItems.length > 0) {
       return artistTrackEvidenceItems;
     }
     const targetNames = selectedPreviewArtists
@@ -1487,7 +1515,13 @@ export function App() {
     }
     const seen = new Set<string>();
     return knownPlayerTracks
-      .filter((track) => targetNames.some((artistName) => artistNameMatches(track.artist_name, artistName)))
+      .filter((track) => {
+        const trackArtists = uniqueArtistEntries(track.artists, artistEntriesFromText(track.artist_name));
+        return targetNames.some((artistName) => (
+          artistNameMatches(track.artist_name, artistName)
+          || trackArtists.some((artist) => artistNameMatches(artist.name, artistName))
+        ));
+      })
       .map((track): ArtistTrackEvidenceItem => ({
         track_id: track.track_id,
         track_name: track.track_name ?? "Unknown track",
@@ -2999,11 +3033,16 @@ export function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          setAlbumTrackEntriesError(
-            error instanceof DOMException && error.name === "AbortError"
-              ? "Album track list took too long to load."
-              : error instanceof Error ? error.message : "Album track list could not be loaded.",
-          );
+          if (error instanceof DOMException && error.name === "AbortError" && albumTrackEntries.length > 0) {
+            setAlbumTrackEntriesError(null);
+            setAlbumTrackEntriesPartial(true);
+          } else {
+            setAlbumTrackEntriesError(
+              error instanceof DOMException && error.name === "AbortError"
+                ? "Album track list took too long to load."
+                : error instanceof Error ? error.message : "Album track list could not be loaded.",
+            );
+          }
         }
       } finally {
         window.clearTimeout(timeoutId);
@@ -3121,6 +3160,32 @@ export function App() {
     selectedPreviewReleaseTrackDetailReady,
     targetedLikedTrackCheckedById,
   ]);
+
+  useEffect(() => {
+    const albumId = selectedPreviewAlbumSpotifyId;
+    if (
+      !albumId
+      || targetedLikedAlbumCheckedById[albumId]
+      || targetedLikedAlbumInFlightIdsRef.current.has(albumId)
+    ) {
+      return;
+    }
+    targetedLikedAlbumInFlightIdsRef.current.add(albumId);
+    fetchLikedAlbumContains(albumId).then((payload) => {
+      setTargetedLikedAlbumById((current) => ({
+        ...current,
+        [albumId]: Boolean(payload.is_liked),
+      }));
+      setTargetedLikedAlbumCheckedById((current) => ({
+        ...current,
+        [albumId]: true,
+      }));
+    }).catch(() => {
+      // Album star enrichment is best-effort.
+    }).finally(() => {
+      targetedLikedAlbumInFlightIdsRef.current.delete(albumId);
+    });
+  }, [selectedPreviewAlbumSpotifyId, targetedLikedAlbumCheckedById]);
 
   useEffect(() => {
     if (!hoveredAlbumWithArtistName || !albumTrackListRef.current) {
@@ -3318,6 +3383,87 @@ export function App() {
       cancelled = true;
     };
   }, [experienceMode, homeAlbumExpanded, playerDisplayAlbumId, playerDisplayTrack, profile?.recent_likes_tracks, profile?.recent_top_tracks, profile?.recent_tracks, profile?.top_tracks, spotifyCooldownActive]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const playlistId = selectedPreview?.kind === "playlist"
+      ? selectedPreview.entityId ?? spotifyPlaylistIdFromUrl(selectedPreview.url)
+      : null;
+    if (!playlistId) {
+      setPlaylistTrackEntries([]);
+      setPlaylistTrackEntriesLoading(false);
+      setPlaylistTrackEntriesError(selectedPreview?.kind === "playlist" ? "Playlist tracks cannot be loaded because this playlist is missing a Spotify id." : null);
+      setPlaylistTrackEntriesHasMore(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const normalizedPlaylistId = playlistId;
+    const cachedPlaylistTrackEntries = playlistTrackEntriesCacheRef.current[normalizedPlaylistId];
+    if (cachedPlaylistTrackEntries) {
+      setPlaylistTrackEntries(cachedPlaylistTrackEntries.items);
+      setPlaylistTrackEntriesHasMore(cachedPlaylistTrackEntries.hasMore);
+      setPlaylistTrackEntriesLoading(false);
+      setPlaylistTrackEntriesError(cachedPlaylistTrackEntries.items.length === 0 ? "No tracks were returned for this playlist." : null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadPlaylistTrackEntries() {
+      setPlaylistTrackEntriesLoading(true);
+      setPlaylistTrackEntriesError(null);
+      setPlaylistTrackEntriesHasMore(false);
+      try {
+        const params = new URLSearchParams({
+          playlist_id: normalizedPlaylistId,
+          limit: "500",
+        });
+        const response = await fetch(`${apiBaseUrl}/auth/playback/playlist-tracks?${params.toString()}`, {
+          credentials: "include",
+        });
+        if (!response.ok) {
+          let detail = `Failed to load playlist tracks (${response.status}).`;
+          try {
+            const payload = (await response.json()) as { detail?: string };
+            if (payload.detail) {
+              detail = payload.detail;
+            }
+          } catch {
+            // Keep status fallback.
+          }
+          throw new Error(detail);
+        }
+        const payload = (await response.json()) as {
+          items?: RecentTrack[];
+          has_more?: boolean | null;
+        };
+        if (!cancelled) {
+          const items = payload.items ?? [];
+          const hasMore = Boolean(payload.has_more);
+          playlistTrackEntriesCacheRef.current[normalizedPlaylistId] = { items, hasMore };
+          setPlaylistTrackEntries(items);
+          setPlaylistTrackEntriesHasMore(hasMore);
+          setPlaylistTrackEntriesError(items.length === 0 ? "No tracks were returned for this playlist." : null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPlaylistTrackEntriesError(error instanceof Error ? error.message : "Playlist tracks could not be loaded.");
+          setPlaylistTrackEntries([]);
+          setPlaylistTrackEntriesHasMore(false);
+        }
+      } finally {
+        if (!cancelled) {
+          setPlaylistTrackEntriesLoading(false);
+        }
+      }
+    }
+
+    void loadPlaylistTrackEntries();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPreview?.entityId, selectedPreview?.kind, selectedPreview?.url]);
 
   async function fetchPlaybackToken() {
     if (experienceMode === "local") {
@@ -5970,6 +6116,91 @@ export function App() {
     }
   }
 
+  function playerSummaryFromPlaylistTrack(track: RecentTrack): PlayerTrackSummary {
+    const trackUri = trackUriWithFallback(track.uri, track.track_id);
+    return {
+      name: track.track_name ?? "Unknown track",
+      artists: track.artist_name ?? "Unknown artist",
+      album: track.album_name ?? selectedPreview?.label ?? "Unknown album",
+      image: track.image_url ?? selectedPreview?.image ?? null,
+      uri: trackUri,
+      durationMs: Math.max(0, track.duration_ms ?? 0),
+    };
+  }
+
+  function buildPlaylistPlaybackQueue(selectedTrackUri: string | null) {
+    const playableTracks = playlistTrackEntries
+      .map((track) => {
+        const uri = trackUriWithFallback(track.uri, track.track_id);
+        return uri
+          ? {
+            track,
+            uri,
+          }
+          : null;
+      })
+      .filter((item): item is { track: RecentTrack; uri: string } => Boolean(item));
+    if (!selectedTrackUri || playableTracks.length === 0) {
+      return null;
+    }
+    const queueCursor = Math.max(0, playableTracks.findIndex((item) => item.uri === selectedTrackUri));
+    return {
+      playlistUris: playableTracks.map((item) => item.uri),
+      queueTracks: playableTracks.map(({ track, uri }) => ({
+        ...playerSummaryFromPlaylistTrack(track),
+        uri,
+        durationMs: Math.max(0, track.duration_ms ?? 0),
+        trackId: track.track_id ?? spotifyTrackIdFromUri(uri),
+        albumId: track.album_id ?? null,
+        isLiked: recentTrackIsKnownLiked(track, track.track_id ?? spotifyTrackIdFromUri(uri)),
+        likedAt: track.liked_at ?? null,
+        artistItems: track.artists ?? null,
+        releaseTrackId: track.release_track_id ?? null,
+        releaseTrackName: track.release_track_name ?? null,
+        releaseTrackSourceCount: track.release_track_source_count ?? null,
+        releaseTrackDuplicateSourceCount: track.release_track_duplicate_source_count ?? null,
+        releaseTrackClusterCandidateType: track.release_track_cluster_candidate_type ?? null,
+        releaseTrackClusterRelationshipKind: track.release_track_cluster_relationship_kind ?? null,
+        hasReleaseTrackSiblings: track.has_release_track_siblings ?? null,
+      })),
+      queueCursor,
+      queueContext: {
+        label: selectedPreview?.label ?? "Playlist",
+        url: selectedPreview?.url ?? null,
+      },
+    };
+  }
+
+  async function handlePlaylistTrackPlayback(track: RecentTrack, action: PlaybackAction) {
+    const trackUri = trackUriWithFallback(track.uri, track.track_id);
+    if (!trackUri) {
+      setPlayerError("This playlist track is not playable.");
+      return;
+    }
+    const playlistQueue = buildPlaylistPlaybackQueue(trackUri);
+    await handlePlaybackAction(action, {
+      trackUri,
+      optimisticTrack: playerSummaryFromPlaylistTrack(track),
+      insertTracks: playlistQueue?.queueTracks,
+      queueCursor: playlistQueue?.queueCursor,
+      queueContext: playlistQueue?.queueContext,
+      queuePlaylistUris: playlistQueue?.playlistUris,
+      queueTracks: playlistQueue?.queueTracks,
+      sourceTrack: track,
+    });
+  }
+
+  async function handlePlaylistPlayAll(action: PlaybackAction = "play_now") {
+    const firstPlayableTrack = playlistTrackEntries
+      .map((track) => ({ track, uri: trackUriWithFallback(track.uri, track.track_id) }))
+      .find((item) => Boolean(item.uri));
+    if (!firstPlayableTrack) {
+      setPlayerError("This playlist does not have a playable first song.");
+      return;
+    }
+    await handlePlaylistTrackPlayback(firstPlayableTrack.track, action);
+  }
+
   async function handleAlbumPlayAll(
     action: PlaybackAction = "play_now",
     entries: AlbumTrackEntry[] = albumTrackEntries,
@@ -6237,10 +6468,6 @@ export function App() {
     window.location.href = `${apiBaseUrl}/auth/login`;
   }
 
-  function startRecentIngestLogin() {
-    window.location.href = `${apiBaseUrl}/auth/login?mode=recent_ingest`;
-  }
-
   async function loadRecentIngestResult() {
     try {
       const response = await fetch(`${apiBaseUrl}/auth/recent-ingest/result`, {
@@ -6251,11 +6478,9 @@ export function App() {
       }
       const data = (await response.json()) as RecentIngestResultResponse;
       if (!data.has_result) {
-        setRecentIngestResult(null);
         setStatusMessage("Spotify auth succeeded, but no ingest result was returned.");
         return;
       }
-      setRecentIngestResult(data);
       if (data.auth_succeeded && data.ingest_succeeded) {
         const earliest = data.earliest_api_played_at ?? "n/a";
         const latest = data.latest_api_played_at ?? "n/a";
@@ -6271,46 +6496,6 @@ export function App() {
       );
     } finally {
       setRecentIngestCallbackPending(false);
-    }
-  }
-
-  async function runRecentBeforeProbe() {
-    try {
-      const response = await fetch(`${apiBaseUrl}/auth/recent-ingest/probe-before?days=90&limit=50`, {
-        credentials: "include",
-      });
-      const data = (await response.json()) as RecentBeforeProbeResponse;
-      if (!response.ok) {
-        throw new Error(data.detail || `Probe failed (${response.status})`);
-      }
-      setRecentBeforeProbeResult(data);
-      setStatusMessage(
-        `Before-90d probe: ${data.returned_items ?? 0} rows (${data.earliest_played_at ?? "n/a"} to ${data.latest_played_at ?? "n/a"}).`,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Before-90d probe failed.";
-      setRecentBeforeProbeResult({ ok: false, detail: message });
-      setStatusMessage(`Before-90d probe failed: ${message}`);
-    }
-  }
-
-  async function runRecentBackfillProbe() {
-    try {
-      const response = await fetch(`${apiBaseUrl}/auth/recent-ingest/probe-backfill?limit=50&max_pages=10`, {
-        credentials: "include",
-      });
-      const data = (await response.json()) as RecentBackfillProbeResponse;
-      if (!response.ok) {
-        throw new Error(data.detail || `Backfill probe failed (${response.status})`);
-      }
-      setRecentBackfillProbeResult(data);
-      setStatusMessage(
-        `Backfill probe: ${data.total_items ?? 0} items across ${data.pages_fetched ?? 0} pages (${data.earliest_played_at ?? "n/a"} to ${data.latest_played_at ?? "n/a"}).`,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Backfill probe failed.";
-      setRecentBackfillProbeResult({ ok: false, detail: message });
-      setStatusMessage(`Backfill probe failed: ${message}`);
     }
   }
 
@@ -11506,8 +11691,17 @@ export function App() {
     });
   };
   const renderSelectedPreviewArtistTrackSection = () => {
+    if (artistAlbumEvidenceLoading && selectedPreviewArtistTracks.length === 0) {
+      return <p className="empty-copy">Loading artist tracks...</p>;
+    }
     if (selectedPreviewArtistTracksForDisplay.length === 0) {
-      return <p className="empty-copy">No cached tracks found for this artist yet.</p>;
+      return (
+        <p className="empty-copy">
+          {selectedPreviewArtistTracks.length > 0
+            ? "No tracks match the current artist filters."
+            : "No cached tracklist rows are available for this artist yet."}
+        </p>
+      );
     }
     return (
       <div className="detail-modal-artist-tracks">
@@ -11701,14 +11895,8 @@ export function App() {
             heroTitle={heroTitle}
             heroCopy={heroCopy}
             experienceMode={experienceMode}
-            recentIngestResult={recentIngestResult}
-            recentBeforeProbeResult={recentBeforeProbeResult}
-            recentBackfillProbeResult={recentBackfillProbeResult}
             renderExperienceModeToggle={renderExperienceModeToggle}
             handleAuthAction={handleAuthAction}
-            startRecentIngestLogin={startRecentIngestLogin}
-            runRecentBeforeProbe={() => void runRecentBeforeProbe()}
-            runRecentBackfillProbe={() => void runRecentBackfillProbe()}
           />
         ) : null}
 
@@ -12721,6 +12909,7 @@ export function App() {
             albumTrackEntries={albumTrackEntries}
             albumTrackEntriesError={albumTrackEntriesError}
             albumTrackEntriesLoading={albumTrackEntriesLoading}
+            albumTrackEntriesPartial={albumTrackEntriesPartial}
             albumFamilyDiscScrollTarget={albumFamilyDiscScrollTarget}
             albumTrackFetchFromSpotifyLoading={albumTrackSpotifyFetchPending}
             albumTrackMoreOnSpotifyUrl={
@@ -12763,6 +12952,7 @@ export function App() {
             openAlbumWithArtistPreview={openAlbumWithArtistPreview}
             openArtistAlbumPreview={openArtistAlbumPreview}
             openRecordingCandidateReleaseTrack={openRecordingCandidateReleaseTrack}
+            openRecentPlayerTrackDetails={openRecentPlayerTrackDetails}
             openReleaseSourceVersion={openReleaseSourceVersion}
             openSelectedAlbumArtistPreview={openSelectedAlbumArtistPreview}
             openSelectedArtistMemberPreview={openSelectedArtistMemberPreview}
@@ -12772,6 +12962,12 @@ export function App() {
             playbackDurationMs={playbackDurationMs}
             playbackPaused={playbackPaused}
             playbackPositionMs={playbackPositionMs}
+            playlistTrackEntries={playlistTrackEntries}
+            playlistTrackEntriesError={playlistTrackEntriesError}
+            playlistTrackEntriesHasMore={playlistTrackEntriesHasMore}
+            playlistTrackEntriesLoading={playlistTrackEntriesLoading}
+            handlePlaylistPlayAll={handlePlaylistPlayAll}
+            handlePlaylistTrackPlayback={handlePlaylistTrackPlayback}
             playerSummaryFromAlbumTrack={playerSummaryFromAlbumTrack}
             previewAlbumHeading={previewAlbumHeading}
             previewPlayedTrackKeys={previewPlayedTrackKeys}
@@ -12790,8 +12986,10 @@ export function App() {
             selectedPreview={selectedPreview}
             selectedPreviewAlbumGuestArtists={selectedPreviewAlbumGuestArtists}
             selectedPreviewAlbumHasGuestArtists={selectedPreviewAlbumHasGuestArtists}
+            selectedPreviewAlbumIsSpotifyLiked={selectedPreviewAlbumIsSpotifyLiked}
             selectedPreviewAlbumMainArtists={selectedPreviewAlbumMainArtists}
             selectedPreviewAlbumSummary={selectedPreviewAlbumSummary}
+            selectedPreviewAlbumSpotifyId={selectedPreviewAlbumSpotifyId}
             selectedPreviewAlbumContextTagLabel={selectedPreviewAlbumContextTagLabel}
             selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbumsForMode}
             selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForMode}
@@ -12832,12 +13030,14 @@ export function App() {
             setAlbumTrackLastSortMode={setAlbumTrackLastSortMode}
             setDetailOptionsOpen={setDetailOptionsOpen}
             setLocalBookmarkedTrackById={setLocalBookmarkedTrackById}
+            setLocalStarredAlbumById={setLocalStarredAlbumById}
             setLocalStarredTrackById={setLocalStarredTrackById}
             setSelectedPreview={setSelectedPreview}
             setSelectedPreviewDetailView={setSelectedPreviewDetailView}
             spotifyTrackIdFromUri={spotifyTrackIdFromUri}
             switchSelectedTrackAlbumVersion={switchSelectedTrackAlbumVersion}
             toggleAlbumTrackPreview={toggleAlbumTrackPreview}
+            trackUriWithFallback={trackUriWithFallback}
             variationSubtitleFromTitle={variationSubtitleFromTitle}
           />
         </Suspense>

@@ -291,16 +291,18 @@ Current playback UI behavior:
   - shared artist pages show one combined album list
   - empty album sections do not render headings
 - Album/track overlay behavior:
-  - album title shows year inline and album summary shows loaded track count/runtime
+  - album overlay places cover art on the left, title/year/artist/info on the right, and the tracklist as a full-width section below
+  - album title no longer appends the year in parentheses; release year lives in the metadata row with track count/runtime
   - album main artists are derived from artists present across the loaded album tracklist when possible, falling back to majority/metadata evidence when album-wide evidence is unavailable
   - album artist names render inline artist images when available
   - album and track overlays split artists into main artist(s) plus `with ...` guests
-  - album tracklist header shows track count/runtime instead of `Title`
-  - album tracklist has optional `With`, `Tags`, `Preview`, and `Played` columns; the `With` column is removed for albums with no guest artists
-  - liked badges render next to track names, while release/recording tags render in `Tags`
+  - album tracklist header shows track count/runtime above the column header row
+  - standalone album tracklists use columns for track number, preview, play, liked, track title, optional `With`, tags, listens, and last played
+  - liked badges render in their own column, while release/recording tags render in `Tags`
   - release view album-track rows show liked state only for the exact Spotify source track; recording view keeps the aggregate liked fallback across related source versions
+  - standalone album view uses recording-level listen history, including guarded title/artist fallback for Spotify relinks and soundtrack/edit/main-theme naming differences
   - tracklist can stay mounted while the selected album changes, so rows update instead of disappearing into a loading-only state
-  - partial track-overlay album lists auto-complete from Spotify when cooldown allows; during cooldown they stay local-only and show a `More tracks on Spotify` album link
+  - partial track-overlay album lists auto-complete from Spotify when cooldown allows; during cooldown they stay local-only and show a partial-enrichment disclaimer plus `More tracks on Spotify` album link when available
   - tracklist opens centered on the highlighted/current track when possible and renders a small scrollbar-position marker only when the list can scroll
   - top `with ...` list controls delayed row highlighting and scrolls the first matching row into view
   - row-level `With` artists are clickable but do not trigger hover highlighting
@@ -320,6 +322,8 @@ Current playback UI behavior:
   - listened/listen-count breakdown popovers are only clickable in recording view when multiple recording members contribute, and opening one closes the other
   - album context tags such as `Single`, `Soundtrack`, and `Compilation` appear in the bottom tag row when source album metadata or album-title evidence supports them
   - track overlays keep Spotify source track id/URI as playback identity even when release/recording/family evidence is shown
+  - playlist cards open a `PlaylistTrackList` overlay backed by `/auth/playback/playlist-tracks`; backend fetches Spotify `/v1/playlists/{playlist_id}/items` because some user-owned playlists return `403` on `/tracks`
+  - the unauthenticated landing hero only shows the mode toggle and primary login/open button; old recent-ingest/probe debug buttons were removed
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.
 

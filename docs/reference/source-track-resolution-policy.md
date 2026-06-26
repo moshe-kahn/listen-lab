@@ -129,6 +129,20 @@ For overlapping original-album tracks:
 
 Do not choose the original or deluxe album as a global canonical album by default.
 
+### Album Tracklist Listen-History Fallback
+
+Album overlays may display recording-level listen history even when the opened Spotify album row has no exact source-track plays.
+
+Allowed display-only fallback:
+
+- exact Spotify source-track history remains the source of truth for release view
+- generated recording clusters are preferred when available
+- if no generated recording history exists, album-row enrichment may compare parsed base-title keys plus overlapping normalized artist names against local fact/cache history
+- this fallback can bridge Spotify relinks and soundtrack naming differences such as `Nightcall` on a soundtrack versus the original single, `Tick Of The Clock (Film Edit)` versus `Tick of the Clock`, or `Oh My Love - Main Theme` versus `Oh My Love (feat. Katyna Ranieri)`
+- the fallback may fill `recording_play_count`, `recording_last_played_at`, and `recording_release_track_ids`
+
+Do not treat this fallback as an accepted identity merge. It is UI/listen-history enrichment until a reviewed `recording_track` or other durable identity layer exists.
+
 ### Combined Multi-Album Edition
 
 Treat a combined package containing multiple standalone albums as a special album-family display case, not as evidence that the standalone albums are versions of each other.

@@ -40,6 +40,19 @@ def _artist_names_from_json(value: Any) -> list[str]:
     return names
 
 
+def _artist_ids_from_json(value: Any) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in _json_list(value):
+        if not isinstance(item, dict):
+            continue
+        artist_id = str(item.get("artist_id") or item.get("id") or "").strip()
+        if artist_id and artist_id not in seen:
+            seen.add(artist_id)
+            ids.append(artist_id)
+    return ids
+
+
 def _first_image_url(value: Any) -> str | None:
     for item in _json_list(value):
         if isinstance(item, dict):
@@ -609,6 +622,7 @@ def list_artist_album_evidence(
 def list_artist_tracks(
     artist_names: list[str],
     *,
+    artist_ids: list[str] | None = None,
     limit: int = 500,
 ) -> list[dict[str, Any]]:
     targets: list[str] = []
@@ -620,7 +634,8 @@ def list_artist_tracks(
             seen_targets.add(key)
             targets.append(clean_name)
     target_keys = {_normalize_name(name) for name in targets}
-    if not target_keys:
+    target_ids = {str(artist_id or "").strip() for artist_id in (artist_ids or []) if str(artist_id or "").strip()}
+    if not target_keys and not target_ids:
         return []
 
     bounded_limit = max(1, min(int(limit or 500), 1000))
@@ -678,7 +693,8 @@ def list_artist_tracks(
     for row in rows:
         track_artist_names = _artist_names_from_json(row["artists_json"])
         track_artist_keys = {_normalize_name(name) for name in track_artist_names}
-        if not target_keys.intersection(track_artist_keys):
+        track_artist_ids = set(_artist_ids_from_json(row["artists_json"]))
+        if not target_keys.intersection(track_artist_keys) and not target_ids.intersection(track_artist_ids):
             continue
         spotify_track_id = str(row["spotify_track_id"] or "").strip()
         spotify_album_id = str(row["spotify_album_id"] or "").strip()
