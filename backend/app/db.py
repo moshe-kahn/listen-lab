@@ -1554,6 +1554,134 @@ CREATE TABLE IF NOT EXISTS album_family_review (
 CREATE INDEX IF NOT EXISTS idx_album_family_review_family
   ON album_family_review(album_family_id, created_at DESC);
 """,
+    37: """
+CREATE TABLE IF NOT EXISTS spotify_follow_state_cache (
+  user_id TEXT NOT NULL,
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('artist', 'user')),
+  spotify_id TEXT NOT NULL,
+  is_followed INTEGER NOT NULL CHECK (is_followed IN (0, 1)),
+  checked_at TEXT NOT NULL,
+  display_name TEXT,
+  image_url TEXT,
+  url TEXT,
+  raw_json TEXT,
+  PRIMARY KEY (user_id, entity_type, spotify_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_follow_state_cache_user_type_checked
+  ON spotify_follow_state_cache(user_id, entity_type, checked_at);
+""",
+    38: """
+CREATE TABLE IF NOT EXISTS spotify_playlist_cache (
+  user_id TEXT NOT NULL,
+  playlist_id TEXT NOT NULL,
+  name TEXT,
+  description TEXT,
+  owner_id TEXT,
+  owner_name TEXT,
+  is_public INTEGER,
+  is_collaborative INTEGER NOT NULL DEFAULT 0,
+  is_owned INTEGER NOT NULL DEFAULT 0,
+  owner_followed_by_you INTEGER NOT NULL DEFAULT 0,
+  playlist_category TEXT,
+  snapshot_id TEXT,
+  track_count INTEGER,
+  url TEXT,
+  image_url TEXT,
+  metadata_cached_at TEXT NOT NULL,
+  tracks_cached_at TEXT,
+  tracks_cache_complete INTEGER NOT NULL DEFAULT 0,
+  last_sync_started_at TEXT,
+  last_sync_completed_at TEXT,
+  last_sync_error TEXT,
+  raw_json TEXT,
+  PRIMARY KEY (user_id, playlist_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_playlist_cache_user_category
+  ON spotify_playlist_cache(user_id, playlist_category);
+
+CREATE TABLE IF NOT EXISTS spotify_playlist_track_cache (
+  user_id TEXT NOT NULL,
+  playlist_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  spotify_track_id TEXT NOT NULL,
+  uri TEXT,
+  track_name TEXT,
+  artist_name TEXT,
+  album_name TEXT,
+  album_id TEXT,
+  duration_ms INTEGER,
+  image_url TEXT,
+  preview_url TEXT,
+  url TEXT,
+  artists_json TEXT,
+  added_at TEXT,
+  added_by_user_id TEXT,
+  added_by_display_name TEXT,
+  added_by_uri TEXT,
+  added_by_url TEXT,
+  cached_at TEXT NOT NULL,
+  raw_json TEXT,
+  PRIMARY KEY (user_id, playlist_id, position),
+  FOREIGN KEY (user_id, playlist_id) REFERENCES spotify_playlist_cache(user_id, playlist_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_playlist_track_cache_track
+  ON spotify_playlist_track_cache(user_id, spotify_track_id);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_playlist_track_cache_playlist_track
+  ON spotify_playlist_track_cache(user_id, playlist_id, spotify_track_id);
+
+CREATE TABLE IF NOT EXISTS spotify_playlist_track_identity (
+  user_id TEXT NOT NULL,
+  playlist_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  spotify_track_id TEXT NOT NULL,
+  source_track_id INTEGER,
+  release_track_id INTEGER,
+  recording_cluster_id INTEGER,
+  representative_release_track_id INTEGER,
+  match_status TEXT NOT NULL,
+  matched_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, playlist_id, position),
+  FOREIGN KEY (user_id, playlist_id, position) REFERENCES spotify_playlist_track_cache(user_id, playlist_id, position) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_playlist_track_identity_release
+  ON spotify_playlist_track_identity(user_id, release_track_id);
+
+CREATE INDEX IF NOT EXISTS idx_spotify_playlist_track_identity_cluster
+  ON spotify_playlist_track_identity(user_id, recording_cluster_id);
+""",
+    39: """
+ALTER TABLE spotify_playlist_cache ADD COLUMN hidden_by_user INTEGER NOT NULL DEFAULT 0;
+""",
+    40: """
+CREATE TABLE IF NOT EXISTS playlist_category (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  UNIQUE(user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS playlist_category_member (
+  user_id TEXT NOT NULL,
+  category_id INTEGER NOT NULL,
+  playlist_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  PRIMARY KEY (user_id, category_id, playlist_id),
+  FOREIGN KEY (category_id) REFERENCES playlist_category(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlist_category_member_playlist
+  ON playlist_category_member(user_id, playlist_id);
+""",
+    41: """
+ALTER TABLE spotify_playlist_cache ADD COLUMN followers_total INTEGER;
+""",
 }
 
 
@@ -1631,6 +1759,160 @@ def set_schema_version(version: int) -> None:
 def execute_sql(sql: str) -> None:
     with sqlite_connection(write=True) as connection:
         connection.executescript(sql)
+
+
+def cached_spotify_follow_states(
+    user_id: str,
+    entity_type: str,
+    spotify_ids: list[str],
+    *,
+    max_age_seconds: int,
+) -> dict[str, dict[str, Any]]:
+    normalized_ids = list(dict.fromkeys(str(spotify_id or "").strip() for spotify_id in spotify_ids if str(spotify_id or "").strip()))
+    normalized_type = str(entity_type or "").strip().lower()
+    if not normalized_ids or normalized_type not in {"artist", "user"}:
+        return {}
+    cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat().replace("+00:00", "Z")
+    results: dict[str, dict[str, Any]] = {}
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        for start in range(0, len(normalized_ids), 500):
+            batch = normalized_ids[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = connection.execute(
+                f"""
+                SELECT spotify_id, is_followed, checked_at, display_name, image_url, url, raw_json
+                FROM spotify_follow_state_cache
+                WHERE user_id = ?
+                  AND entity_type = ?
+                  AND checked_at >= ?
+                  AND spotify_id IN ({placeholders})
+                """,
+                (str(user_id), normalized_type, cutoff, *batch),
+            ).fetchall()
+            for row in rows:
+                results[str(row["spotify_id"])] = {
+                    "is_followed": bool(row["is_followed"]),
+                    "checked_at": row["checked_at"],
+                    "display_name": row["display_name"],
+                    "image_url": row["image_url"],
+                    "url": row["url"],
+                    "raw_json": row["raw_json"],
+                }
+    return results
+
+
+def cached_followed_artists(user_id: str, *, max_age_seconds: int) -> tuple[list[dict[str, Any]], int | None] | None:
+    cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat().replace("+00:00", "Z")
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        total_row = connection.execute(
+            """
+            SELECT count(*) AS total
+            FROM spotify_follow_state_cache
+            WHERE user_id = ?
+              AND entity_type = 'artist'
+              AND checked_at >= ?
+            """,
+            (str(user_id), cutoff),
+        ).fetchone()
+        total = int(total_row["total"] or 0) if total_row else 0
+        if total <= 0:
+            return None
+        rows = connection.execute(
+            """
+            SELECT spotify_id, display_name, image_url, url, raw_json
+            FROM spotify_follow_state_cache
+            WHERE user_id = ?
+              AND entity_type = 'artist'
+              AND is_followed = 1
+              AND checked_at >= ?
+            ORDER BY display_name COLLATE NOCASE, spotify_id
+            """,
+            (str(user_id), cutoff),
+        ).fetchall()
+    artists: list[dict[str, Any]] = []
+    for row in rows:
+        raw: dict[str, Any] = {}
+        raw_json = row["raw_json"]
+        if isinstance(raw_json, str) and raw_json.strip():
+            try:
+                parsed = json.loads(raw_json)
+            except (TypeError, ValueError):
+                parsed = {}
+            raw = parsed if isinstance(parsed, dict) else {}
+        artists.append(
+            {
+                "artist_id": str(row["spotify_id"]),
+                "name": row["display_name"] or raw.get("name"),
+                "followers_total": raw.get("followers_total"),
+                "genres": raw.get("genres") if isinstance(raw.get("genres"), list) else [],
+                "popularity": raw.get("popularity"),
+                "url": row["url"] or raw.get("url"),
+                "image_url": row["image_url"] or raw.get("image_url"),
+                "is_followed": True,
+            }
+        )
+    return artists, total
+
+
+def upsert_spotify_follow_states(
+    user_id: str,
+    entity_type: str,
+    entries: list[dict[str, Any]],
+    *,
+    checked_at: str,
+) -> int:
+    normalized_type = str(entity_type or "").strip().lower()
+    if normalized_type not in {"artist", "user"}:
+        return 0
+    rows: list[tuple[Any, ...]] = []
+    for entry in entries:
+        spotify_id = str(entry.get("spotify_id") or entry.get("artist_id") or entry.get("user_id") or entry.get("id") or "").strip()
+        if not spotify_id:
+            continue
+        raw_payload = entry.get("raw")
+        if raw_payload is None:
+            raw_payload = entry
+        rows.append(
+            (
+                str(user_id),
+                normalized_type,
+                spotify_id,
+                1 if entry.get("is_followed") else 0,
+                checked_at,
+                entry.get("display_name") or entry.get("name"),
+                entry.get("image_url"),
+                entry.get("url"),
+                json.dumps(raw_payload, sort_keys=True) if isinstance(raw_payload, dict) else None,
+            )
+        )
+    if not rows:
+        return 0
+    with sqlite_connection(write=True) as connection:
+        connection.executemany(
+            """
+            INSERT INTO spotify_follow_state_cache (
+              user_id,
+              entity_type,
+              spotify_id,
+              is_followed,
+              checked_at,
+              display_name,
+              image_url,
+              url,
+              raw_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, entity_type, spotify_id) DO UPDATE SET
+              is_followed = excluded.is_followed,
+              checked_at = excluded.checked_at,
+              display_name = excluded.display_name,
+              image_url = excluded.image_url,
+              url = excluded.url,
+              raw_json = excluded.raw_json
+            """,
+            rows,
+        )
+    return len(rows)
 
 
 def _generated_recording_cluster_dirty_table_exists(connection: sqlite3.Connection) -> bool:
@@ -2305,7 +2587,7 @@ def update_listenlab_player_play_progress(
     with sqlite_connection(write=True) as connection:
         row = connection.execute(
             """
-            SELECT played_at, track_duration_ms, ms_played
+            SELECT played_at, track_duration_ms, ms_played, spotify_track_id
             FROM raw_listenlab_player_play
             WHERE id = ? AND user_id = ?
             LIMIT 1
@@ -2317,9 +2599,11 @@ def update_listenlab_player_play_progress(
         played_at = str(row[0])
         duration_ms = row[1]
         previous_ms_played = max(0, int(row[2] or 0))
+        spotify_track_id = str(row[3] or "").strip() or None
         safe_ms_played = max(0, int(ms_played))
         if duration_ms is not None:
             safe_ms_played = min(safe_ms_played, max(0, int(duration_ms)))
+        ended_at: str | None = None
         cursor = connection.execute(
             """
             UPDATE raw_listenlab_player_play
@@ -2364,9 +2648,27 @@ def update_listenlab_player_play_progress(
             if duration_ms is not None and int(duration_ms) > 0
             else 30_000
         )
+        crossed_listen_threshold = previous_ms_played < listen_threshold_ms <= safe_ms_played
+        cache_last_played_may_change = False
+        if cursor.rowcount == 1 and not crossed_listen_threshold and safe_ms_played > previous_ms_played and spotify_track_id and ended_at:
+            cache_row = connection.execute(
+                """
+                SELECT last_played_at
+                FROM source_track_play_count_cache
+                WHERE spotify_track_id = ?
+                LIMIT 1
+                """,
+                (spotify_track_id,),
+            ).fetchone()
+            cache_last_played_may_change = bool(
+                cache_row
+                and cache_row[0]
+                and str(ended_at) > str(cache_row[0])
+            )
         return {
             "updated": cursor.rowcount == 1,
-            "crossed_listen_threshold": previous_ms_played < listen_threshold_ms <= safe_ms_played,
+            "crossed_listen_threshold": crossed_listen_threshold,
+            "cache_last_played_may_change": cache_last_played_may_change,
         }
 
 
@@ -2903,13 +3205,21 @@ def get_effective_album_family_id(release_album_id: int) -> int | None:
 
 
 _ALBUM_FAMILY_SUFFIX_PATTERN = re.compile(
-    r"\b(deluxe|edition|remaster(?:ed)?|expanded|anniversary|special|bonus)\b"
+    r"\b(deluxe|edition|(?:\d{4}\s+)?remaster(?:ed)?|expanded|anniversary|special|bonus)\b"
 )
 _ALBUM_FAMILY_SUFFIX_SIGNAL_PATTERN = re.compile(
     r"\b("
     r"deluxe|expanded|remaster(?:ed)?|anniversary(?:\s+edition)?|bonus\s+track\s+version|"
     r"explicit|clean|regional\s+version"
     r")\b"
+)
+_ALBUM_FAMILY_BRACKET_SUFFIX_PATTERN = re.compile(
+    r"\s*[\[(]\s*("
+    r"expanded\s+deluxe(?:\s+edition)?|deluxe(?:\s+edition)?|expanded(?:\s+edition)?|"
+    r"(?:\d+(?:st|nd|rd|th)\s+)?anniversary\s+remaster(?:ed)?(?:\s+edition)?|"
+    r"anniversary(?:\s+edition)?|(?:\d{4}\s+)?remaster(?:ed)?(?:\s+edition)?|"
+    r"special(?:\s+edition)?|bonus(?:\s+track)?(?:\s+version)?"
+    r")\s*[\])]\s*$"
 )
 _COMPILATION_RISK_PATTERN = re.compile(r"\b(compilation|greatest hits|best of)\b")
 _SOUNDTRACK_RISK_PATTERN = re.compile(r"\b(soundtrack|score|ost)\b")
@@ -2919,7 +3229,18 @@ def _album_family_anchor_key(album_name: str | None) -> str | None:
     normalized = _normalize_name(album_name)
     if not normalized:
         return None
-    parts = [part for part in normalized.split() if not _ALBUM_FAMILY_SUFFIX_PATTERN.search(part)]
+    normalized = _ALBUM_FAMILY_BRACKET_SUFFIX_PATTERN.sub("", normalized).strip() or normalized
+    raw_parts = normalized.split()
+    parts = [
+        part
+        for index, part in enumerate(raw_parts)
+        if not _ALBUM_FAMILY_SUFFIX_PATTERN.search(part)
+        and not (
+            re.fullmatch(r"\d{4}", part)
+            and index + 1 < len(raw_parts)
+            and _ALBUM_FAMILY_SUFFIX_PATTERN.search(raw_parts[index + 1])
+        )
+    ]
     if not parts:
         return normalized
     return " ".join(parts)
@@ -6344,7 +6665,18 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
               last_played_at,
               updated_at
             )
-            WITH base_events AS (
+            WITH album_track_durations AS (
+              SELECT
+                spotify_track_id,
+                max(duration_ms) AS duration_ms
+              FROM spotify_album_track
+              WHERE spotify_track_id IS NOT NULL
+                AND trim(spotify_track_id) != ''
+                AND duration_ms IS NOT NULL
+                AND duration_ms > 0
+              GROUP BY spotify_track_id
+            ),
+            base_events AS (
               SELECT
                 fact_play_event.id,
                 fact_play_event.spotify_track_id,
@@ -6352,7 +6684,7 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
                 fact_play_event.canonical_ended_at,
                 fact_play_event.canonical_ms_played,
                 fact_play_event.timing_source,
-                COALESCE(recent.track_duration_ms, player.track_duration_ms, catalog.duration_ms, 0) AS duration_ms
+                COALESCE(recent.track_duration_ms, player.track_duration_ms, catalog.duration_ms, album_track_durations.duration_ms, 0) AS duration_ms
               FROM fact_play_event
               LEFT JOIN fact_play_event_recent_link recent_link
                 ON recent_link.fact_play_event_id = fact_play_event.id
@@ -6366,6 +6698,8 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
                 ON player.id = player_link.raw_listenlab_player_play_id
               LEFT JOIN spotify_track_catalog catalog
                 ON catalog.spotify_track_id = fact_play_event.spotify_track_id
+              LEFT JOIN album_track_durations
+                ON album_track_durations.spotify_track_id = fact_play_event.spotify_track_id
               WHERE fact_play_event.spotify_track_id IS NOT NULL
                 AND trim(fact_play_event.spotify_track_id) != ''
             ),
@@ -6444,15 +6778,31 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
               SELECT spotify_track_id, 1, canonical_ended_at, canonical_ended_at
               FROM base_events
               WHERE canonical_ms_played IS NULL
+            ),
+            counted_track_totals AS (
+              SELECT
+                spotify_track_id,
+                sum(play_count) AS play_count,
+                min(first_played_at) AS first_played_at
+              FROM counted_events
+              GROUP BY spotify_track_id
+            ),
+            all_track_events AS (
+              SELECT
+                spotify_track_id,
+                max(canonical_ended_at) AS last_played_at
+              FROM base_events
+              GROUP BY spotify_track_id
             )
             SELECT
-              spotify_track_id,
-              sum(play_count) AS play_count,
-              min(first_played_at) AS first_played_at,
-              max(last_played_at) AS last_played_at,
+              all_track_events.spotify_track_id,
+              COALESCE(counted_track_totals.play_count, 0) AS play_count,
+              counted_track_totals.first_played_at AS first_played_at,
+              all_track_events.last_played_at AS last_played_at,
               strftime('%Y-%m-%dT%H:%M:%fZ','now') AS updated_at
-            FROM counted_events
-            GROUP BY spotify_track_id
+            FROM all_track_events
+            LEFT JOIN counted_track_totals
+              ON counted_track_totals.spotify_track_id = all_track_events.spotify_track_id
             """
         )
         row_count = int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)

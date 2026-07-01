@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 
 from backend.app.artist_album_evidence import list_artist_album_evidence, list_artist_tracks
@@ -26,6 +27,12 @@ from backend.app.db import (
     update_listenlab_player_play_progress,
 )
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
+from backend.app.playlist_index import (
+    cache_playlist_track_page,
+    cached_playlist_tracks,
+    enrich_rows_with_playlist_membership_counts,
+    fetch_playlist_track_page_from_spotify,
+)
 from backend.app.release_track_detail import ReleaseTrackDetailNotFound, get_release_track_detail
 from backend.app.release_track_metadata import enrich_album_track_rows_with_release_metadata
 from backend.app.spotify_catalog_backfill import (
@@ -34,8 +41,7 @@ from backend.app.spotify_catalog_backfill import (
     enqueue_spotify_catalog_backfill_items,
 )
 from backend.app.spotify_current_playback import get_current_playback_for_user
-from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get
-from backend.app.spotify_normalization import _normalize_track
+from backend.app.spotify_http import _fetch_spotify_profile, _spotify_client_credentials_token, _spotify_get
 from backend.app.spotify_preview import (
     _fetch_album_representative_track,
     _fetch_artist_representative_track,
@@ -68,6 +74,72 @@ def _spotify_track_id_from_uri(track_uri: str | None) -> str | None:
     if not track_uri or not track_uri.startswith("spotify:track:"):
         return None
     return track_uri.split(":")[-1] or None
+
+
+def _require_playlist_modify_scope(user_id: str) -> None:
+    granted_scopes = _scope_set((get_spotify_auth_record(str(user_id)) or {}).get("scopes"))
+    if "playlist-modify-private" in granted_scopes or "playlist-modify-public" in granted_scopes:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Spotify permission missing. Log out and log back in so ListenLab can request playlist modify access.",
+    )
+
+
+async def _spotify_post_json(access_token: str, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    if response.status_code == status.HTTP_204_NO_CONTENT:
+        return {}
+    if response.status_code >= 400:
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = {"error": response.text[:160]}
+        spotify_message = error_payload.get("error")
+        if isinstance(spotify_message, dict):
+            spotify_message = spotify_message.get("message") or spotify_message.get("reason")
+        detail = str(spotify_message or response.text or "Spotify request failed.").strip()
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    try:
+        parsed = response.json()
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+async def _spotify_delete_json(access_token: str, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.request(
+            "DELETE",
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    if response.status_code >= 400:
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = {"error": response.text[:160]}
+        spotify_message = error_payload.get("error")
+        if isinstance(spotify_message, dict):
+            spotify_message = spotify_message.get("message") or spotify_message.get("reason")
+        raise HTTPException(status_code=response.status_code, detail=str(spotify_message or response.text or "Spotify request failed.").strip())
+    try:
+        parsed = response.json()
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _utc_now() -> str:
@@ -247,11 +319,15 @@ def _cached_album_track_rows_from_track_catalog(album_id: str) -> tuple[list[dic
 
 def _enriched_album_items_with_family(
     *,
+    user_id: str,
     album_id: str,
     items: list[dict[str, Any]],
     include_family: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    enriched = enrich_album_track_rows_with_release_metadata(items)
+    enriched = enrich_album_track_rows_with_release_metadata(
+        items,
+        refresh_dirty_clusters=False,
+    )
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         album_row = connection.execute(
             """
@@ -276,15 +352,15 @@ def _enriched_album_items_with_family(
                 item["release_track_cluster_candidate_type"] = "track_family_candidate"
                 item["release_track_cluster_relationship_kind"] = "remix"
     if not include_family:
-        return enriched, None
+        return enrich_rows_with_playlist_membership_counts(user_id, enriched), None
     family_context = build_album_family_context(
         selected_spotify_album_id=album_id,
         selected_items=enriched,
     )
     if family_context is None:
-        return enriched, None
+        return enrich_rows_with_playlist_membership_counts(user_id, enriched), None
     family_payload = {key: value for key, value in family_context.items() if key != "items"}
-    return list(family_context["items"]), family_payload
+    return enrich_rows_with_playlist_membership_counts(user_id, list(family_context["items"])), family_payload
 
 
 async def _fetch_and_cache_album_tracks(access_token: str, album_id: str, market: str) -> list[dict[str, Any]]:
@@ -331,7 +407,7 @@ async def auth_artist_albums(
     source_album_id: str | None = None,
     source_album_name: str | None = None,
 ) -> dict[str, Any]:
-    _require_user_id(request)
+    user_id = _require_user_id(request)
     token = _require_token(request)
     try:
         normalized_artist_names = [str(name or "").strip() for name in (artist_names or []) if str(name or "").strip()]
@@ -373,6 +449,7 @@ async def auth_playback_playlist_tracks(
     request: Request,
     playlist_id: str,
     limit: int = Query(default=500, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     user_id = _require_user_id(request)
     token = _require_token(request)
@@ -380,82 +457,275 @@ async def auth_playback_playlist_tracks(
     if not normalized_playlist_id:
         raise HTTPException(status_code=400, detail="playlist_id is required.")
 
-    items: list[dict[str, Any]] = []
-    offset = 0
-    page_limit = min(100, limit)
-    total: int | None = None
+    cached = cached_playlist_tracks(str(user_id), normalized_playlist_id, limit=limit, offset=offset)
+    if cached and (cached["items"] or cached.get("complete")):
+        return {
+            "playlist_id": normalized_playlist_id,
+            "items": cached["items"],
+            "total": cached["total"],
+            "limit": limit,
+            "offset": cached["offset"],
+            "next_offset": cached["next_offset"],
+            "has_more": cached["has_more"],
+            "source": "cache",
+        }
 
-    while len(items) < limit:
-        try:
-            payload = await _spotify_get(
-                token,
-                f"https://api.spotify.com/v1/playlists/{normalized_playlist_id}/items",
-                {
-                    "limit": min(page_limit, limit - len(items)),
-                    "offset": offset,
-                    "fields": "items(added_at,item(id,name,uri,duration_ms,preview_url,external_urls,album(id,name,release_date,images,external_urls),artists(id,name))),total,next",
-                },
-            )
-        except HTTPException as exc:
-            if exc.status_code == status.HTTP_403_FORBIDDEN:
-                granted_scopes = _scope_set((get_spotify_auth_record(str(user_id)) or {}).get("scopes"))
-                missing_scopes = [
-                    scope
-                    for scope in ("playlist-read-private", "playlist-read-collaborative")
-                    if scope not in granted_scopes
-                ]
-                spotify_detail = str(exc.detail or "").strip().rstrip(".")
-                if missing_scopes:
-                    detail = (
-                        "Spotify denied access to this playlist's tracks because the current token is missing "
-                        f"{', '.join(missing_scopes)}. Log out and log back in to grant the updated playlist permissions."
-                    )
-                else:
-                    detail = (
-                        "Spotify denied access to this playlist's tracks even though ListenLab has the playlist scopes. "
-                        "This usually means the playlist is private to another account, no longer accessible to your Spotify user, "
-                        "or Spotify is blocking this specific playlist."
-                    )
-                    if spotify_detail:
-                        detail = f"{detail} Spotify said: {spotify_detail}."
-                logger.warning(
-                    "event=playlist_tracks_spotify_forbidden playlist_id=%s user_id=%s missing_scopes=%s spotify_detail=%s",
+    try:
+        payload = await fetch_playlist_track_page_from_spotify(
+            token,
+            normalized_playlist_id,
+            limit=limit,
+            offset=offset,
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            public_payload: dict[str, Any] | None = None
+            public_error: HTTPException | None = None
+            try:
+                public_token = await _spotify_client_credentials_token()
+                public_payload = await fetch_playlist_track_page_from_spotify(
+                    public_token,
                     normalized_playlist_id,
-                    user_id,
-                    ",".join(missing_scopes),
-                    spotify_detail or "",
+                    limit=limit,
+                    offset=offset,
                 )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=detail,
-                ) from exc
-            raise
-        if total is None and isinstance(payload.get("total"), int):
-            total = int(payload["total"])
-        page_items = payload.get("items") or []
-        if not page_items:
-            break
-        for item in page_items:
-            if not isinstance(item, dict):
-                continue
-            track = item.get("item") or item.get("track") or {}
-            if not isinstance(track, dict) or not track.get("id"):
-                continue
-            normalized = _normalize_track(track)
-            normalized["playlist_added_at"] = item.get("added_at")
-            items.append(normalized)
-            if len(items) >= limit:
-                break
-        offset += len(page_items)
-        if not payload.get("next"):
-            break
+            except HTTPException as fallback_exc:
+                public_error = fallback_exc
+            if public_payload is not None:
+                cache_playlist_track_page(
+                    str(user_id),
+                    normalized_playlist_id,
+                    public_payload["items"],
+                    offset=offset,
+                    total=public_payload.get("total"),
+                )
+                return {
+                    "playlist_id": normalized_playlist_id,
+                    "items": public_payload["items"],
+                    "total": public_payload.get("total", len(public_payload["items"])),
+                    "limit": limit,
+                    "offset": offset,
+                    "next_offset": public_payload.get("next_offset", offset + len(public_payload["items"])),
+                    "has_more": public_payload.get("has_more", False),
+                    "source": "spotify_public_read",
+                }
+            granted_scopes = _scope_set((get_spotify_auth_record(str(user_id)) or {}).get("scopes"))
+            missing_scopes = [
+                scope
+                for scope in ("playlist-read-private", "playlist-read-collaborative")
+                if scope not in granted_scopes
+            ]
+            spotify_detail = str(exc.detail or "").strip().rstrip(".")
+            public_detail = str(public_error.detail or "").strip().rstrip(".") if public_error else ""
+            if missing_scopes:
+                detail = (
+                    "Spotify denied access to this playlist's tracks because the current token is missing "
+                    f"{', '.join(missing_scopes)}. Log out and log back in to grant the updated playlist permissions."
+                )
+            else:
+                detail = (
+                    "Spotify denied access to this playlist's tracks even though ListenLab has the playlist scopes. "
+                    "ListenLab also tried a read-only public playlist request. This usually means the playlist is private to another account, "
+                    "no longer accessible to your Spotify user, or Spotify is blocking this specific playlist."
+                )
+                if spotify_detail:
+                    detail = f"{detail} Spotify said: {spotify_detail}."
+                if public_detail and public_detail != spotify_detail:
+                    detail = f"{detail} Public read said: {public_detail}."
+            logger.warning(
+                "event=playlist_tracks_spotify_forbidden playlist_id=%s user_id=%s missing_scopes=%s spotify_detail=%s public_detail=%s",
+                normalized_playlist_id,
+                user_id,
+                ",".join(missing_scopes),
+                spotify_detail or "",
+                public_detail or "",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=detail,
+            ) from exc
+        raise
+    cache_playlist_track_page(
+        str(user_id),
+        normalized_playlist_id,
+        payload["items"],
+        offset=offset,
+        total=payload.get("total"),
+    )
 
     return {
         "playlist_id": normalized_playlist_id,
-        "items": items,
-        "total": total if total is not None else len(items),
+        "items": payload["items"],
+        "total": payload.get("total", len(payload["items"])),
         "limit": limit,
-        "has_more": total is not None and len(items) < total,
+        "offset": offset,
+        "next_offset": payload.get("next_offset", offset + len(payload["items"])),
+        "has_more": payload.get("has_more", False),
+        "source": "spotify",
+    }
+
+
+@router.post("/auth/playback/playlists")
+async def auth_playback_create_playlist(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    token = _require_token(request)
+    _require_playlist_modify_scope(str(user_id))
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Playlist name is required.")
+    track_uri = str(payload.get("track_uri") or "").strip()
+    if track_uri and not track_uri.startswith("spotify:track:"):
+        raise HTTPException(status_code=400, detail="track_uri must be a Spotify track URI.")
+    profile = await _fetch_spotify_profile(token)
+    spotify_user_id = str(profile.get("id") or user_id).strip()
+    if not spotify_user_id:
+        raise HTTPException(status_code=400, detail="Spotify user id is unavailable.")
+    playlist_payload = await _spotify_post_json(
+        token,
+        f"https://api.spotify.com/v1/users/{spotify_user_id}/playlists",
+        {
+            "name": name,
+            "public": False,
+            "collaborative": False,
+            "description": "Created by ListenLab",
+        },
+    )
+    playlist_id = str(playlist_payload.get("id") or "").strip()
+    if not playlist_id:
+        raise HTTPException(status_code=502, detail="Spotify created the playlist without returning an id.")
+    if track_uri:
+        await _spotify_post_json(
+            token,
+            f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
+            {"uris": [track_uri]},
+        )
+    owner = playlist_payload.get("owner") if isinstance(playlist_payload.get("owner"), dict) else {}
+    images = playlist_payload.get("images") if isinstance(playlist_payload.get("images"), list) else []
+    external_urls = playlist_payload.get("external_urls") if isinstance(playlist_payload.get("external_urls"), dict) else {}
+    return {
+        "playlist": {
+            "playlist_id": playlist_id,
+            "name": playlist_payload.get("name") or name,
+            "track_count": 1 if track_uri else 0,
+            "description": playlist_payload.get("description"),
+            "is_public": playlist_payload.get("public"),
+            "is_collaborative": bool(playlist_payload.get("collaborative")),
+            "is_owned": True,
+            "owner_id": owner.get("id") or spotify_user_id,
+            "owner_name": owner.get("display_name") or profile.get("display_name"),
+            "hidden_by_user": False,
+            "playlist_category": "private",
+            "snapshot_id": playlist_payload.get("snapshot_id"),
+            "url": external_urls.get("spotify"),
+            "image_url": images[0].get("url") if images and isinstance(images[0], dict) else None,
+        }
+    }
+
+
+@router.delete("/auth/playback/playlists/{playlist_id}")
+async def auth_playback_delete_playlist(request: Request, playlist_id: str) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    token = _require_token(request)
+    _require_playlist_modify_scope(str(user_id))
+    normalized_playlist_id = str(playlist_id or "").strip()
+    if not normalized_playlist_id:
+        raise HTTPException(status_code=400, detail="playlist_id is required.")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.delete(
+            f"https://api.spotify.com/v1/playlists/{normalized_playlist_id}/followers",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if response.status_code >= 400:
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = {"error": response.text[:160]}
+        spotify_message = error_payload.get("error")
+        if isinstance(spotify_message, dict):
+            spotify_message = spotify_message.get("message") or spotify_message.get("reason")
+        raise HTTPException(status_code=response.status_code, detail=str(spotify_message or "Spotify could not delete this playlist."))
+    return {"playlist_id": normalized_playlist_id, "deleted": True}
+
+
+@router.post("/auth/playback/playlist-tracks")
+async def auth_playback_add_playlist_tracks(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    token = _require_token(request)
+    _require_playlist_modify_scope(str(user_id))
+    track_uri = str(payload.get("track_uri") or "").strip()
+    if not track_uri.startswith("spotify:track:"):
+        raise HTTPException(status_code=400, detail="track_uri must be a Spotify track URI.")
+    playlist_ids_raw = payload.get("playlist_ids")
+    if not isinstance(playlist_ids_raw, list):
+        raise HTTPException(status_code=400, detail="playlist_ids must be a list.")
+    playlist_ids = [
+        str(playlist_id or "").strip()
+        for playlist_id in playlist_ids_raw
+        if str(playlist_id or "").strip()
+    ]
+    if not playlist_ids:
+        raise HTTPException(status_code=400, detail="At least one playlist is required.")
+    added: list[str] = []
+    errors: list[dict[str, str]] = []
+    for playlist_id in dict.fromkeys(playlist_ids):
+        try:
+            await _spotify_post_json(
+                token,
+                f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
+                {"uris": [track_uri]},
+            )
+            added.append(playlist_id)
+        except HTTPException as exc:
+            errors.append({"playlist_id": playlist_id, "error": str(exc.detail or "Spotify rejected this playlist.")})
+    if not added and errors:
+        detail = errors[0]["error"]
+        if "Insufficient client scope" in detail or "scope" in detail.lower():
+            detail = "Spotify permission missing. Log out and log back in so ListenLab can request playlist modify access."
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    return {
+        "added_playlist_ids": added,
+        "errors": errors,
+    }
+
+
+@router.delete("/auth/playback/playlist-tracks")
+async def auth_playback_remove_playlist_tracks(request: Request, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    token = _require_token(request)
+    _require_playlist_modify_scope(str(user_id))
+    track_uri = str(payload.get("track_uri") or "").strip()
+    if not track_uri.startswith("spotify:track:"):
+        raise HTTPException(status_code=400, detail="track_uri must be a Spotify track URI.")
+    playlist_ids_raw = payload.get("playlist_ids")
+    if not isinstance(playlist_ids_raw, list):
+        raise HTTPException(status_code=400, detail="playlist_ids must be a list.")
+    playlist_ids = [
+        str(playlist_id or "").strip()
+        for playlist_id in playlist_ids_raw
+        if str(playlist_id or "").strip()
+    ]
+    if not playlist_ids:
+        raise HTTPException(status_code=400, detail="At least one playlist is required.")
+    removed: list[str] = []
+    errors: list[dict[str, str]] = []
+    for playlist_id in dict.fromkeys(playlist_ids):
+        try:
+            await _spotify_delete_json(
+                token,
+                f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
+                {"tracks": [{"uri": track_uri}]},
+            )
+            removed.append(playlist_id)
+        except HTTPException as exc:
+            errors.append({"playlist_id": playlist_id, "error": str(exc.detail or "Spotify rejected this playlist.")})
+    if not removed and errors:
+        detail = errors[0]["error"]
+        if "Insufficient client scope" in detail or "scope" in detail.lower():
+            detail = "Spotify permission missing. Log out and log back in so ListenLab can request playlist modify access."
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    return {
+        "removed_playlist_ids": removed,
+        "errors": errors,
     }
 
 
@@ -487,8 +757,10 @@ async def auth_playback_album_tracks(
             promotion = promote_catalog_album_tracks_to_identity(
                 album_ids=[normalized_album_id],
                 apply=True,
+                refresh_clusters=False,
             ) if promote_identity else None
             response_items, album_family = _enriched_album_items_with_family(
+                user_id=str(user_id),
                 album_id=normalized_album_id,
                 items=cached_items,
                 include_family=include_family,
@@ -511,11 +783,18 @@ async def auth_playback_album_tracks(
             promotion = promote_catalog_album_tracks_to_identity(
                 album_ids=[normalized_album_id],
                 apply=True,
+                refresh_clusters=False,
             ) if promote_identity else None
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
-                "items": enrich_album_track_rows_with_release_metadata(catalog_items),
+                "items": enrich_rows_with_playlist_membership_counts(
+                    str(user_id),
+                    enrich_album_track_rows_with_release_metadata(
+                        catalog_items,
+                        refresh_dirty_clusters=False,
+                    ),
+                ),
                 "source": "track_catalog",
                 "cached": True,
                 "partial": not catalog_complete,
@@ -525,11 +804,18 @@ async def auth_playback_album_tracks(
             promotion = promote_catalog_album_tracks_to_identity(
                 album_ids=[normalized_album_id],
                 apply=True,
+                refresh_clusters=False,
             ) if promote_identity else None
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
-                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "items": enrich_rows_with_playlist_membership_counts(
+                    str(user_id),
+                    enrich_album_track_rows_with_release_metadata(
+                        local_fallback_items,
+                        refresh_dirty_clusters=False,
+                    ),
+                ),
                 "source": "local_partial",
                 "cached": True,
                 "partial": True,
@@ -541,7 +827,13 @@ async def auth_playback_album_tracks(
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
-                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "items": enrich_rows_with_playlist_membership_counts(
+                    str(user_id),
+                    enrich_album_track_rows_with_release_metadata(
+                        local_fallback_items,
+                        refresh_dirty_clusters=False,
+                    ),
+                ),
                 "source": "local_partial",
                 "cached": True,
                 "partial": True,
@@ -555,7 +847,13 @@ async def auth_playback_album_tracks(
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
-                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "items": enrich_rows_with_playlist_membership_counts(
+                    str(user_id),
+                    enrich_album_track_rows_with_release_metadata(
+                        local_fallback_items,
+                        refresh_dirty_clusters=False,
+                    ),
+                ),
                 "source": "local_partial",
                 "cached": True,
                 "partial": True,
@@ -587,8 +885,10 @@ async def auth_playback_album_tracks(
         promotion = promote_catalog_album_tracks_to_identity(
             album_ids=[normalized_album_id],
             apply=True,
+            refresh_clusters=False,
         ) if promote_identity else None
         response_items, album_family = _enriched_album_items_with_family(
+            user_id=str(user_id),
             album_id=normalized_album_id,
             items=cached_items,
             include_family=include_family,
@@ -611,7 +911,13 @@ async def auth_playback_album_tracks(
             return {
                 "album_id": normalized_album_id,
                 "track_id": normalized_track_id,
-                "items": enrich_album_track_rows_with_release_metadata(local_fallback_items),
+                "items": enrich_rows_with_playlist_membership_counts(
+                    str(user_id),
+                    enrich_album_track_rows_with_release_metadata(
+                        local_fallback_items,
+                        refresh_dirty_clusters=False,
+                    ),
+                ),
                 "source": "local_partial",
                 "cached": True,
                 "partial": True,
@@ -620,8 +926,10 @@ async def auth_playback_album_tracks(
     promotion = promote_catalog_album_tracks_to_identity(
         album_ids=[normalized_album_id],
         apply=True,
+        refresh_clusters=False,
     ) if promote_identity else None
     response_items, album_family = _enriched_album_items_with_family(
+        user_id=str(user_id),
         album_id=normalized_album_id,
         items=items,
         include_family=include_family,
@@ -667,7 +975,7 @@ async def auth_player_listen_event(request: Request, payload: dict[str, Any] = B
         )
         if not update_result["updated"]:
             raise HTTPException(status_code=404, detail="ListenLab player event was not found.")
-        if update_result["crossed_listen_threshold"]:
+        if update_result["crossed_listen_threshold"] or update_result.get("cache_last_played_may_change"):
             refresh_source_track_play_count_cache()
         return {
             "ok": True,

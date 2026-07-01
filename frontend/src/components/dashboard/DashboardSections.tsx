@@ -89,6 +89,7 @@ type DashboardSectionsProps = {
   enqueueVisibleIncompleteLookupAlbums: any;
   enqueueVisibleIncompleteLookupTracks: any;
   experienceMode: ExperienceMode;
+  apiBaseUrl: string;
   likedTracksAvailableForActivity: any;
   likedTracksCacheStatus: any;
   likedTracksCountMode: any;
@@ -189,6 +190,9 @@ type DashboardSectionsProps = {
   setSearchLookupQueueStatus: any;
   setSearchLookupSort: any;
   setSelectedPreview: any;
+  hidePlaylistFromListenLab: any;
+  unhidePlaylistInListenLab: any;
+  deletePlaylistFromSpotify: any;
   setShowDebugLinkFields: any;
   setTrackCatalogLookupStatus: any;
   showDebugLinkFields: any;
@@ -259,6 +263,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
     enqueueVisibleIncompleteLookupAlbums,
     enqueueVisibleIncompleteLookupTracks,
     experienceMode,
+    apiBaseUrl,
     likedTracksAvailableForActivity,
     likedTracksCacheStatus,
     likedTracksCountMode,
@@ -359,6 +364,9 @@ export function DashboardSections(props: DashboardSectionsProps) {
     setSearchLookupQueueStatus,
     setSearchLookupSort,
     setSelectedPreview,
+    hidePlaylistFromListenLab,
+    unhidePlaylistInListenLab,
+    deletePlaylistFromSpotify,
     setShowDebugLinkFields,
     setTrackCatalogLookupStatus,
     showDebugLinkFields,
@@ -876,14 +884,14 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 <DashboardPlaylistsSection
                   ownedPlaylists={profile.owned_playlists}
                   ownedPlaylistsAvailable={profile.owned_playlists_available}
+                  apiBaseUrl={apiBaseUrl}
                   playlistsOpen={openSections.playlists}
                   toggleSection={toggleSection}
-                  sectionPage={sectionPages.playlists}
-                  moveSectionPage={moveSectionPage}
                   onSelectPreview={setSelectedPreview}
-                  visibleItemsWithPageSize={visibleItemsWithPageSize}
+                  onHidePlaylist={hidePlaylistFromListenLab}
+                  onUnhidePlaylist={unhidePlaylistInListenLab}
+                  onDeletePlaylist={deletePlaylistFromSpotify}
                   renderSectionTitle={renderSectionTitle}
-                  quickUnavailableCopy={quickUnavailableCopy}
                 />
               ) : null}
             </div>

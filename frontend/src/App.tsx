@@ -94,7 +94,10 @@ import type {
   AlbumFamilyContext,
   SpotifyPlayerInstance,
   PopupTrackPlaybackOptions,
-  PlaybackActionRequest
+  PlaybackActionRequest,
+  PlaylistMembership,
+  PlaylistIndexStatus,
+  OwnedPlaylist
 } from "./types/appTypes";
 import {
   DEFAULT_PLAYER_VOLUME,
@@ -188,6 +191,8 @@ import {
   type NormalizedAuditIssue,
 } from "./components/identityAudit/IssueFeed";
 import { FullAnalysisOverlay, LoadingScreen } from "./components/loading/LoadingScreens";
+import { HomeAlbumAppearanceStrip } from "./components/playback/HomeAlbumAppearanceStrip";
+import { PlayerBottomDrawer, type PlayerBottomDrawerTab } from "./components/playback/PlayerBottomDrawer";
 import { PlaybackActionMenu, type PlaybackAction } from "./components/playback/PlaybackActionMenu";
 import { SpotifyCooldownPanel } from "./components/profile/SpotifyCooldownPanel";
 import { RecentDebugPage } from "./components/recentDebug/RecentDebugPage";
@@ -493,13 +498,22 @@ export function App() {
   const [playlistTrackEntriesLoading, setPlaylistTrackEntriesLoading] = useState(false);
   const [playlistTrackEntriesError, setPlaylistTrackEntriesError] = useState<string | null>(null);
   const [playlistTrackEntriesHasMore, setPlaylistTrackEntriesHasMore] = useState(false);
-  const playlistTrackEntriesCacheRef = useRef<Record<string, { items: RecentTrack[]; hasMore: boolean }>>({});
+  const [playlistTrackEntriesTotal, setPlaylistTrackEntriesTotal] = useState<number | null>(null);
+  const [playlistTrackEntriesNextOffset, setPlaylistTrackEntriesNextOffset] = useState<number | null>(null);
+  const [playlistTrackEntriesOffset, setPlaylistTrackEntriesOffset] = useState(0);
+  const playlistTrackEntriesCacheRef = useRef<Record<string, { items: RecentTrack[]; hasMore: boolean; total: number | null; nextOffset: number | null }>>({});
+  const [selectedPreviewPlaylistMemberships, setSelectedPreviewPlaylistMemberships] = useState<PlaylistMembership[]>([]);
+  const [selectedPreviewPlaylistMembershipsLoading, setSelectedPreviewPlaylistMembershipsLoading] = useState(false);
+  const [selectedPreviewPlaylistIndexStatus, setSelectedPreviewPlaylistIndexStatus] = useState<PlaylistIndexStatus | null>(null);
   const [hoveredAlbumWithArtistName, setHoveredAlbumWithArtistName] = useState<string | null>(null);
   const [homeAlbumExpanded, setHomeAlbumExpanded] = useState(false);
   const [homeAlbumTrackEntries, setHomeAlbumTrackEntries] = useState<AlbumTrackEntry[]>([]);
   const [homeAlbumTrackEntriesLoading, setHomeAlbumTrackEntriesLoading] = useState(false);
   const [homeAlbumTrackEntriesError, setHomeAlbumTrackEntriesError] = useState<string | null>(null);
   const [homeAlbumTrackLastSortMode, setHomeAlbumTrackLastSortMode] = useState<LastPlayedSortMode>(null);
+  const [homeRecordingCandidate, setHomeRecordingCandidate] = useState<RecordingTrackCandidateItem | null>(null);
+  const [playerDrawerExpanded, setPlayerDrawerExpanded] = useState(false);
+  const [playerDrawerActiveTab, setPlayerDrawerActiveTab] = useState<PlayerBottomDrawerTab>("previousQueues");
   const [playerReady, setPlayerReady] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [playerRecentTracks, setPlayerRecentTracks] = useState<RecentTrack[]>([]);
@@ -1003,6 +1017,39 @@ export function App() {
   const selectedPreviewPrimaryArtist = selectedPreview?.kind === "track" || selectedPreview?.kind === "album" || selectedPreview?.kind === "artist"
     ? (selectedPreviewArtists[0] ?? firstArtistFromRecentTrack(selectedPreview.sourceTrack))
     : null;
+  const selectedPreviewArtistFollowStatusKnown = Boolean(
+    selectedPreview?.kind === "artist"
+    && profile?.experience_mode === "full"
+    && profile.followed_artists_list_available,
+  );
+  const selectedPreviewArtistIsSpotifyFollowed = useMemo(() => {
+    if (selectedPreview?.kind !== "artist" || profile?.experience_mode !== "full" || !profile.followed_artists_list_available) {
+      return false;
+    }
+    const artistIds = new Set(
+      selectedPreviewArtists
+        .flatMap((artist) => [artist.artist_id, artist.id])
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value)),
+    );
+    const artistNames = new Set(
+      selectedPreviewArtists
+        .map((artist) => artist.name?.trim().toLocaleLowerCase())
+        .filter((value): value is string => Boolean(value)),
+    );
+    const primaryName = selectedPreviewPrimaryArtistName?.trim().toLocaleLowerCase();
+    if (primaryName) {
+      artistNames.add(primaryName);
+    }
+    return (profile.followed_artists ?? []).some((artist) => {
+      const followedId = artist.artist_id?.trim();
+      if (followedId && artistIds.has(followedId)) {
+        return true;
+      }
+      const followedName = artist.name?.trim().toLocaleLowerCase();
+      return Boolean(followedName && artistNames.has(followedName));
+    });
+  }, [profile?.experience_mode, profile?.followed_artists, profile?.followed_artists_list_available, selectedPreview, selectedPreviewArtists, selectedPreviewPrimaryArtistName]);
   const selectedPreviewAlbumTrackCount = selectedPreview?.kind === "album" && albumTrackEntries.length > 0
     ? albumTrackEntries.length
     : null;
@@ -1173,6 +1220,28 @@ export function App() {
         localStarredAlbumById[selectedPreviewAlbumSpotifyId] !== false
         && targetedLikedAlbumById[selectedPreviewAlbumSpotifyId] === true
       )
+    ),
+  );
+  const selectedPreviewPlaylistMetadata = useMemo(() => {
+    if (selectedPreview?.kind !== "playlist") {
+      return null;
+    }
+    const playlistId = selectedPreview.entityId ?? spotifyPlaylistIdFromUrl(selectedPreview.url);
+    const normalizedPlaylistId = playlistId?.trim();
+    if (!normalizedPlaylistId) {
+      return null;
+    }
+    return profile?.owned_playlists.find((playlist) => {
+      const candidateId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+      return candidateId?.trim() === normalizedPlaylistId;
+    }) ?? null;
+  }, [profile?.owned_playlists, selectedPreview]);
+  const selectedPreviewPlaylistIsCollaborative = Boolean(selectedPreviewPlaylistMetadata?.is_collaborative);
+  const selectedPreviewPlaylistOwnerFollowedByYou = Boolean(
+    selectedPreview?.kind === "playlist"
+    && (
+      selectedPreview.playlistOwnerFollowedByYou === true
+      || selectedPreviewPlaylistMetadata?.owner_followed_by_you === true
     ),
   );
   const selectedPreviewMatchedAlbumTrack = selectedPreview?.kind === "track"
@@ -1672,6 +1741,34 @@ export function App() {
   const playerDisplayAlbumLabel = playerDisplayAlbumName
     ? (playerDisplayAlbumYear ? `${playerDisplayAlbumYear} - ${playerDisplayAlbumName}` : playerDisplayAlbumName)
     : "Choose something to play";
+  const playerDisplayReleaseTrackId = playerDisplayKnownTrack?.release_track_id ?? releaseTrackIdForSpotifyTrackId(playerDisplayTrackId);
+  useEffect(() => {
+    if (!playerDisplayReleaseTrackId) {
+      setHomeRecordingCandidate(null);
+      return;
+    }
+    let cancelled = false;
+    setHomeRecordingCandidate((current) => (
+      current?.members.some((member) => member.release_track_id === playerDisplayReleaseTrackId) ? current : null
+    ));
+    fetchRecordingTrackCandidateByReleaseTrack(playerDisplayReleaseTrackId)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        const items = payload.items ?? (payload.item ? [payload.item] : []);
+        const recordingCandidate = items.find((item) => item.candidate_type === "recording_track_candidate") ?? payload.item ?? null;
+        setHomeRecordingCandidate(recordingCandidate);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHomeRecordingCandidate(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [playerDisplayReleaseTrackId]);
   const recentLikedStartupTrack = profile?.recent_likes_tracks[0] ?? null;
   const recentLikedStartupTrackUri = recentLikedStartupTrack
     ? trackUriWithFallback(recentLikedStartupTrack.uri, recentLikedStartupTrack.track_id)
@@ -2259,64 +2356,39 @@ export function App() {
       current.some((item) => item.members.some((member) => member.release_track_id === releaseTrackId)) ? current : []
     ));
     setSelectedPreviewRecordingCandidateError(null);
-    fetchRecordingTrackCandidateByReleaseTrack(releaseTrackId)
-      .then(async (payload) => {
-        if (cancelled) {
-          return;
-        }
-        const baseItems = payload.items ?? (payload.item ? [payload.item] : []);
-        const recordingCandidate = baseItems.find((item) => item.candidate_type === "recording_track_candidate") ?? null;
-        const siblingReleaseTrackIds = recordingCandidate
-          ? recordingCandidate.members
-            .map((member) => member.release_track_id)
-            .filter((memberReleaseTrackId) => memberReleaseTrackId !== releaseTrackId)
-          : [];
-        const siblingPayloads = await Promise.all(
-          siblingReleaseTrackIds.map((memberReleaseTrackId) => fetchRecordingTrackCandidateByReleaseTrack(memberReleaseTrackId).catch(() => null)),
-        );
-        if (cancelled) {
-          return;
-        }
-        const initialItems = [
-          ...baseItems,
-          ...siblingPayloads.flatMap((siblingPayload) => siblingPayload?.items ?? []),
-        ];
-        const alreadyFetchedReleaseTrackIds = new Set([releaseTrackId, ...siblingReleaseTrackIds]);
-        const familyReleaseTrackIds = Array.from(new Set(
-          initialItems
-            .filter((item) => item.candidate_type === "track_family_candidate")
-            .flatMap((item) => item.members.map((member) => member.release_track_id))
-            .filter((memberReleaseTrackId) => !alreadyFetchedReleaseTrackIds.has(memberReleaseTrackId)),
-        ));
-        const familyMemberPayloads = await Promise.all(
-          familyReleaseTrackIds.map((memberReleaseTrackId) => fetchRecordingTrackCandidateByReleaseTrack(memberReleaseTrackId).catch(() => null)),
-        );
-        if (cancelled) {
-          return;
-        }
-        const itemByKey = new Map<string, RecordingTrackCandidateItem>();
-        for (const payloadItems of [baseItems, ...siblingPayloads.map((payload) => payload?.items ?? []), ...familyMemberPayloads.map((payload) => payload?.items ?? [])]) {
-          for (const item of payloadItems) {
-            itemByKey.set(item.candidate_key, item);
+    const candidateTimer = window.setTimeout(() => {
+      fetchRecordingTrackCandidateByReleaseTrack(releaseTrackId)
+        .then((payload) => {
+          if (cancelled) {
+            return;
           }
-        }
-        const items = Array.from(itemByKey.values());
-        const hydratedRecordingCandidate = recordingCandidate
-          ? itemByKey.get(recordingCandidate.candidate_key) ?? recordingCandidate
-          : null;
-        setSelectedPreviewRelatedCandidates(items);
-        setSelectedPreviewRecordingCandidate(hydratedRecordingCandidate);
-      })
-      .catch((error) => {
-        if (cancelled) {
-          return;
-        }
-        setSelectedPreviewRecordingCandidate(null);
-        setSelectedPreviewRelatedCandidates([]);
-        setSelectedPreviewRecordingCandidateError(formatUiErrorMessage(error, "Recording view could not be loaded."));
-      });
+          const baseItems = payload.items ?? (payload.item ? [payload.item] : []);
+          const recordingCandidate = baseItems.find((item) => item.candidate_type === "recording_track_candidate") ?? null;
+          const itemByKey = new Map<string, RecordingTrackCandidateItem>();
+          for (const payloadItems of [baseItems]) {
+            for (const item of payloadItems) {
+              itemByKey.set(item.candidate_key, item);
+            }
+          }
+          const items = Array.from(itemByKey.values());
+          const hydratedRecordingCandidate = recordingCandidate
+            ? itemByKey.get(recordingCandidate.candidate_key) ?? recordingCandidate
+            : null;
+          setSelectedPreviewRelatedCandidates(items);
+          setSelectedPreviewRecordingCandidate(hydratedRecordingCandidate);
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+          setSelectedPreviewRecordingCandidate(null);
+          setSelectedPreviewRelatedCandidates([]);
+          setSelectedPreviewRecordingCandidateError(formatUiErrorMessage(error, "Recording view could not be loaded."));
+        });
+    }, 120);
     return () => {
       cancelled = true;
+      window.clearTimeout(candidateTimer);
     };
   }, [selectedPreviewReleaseTrackId]);
 
@@ -3058,9 +3130,13 @@ export function App() {
       }
     }
 
-    void loadAlbumTrackEntries();
+    const albumTrackLoadDelayMs = activePreview.kind === "track" ? 120 : 0;
+    const albumTrackLoadTimer = window.setTimeout(() => {
+      void loadAlbumTrackEntries();
+    }, albumTrackLoadDelayMs);
     return () => {
       cancelled = true;
+      window.clearTimeout(albumTrackLoadTimer);
     };
   }, [
     experienceMode,
@@ -3394,15 +3470,25 @@ export function App() {
       setPlaylistTrackEntriesLoading(false);
       setPlaylistTrackEntriesError(selectedPreview?.kind === "playlist" ? "Playlist tracks cannot be loaded because this playlist is missing a Spotify id." : null);
       setPlaylistTrackEntriesHasMore(false);
+      setPlaylistTrackEntriesTotal(null);
+      setPlaylistTrackEntriesNextOffset(null);
+      setPlaylistTrackEntriesOffset(0);
       return () => {
         cancelled = true;
       };
     }
     const normalizedPlaylistId = playlistId;
-    const cachedPlaylistTrackEntries = playlistTrackEntriesCacheRef.current[normalizedPlaylistId];
+    const initialOffset = selectedPreview?.kind === "playlist" && typeof selectedPreview.focusPlaylistPosition === "number"
+      ? Math.max(0, Math.floor(selectedPreview.focusPlaylistPosition / 500) * 500)
+      : 0;
+    const playlistCacheKey = `${normalizedPlaylistId}:${initialOffset}`;
+    const cachedPlaylistTrackEntries = playlistTrackEntriesCacheRef.current[playlistCacheKey];
     if (cachedPlaylistTrackEntries) {
       setPlaylistTrackEntries(cachedPlaylistTrackEntries.items);
       setPlaylistTrackEntriesHasMore(cachedPlaylistTrackEntries.hasMore);
+      setPlaylistTrackEntriesTotal(cachedPlaylistTrackEntries.total);
+      setPlaylistTrackEntriesNextOffset(cachedPlaylistTrackEntries.nextOffset);
+      setPlaylistTrackEntriesOffset(initialOffset);
       setPlaylistTrackEntriesLoading(false);
       setPlaylistTrackEntriesError(cachedPlaylistTrackEntries.items.length === 0 ? "No tracks were returned for this playlist." : null);
       return () => {
@@ -3414,10 +3500,14 @@ export function App() {
       setPlaylistTrackEntriesLoading(true);
       setPlaylistTrackEntriesError(null);
       setPlaylistTrackEntriesHasMore(false);
+      setPlaylistTrackEntriesTotal(null);
+      setPlaylistTrackEntriesNextOffset(null);
+      setPlaylistTrackEntriesOffset(initialOffset);
       try {
         const params = new URLSearchParams({
           playlist_id: normalizedPlaylistId,
           limit: "500",
+          offset: String(initialOffset),
         });
         const response = await fetch(`${apiBaseUrl}/auth/playback/playlist-tracks?${params.toString()}`, {
           credentials: "include",
@@ -3437,13 +3527,20 @@ export function App() {
         const payload = (await response.json()) as {
           items?: RecentTrack[];
           has_more?: boolean | null;
+          total?: number | null;
+          next_offset?: number | null;
         };
         if (!cancelled) {
           const items = payload.items ?? [];
           const hasMore = Boolean(payload.has_more);
-          playlistTrackEntriesCacheRef.current[normalizedPlaylistId] = { items, hasMore };
+          const total = typeof payload.total === "number" ? payload.total : null;
+          const nextOffset = typeof payload.next_offset === "number" ? payload.next_offset : initialOffset + items.length;
+          playlistTrackEntriesCacheRef.current[playlistCacheKey] = { items, hasMore, total, nextOffset };
           setPlaylistTrackEntries(items);
           setPlaylistTrackEntriesHasMore(hasMore);
+          setPlaylistTrackEntriesTotal(total);
+          setPlaylistTrackEntriesNextOffset(nextOffset);
+          setPlaylistTrackEntriesOffset(initialOffset);
           setPlaylistTrackEntriesError(items.length === 0 ? "No tracks were returned for this playlist." : null);
         }
       } catch (error) {
@@ -3451,6 +3548,9 @@ export function App() {
           setPlaylistTrackEntriesError(error instanceof Error ? error.message : "Playlist tracks could not be loaded.");
           setPlaylistTrackEntries([]);
           setPlaylistTrackEntriesHasMore(false);
+          setPlaylistTrackEntriesTotal(null);
+          setPlaylistTrackEntriesNextOffset(null);
+          setPlaylistTrackEntriesOffset(initialOffset);
         }
       } finally {
         if (!cancelled) {
@@ -3463,7 +3563,136 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedPreview?.entityId, selectedPreview?.kind, selectedPreview?.url]);
+  }, [selectedPreview?.entityId, selectedPreview?.focusPlaylistPosition, selectedPreview?.kind, selectedPreview?.url]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (selectedPreview?.kind !== "track") {
+      setSelectedPreviewPlaylistMemberships([]);
+      setSelectedPreviewPlaylistMembershipsLoading(false);
+      setSelectedPreviewPlaylistIndexStatus(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const trackId = selectedPreview.trackId ?? spotifyTrackIdFromUri(selectedPreview.trackUri) ?? selectedPreview.sourceTrack?.track_id ?? null;
+    const currentReleaseTrackId = selectedPreview.releaseTrackId ?? selectedPreview.sourceTrack?.release_track_id ?? null;
+    const releaseTrackIds = selectedPreviewDetailView === "release"
+      ? [currentReleaseTrackId].filter((value): value is number => typeof value === "number" && value > 0)
+      : [
+        currentReleaseTrackId,
+        ...(selectedPreview.sourceTrack?.recording_release_track_ids ?? []),
+        ...selectedPreviewRecordingMembers.map((member) => member.release_track_id),
+      ].filter((value): value is number => typeof value === "number" && value > 0);
+    if (!trackId && releaseTrackIds.length === 0) {
+      setSelectedPreviewPlaylistMemberships([]);
+      setSelectedPreviewPlaylistMembershipsLoading(false);
+      setSelectedPreviewPlaylistIndexStatus(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    async function loadPlaylistMemberships() {
+      setSelectedPreviewPlaylistMembershipsLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (trackId) {
+          params.set("track_id", trackId);
+        }
+        if (releaseTrackIds[0]) {
+          params.set("release_track_id", String(releaseTrackIds[0]));
+        }
+        if (releaseTrackIds.length > 0) {
+          params.set("recording_release_track_ids", Array.from(new Set(releaseTrackIds)).join(","));
+        }
+        params.set("mode", selectedPreviewDetailView === "release" ? "individual" : "representative");
+        const response = await fetch(`${apiBaseUrl}/tracks/playlist-memberships?${params.toString()}`, {
+          credentials: "include",
+        });
+        if (!response.ok) {
+          throw new Error(`Playlist memberships failed (${response.status}).`);
+        }
+        const payload = (await response.json()) as {
+          items?: PlaylistMembership[];
+          playlist_index_status?: PlaylistIndexStatus | null;
+        };
+        if (!cancelled) {
+          setSelectedPreviewPlaylistMemberships(payload.items ?? []);
+          setSelectedPreviewPlaylistIndexStatus(payload.playlist_index_status ?? null);
+        }
+      } catch {
+        if (!cancelled) {
+          setSelectedPreviewPlaylistMemberships([]);
+          setSelectedPreviewPlaylistIndexStatus(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setSelectedPreviewPlaylistMembershipsLoading(false);
+        }
+      }
+    }
+    void loadPlaylistMemberships();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPreview, selectedPreviewDetailView]);
+
+  async function loadMorePlaylistTrackEntries() {
+    const playlistId = selectedPreview?.kind === "playlist"
+      ? selectedPreview.entityId ?? spotifyPlaylistIdFromUrl(selectedPreview.url)
+      : null;
+    const normalizedPlaylistId = playlistId?.trim();
+    if (!normalizedPlaylistId || playlistTrackEntriesLoading || !playlistTrackEntriesHasMore) {
+      return;
+    }
+    const offset = playlistTrackEntriesNextOffset ?? playlistTrackEntries.length;
+    setPlaylistTrackEntriesLoading(true);
+    setPlaylistTrackEntriesError(null);
+    try {
+      const params = new URLSearchParams({
+        playlist_id: normalizedPlaylistId,
+        limit: "500",
+        offset: String(offset),
+      });
+      const response = await fetch(`${apiBaseUrl}/auth/playback/playlist-tracks?${params.toString()}`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        let detail = `Failed to load playlist tracks (${response.status}).`;
+        try {
+          const payload = (await response.json()) as { detail?: string };
+          if (payload.detail) {
+            detail = payload.detail;
+          }
+        } catch {
+          // Keep status fallback.
+        }
+        throw new Error(detail);
+      }
+      const payload = (await response.json()) as {
+        items?: RecentTrack[];
+        has_more?: boolean | null;
+        total?: number | null;
+        next_offset?: number | null;
+      };
+      const incomingItems = payload.items ?? [];
+      const total = typeof payload.total === "number" ? payload.total : playlistTrackEntriesTotal;
+      const nextOffset = typeof payload.next_offset === "number" ? payload.next_offset : offset + incomingItems.length;
+      const hasMore = Boolean(payload.has_more);
+      setPlaylistTrackEntries((current) => {
+        const items = [...current, ...incomingItems];
+        playlistTrackEntriesCacheRef.current[`${normalizedPlaylistId}:${playlistTrackEntriesOffset}`] = { items, hasMore, total, nextOffset };
+        return items;
+      });
+      setPlaylistTrackEntriesHasMore(hasMore);
+      setPlaylistTrackEntriesTotal(total);
+      setPlaylistTrackEntriesNextOffset(nextOffset);
+    } catch (error) {
+      setPlaylistTrackEntriesError(error instanceof Error ? error.message : "More playlist tracks could not be loaded.");
+    } finally {
+      setPlaylistTrackEntriesLoading(false);
+    }
+  }
 
   async function fetchPlaybackToken() {
     if (experienceMode === "local") {
@@ -3688,9 +3917,11 @@ export function App() {
       first_played_at?: string | null;
       last_played_at?: string | null;
       source_play_count?: number | null;
+      source_playlist_count?: number | null;
       source_first_played_at?: string | null;
       source_last_played_at?: string | null;
       recording_play_count?: number | null;
+      recording_playlist_count?: number | null;
       recording_first_played_at?: string | null;
       recording_last_played_at?: string | null;
       family_exclusive?: boolean | null;
@@ -3772,6 +4003,9 @@ export function App() {
           ? Math.max(0, item.source_play_count)
           : (sourceLastPlayedAt ? 1 : 0)
         : undefined;
+      const sourcePlaylistCount = typeof item.source_playlist_count === "number" && Number.isFinite(item.source_playlist_count)
+        ? Math.max(0, item.source_playlist_count)
+        : undefined;
       const lastPlayedAt = backendLastPlayedAt ?? (id ? (latestPlayedAtByTrackId.get(id) ?? null) : null);
       const playCount = typeof item.play_count === "number" && Number.isFinite(item.play_count) ? Math.max(0, item.play_count) : (lastPlayedAt ? 1 : 0);
       const recordingLastPlayedAt = typeof item.recording_last_played_at === "string" && item.recording_last_played_at.trim()
@@ -3780,6 +4014,9 @@ export function App() {
       const recordingPlayCount = typeof item.recording_play_count === "number" && Number.isFinite(item.recording_play_count)
         ? Math.max(0, item.recording_play_count)
         : playCount;
+      const recordingPlaylistCount = typeof item.recording_playlist_count === "number" && Number.isFinite(item.recording_playlist_count)
+        ? Math.max(0, item.recording_playlist_count)
+        : (sourcePlaylistCount ?? 0);
       const recordingHistoryAvailable = Object.prototype.hasOwnProperty.call(item, "recording_last_played_at")
         && Object.prototype.hasOwnProperty.call(item, "recording_play_count");
       const sourceTrackWithHistory = sourceTrack
@@ -3815,8 +4052,10 @@ export function App() {
         lastPlayedAt,
         sourceLastPlayedAt,
         sourcePlayCount,
+        sourcePlaylistCount,
         recordingLastPlayedAt,
         recordingPlayCount,
+        recordingPlaylistCount,
         recordingHistoryAvailable,
         familyExclusive: Boolean(item.family_exclusive),
         familyAvailableVersions: item.family_available_versions ?? [],
@@ -4056,21 +4295,38 @@ export function App() {
       }
       return normalizedTrackArtistKey(candidate.track_name, candidate.artist_name) === normalizedTrackArtistKey(track.name, track.artists);
     }) ?? null;
+    const resolvedTrackId = track.trackId ?? queueKnownTrack?.track_id ?? spotifyTrackIdFromUri(track.uri) ?? null;
+    const resolvedTrackUri = track.uri ?? queueKnownTrack?.uri ?? (resolvedTrackId ? `spotify:track:${resolvedTrackId}` : null);
+    const resolvedAlbumId = track.albumId ?? queueKnownTrack?.album_id ?? null;
+    const resolvedAlbumName = track.album ?? queueKnownTrack?.album_name ?? null;
+    const resolvedImage = track.image ?? queueKnownTrack?.image_url ?? null;
+    const resolvedArtistName = track.artists ?? queueKnownTrack?.artist_name ?? null;
+    const resolvedArtists = uniqueArtistEntries(track.artistItems, queueKnownTrack?.artists, artistEntriesFromText(resolvedArtistName));
     setSelectedPreview({
-      image: track.image,
+      image: resolvedImage,
       fallbackLabel: "T",
-      label: track.name,
-      meta: track.artists,
-      detail: track.album,
+      label: track.name || queueKnownTrack?.track_name || "Track",
+      meta: resolvedArtistName,
+      detail: resolvedAlbumName,
       kind: "track",
-      entityId: track.trackId,
-      trackUri: track.uri,
-      url: spotifyTrackUrl(track.uri) ?? "",
-      trackId: track.trackId,
-      releaseTrackId: queueKnownTrack?.release_track_id ?? releaseTrackIdForSpotifyTrackId(track.trackId),
-      albumId: track.albumId,
-      artistName: track.artists,
-      artists: uniqueArtistEntries(track.artistItems, queueKnownTrack?.artists, artistEntriesFromText(track.artists)),
+      entityId: resolvedTrackId,
+      trackUri: resolvedTrackUri,
+      url: spotifyTrackUrl(resolvedTrackUri) ?? (queueKnownTrack?.url ?? ""),
+      trackId: resolvedTrackId,
+      releaseTrackId: queueKnownTrack?.release_track_id ?? releaseTrackIdForSpotifyTrackId(resolvedTrackId),
+      releaseTrackName: queueKnownTrack?.release_track_name ?? null,
+      releaseTrackSourceCount: queueKnownTrack?.release_track_source_count ?? null,
+      releaseTrackDuplicateSourceCount: queueKnownTrack?.release_track_duplicate_source_count ?? null,
+      hasReleaseTrackSiblings: queueKnownTrack?.has_release_track_siblings ?? null,
+      releaseTrackClusterCandidateType: queueKnownTrack?.release_track_cluster_candidate_type ?? null,
+      releaseTrackClusterRelationshipKind: queueKnownTrack?.release_track_cluster_relationship_kind ?? null,
+      albumId: resolvedAlbumId,
+      artistName: resolvedArtistName,
+      artists: resolvedArtists,
+      sourceAlbumId: resolvedAlbumId,
+      sourceAlbumName: resolvedAlbumName,
+      sourceAlbumImage: resolvedImage,
+      sourceAlbumYear: queueKnownTrack?.album_release_year ?? null,
       sourceTrack: queueKnownTrack,
     });
   }
@@ -6128,6 +6384,63 @@ export function App() {
     };
   }
 
+  async function togglePlaylistTrackPreview(track: RecentTrack, rowTrackUri: string | null) {
+    if (!rowTrackUri) {
+      return;
+    }
+    const previewIsActiveForRow = Boolean(previewingTrackUriRef.current && previewingTrackUriRef.current === rowTrackUri);
+    if (previewIsActiveForRow) {
+      await stopTrackPreviewPlayback();
+      return;
+    }
+    const existingPreviewSession = previewPlaybackSessionRef.current;
+    const baseTrack = existingPreviewSession?.baseTrack ?? playerDisplayTrack;
+    const basePositionMs = existingPreviewSession?.basePositionMs ?? playerDisplayPositionMs;
+    const baseDurationMs = existingPreviewSession?.baseDurationMs ?? (playerDisplayDurationMs || playerDisplayTrack?.durationMs || 0);
+    const basePaused = existingPreviewSession?.basePaused ?? playerDisplayPaused;
+    clearPreviewPlaybackState();
+    const durationMs = Math.max(0, track.duration_ms ?? 0);
+    if (durationMs < 60_000) {
+      setPlayerError("Preview is only available for tracks longer than 60 seconds.");
+      return;
+    }
+    const minStartMs = 20_000;
+    const maxStartMs = durationMs - 40_000;
+    if (maxStartMs < minStartMs) {
+      setPlayerError("Preview window could not be generated for this track.");
+      return;
+    }
+    const randomStartMs = Math.floor(Math.random() * (maxStartMs - minStartMs + 1)) + minStartMs;
+    await setPlayerVolumeSafe(PREVIEW_RAMP_START_VOLUME);
+    const previewTrack = {
+      ...playerSummaryFromPlaylistTrack(track),
+      uri: rowTrackUri,
+      durationMs,
+    };
+    const playbackStarted = await playTrackUri(rowTrackUri, randomStartMs);
+    if (!playbackStarted) {
+      restoreDefaultPlayerVolume();
+      return;
+    }
+    setPreviewPlayedTrackKeys((current) => {
+      const next = new Set(current);
+      next.add(`playlist:${track.track_id ?? rowTrackUri ?? track.track_name ?? "track"}`);
+      return next;
+    });
+    setPreviewPlaybackSession({
+      baseTrack,
+      basePositionMs: Math.max(0, basePositionMs),
+      baseDurationMs: Math.max(0, baseDurationMs),
+      basePaused,
+      previewTrack,
+    });
+    setPreviewingTrackUriState(rowTrackUri);
+    startPreviewVolumeRamp();
+    previewStopTimerRef.current = window.setTimeout(() => {
+      void stopTrackPreviewPlayback(true);
+    }, 20_000);
+  }
+
   function buildPlaylistPlaybackQueue(selectedTrackUri: string | null) {
     const playableTracks = playlistTrackEntries
       .map((track) => {
@@ -6169,6 +6482,280 @@ export function App() {
         url: selectedPreview?.url ?? null,
       },
     };
+  }
+
+  function openPlaylistMembershipPreview(membership: PlaylistMembership) {
+    setSelectedPreview({
+      image: membership.playlist_image_url ?? null,
+      fallbackLabel: "P",
+      label: membership.playlist_name ?? "Untitled playlist",
+      meta: membership.owner_name ? `By ${membership.owner_name}` : "Playlist",
+      detail: `${membership.position + 1}`,
+      kind: "playlist",
+      entityId: membership.playlist_id,
+      trackUri: null,
+      url: membership.playlist_url ?? "",
+      focusPlaylistPosition: membership.position,
+      focusSpotifyTrackId: membership.spotify_track_id,
+    });
+  }
+
+  async function hidePlaylistFromListenLab(playlist: OwnedPlaylist) {
+    const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+    if (!playlistId) {
+      setPlayerError("This playlist is missing a Spotify id.");
+      return;
+    }
+    setProfile((current) => current
+      ? {
+        ...current,
+        owned_playlists: current.owned_playlists.map((item) => (
+          (item.playlist_id ?? spotifyPlaylistIdFromUrl(item.url)) === playlistId
+            ? { ...item, hidden_by_user: true }
+            : item
+        )),
+      }
+      : current);
+    try {
+      const response = await fetch(`${apiBaseUrl}/playlists/${encodeURIComponent(playlistId)}/hidden`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hidden: true }),
+      });
+      if (!response.ok) {
+        throw new Error(`Hide playlist failed (${response.status}).`);
+      }
+      setSelectedPreviewPlaylistMemberships((current) => current.filter((membership) => membership.playlist_id !== playlistId));
+    } catch (error) {
+      setPlayerError(error instanceof Error ? error.message : "Playlist could not be hidden.");
+      setProfile((current) => current
+        ? {
+          ...current,
+          owned_playlists: current.owned_playlists.map((item) => (
+            (item.playlist_id ?? spotifyPlaylistIdFromUrl(item.url)) === playlistId
+              ? { ...item, hidden_by_user: false }
+              : item
+          )),
+        }
+        : current);
+    }
+  }
+
+  async function unhidePlaylistInListenLab(playlist: OwnedPlaylist) {
+    const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+    if (!playlistId) {
+      setPlayerError("This playlist is missing a Spotify id.");
+      return;
+    }
+    setProfile((current) => current
+      ? {
+        ...current,
+        owned_playlists: current.owned_playlists.map((item) => (
+          (item.playlist_id ?? spotifyPlaylistIdFromUrl(item.url)) === playlistId
+            ? { ...item, hidden_by_user: false }
+            : item
+        )),
+      }
+      : current);
+    try {
+      const response = await fetch(`${apiBaseUrl}/playlists/${encodeURIComponent(playlistId)}/hidden`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hidden: false }),
+      });
+      if (!response.ok) {
+        throw new Error(`Unhide playlist failed (${response.status}).`);
+      }
+    } catch (error) {
+      setPlayerError(error instanceof Error ? error.message : "Playlist could not be unhidden.");
+      setProfile((current) => current
+        ? {
+          ...current,
+          owned_playlists: current.owned_playlists.map((item) => (
+            (item.playlist_id ?? spotifyPlaylistIdFromUrl(item.url)) === playlistId
+              ? { ...item, hidden_by_user: true }
+              : item
+          )),
+        }
+        : current);
+    }
+  }
+
+  async function deletePlaylistFromSpotify(playlist: OwnedPlaylist) {
+    const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+    if (!playlistId) {
+      setPlayerError("This playlist is missing a Spotify id.");
+      return;
+    }
+    const playlistName = playlist.name ?? "this playlist";
+    const confirmed = window.confirm(`Delete ${playlistName} from Spotify? This cannot be undone here.`);
+    if (!confirmed) {
+      return;
+    }
+    const previousProfile = profile;
+    setProfile((current) => current
+      ? {
+        ...current,
+        owned_playlists: current.owned_playlists.filter((item) => (item.playlist_id ?? spotifyPlaylistIdFromUrl(item.url)) !== playlistId),
+      }
+      : current);
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/playback/playlists/${encodeURIComponent(playlistId)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(`Delete playlist failed (${response.status}).`);
+      }
+      setSelectedPreviewPlaylistMemberships((current) => current.filter((membership) => membership.playlist_id !== playlistId));
+    } catch (error) {
+      setPlayerError(error instanceof Error ? error.message : "Playlist could not be deleted.");
+      setProfile(previousProfile);
+    }
+  }
+
+  async function addSelectedTrackToPlaylists(playlistIds: string[], removePlaylistIds: string[], newPlaylistName: string | null) {
+    if (selectedPreview?.kind !== "track") {
+      throw new Error("Open a track before adding it to a playlist.");
+    }
+    const trackUri = selectedPreviewPlaybackTrackUri ?? trackUriWithFallback(selectedPreview.trackUri, selectedPreview.trackId);
+    if (!trackUri) {
+      throw new Error("This track does not have a playable Spotify URI.");
+    }
+    const selectedPlaylistIds = Array.from(new Set(playlistIds.map((playlistId) => playlistId.trim()).filter(Boolean)));
+    const createdPlaylists: OwnedPlaylist[] = [];
+    async function readError(response: Response, fallback: string) {
+      try {
+        const payload = await response.json() as { detail?: string };
+        return payload.detail || fallback;
+      } catch {
+        return fallback;
+      }
+    }
+    if (newPlaylistName?.trim()) {
+      const response = await fetch(`${apiBaseUrl}/auth/playback/playlists`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: newPlaylistName.trim(),
+          track_uri: trackUri,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response, `Playlist creation failed (${response.status}).`));
+      }
+      const payload = await response.json() as { playlist?: OwnedPlaylist };
+      if (payload.playlist?.playlist_id) {
+        createdPlaylists.push(payload.playlist);
+      }
+    }
+    let addedPlaylistIds = selectedPlaylistIds;
+    const selectedRemovePlaylistIds = Array.from(new Set(removePlaylistIds.map((playlistId) => playlistId.trim()).filter(Boolean)));
+    if (selectedPlaylistIds.length > 0) {
+      const response = await fetch(`${apiBaseUrl}/auth/playback/playlist-tracks`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playlist_ids: selectedPlaylistIds,
+          track_uri: trackUri,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response, `Playlist update failed (${response.status}).`));
+      }
+      const payload = await response.json() as { added_playlist_ids?: string[]; errors?: { playlist_id: string; error: string }[] };
+      addedPlaylistIds = payload.added_playlist_ids ?? selectedPlaylistIds;
+      if (payload.errors?.length) {
+        setPlayerError(payload.errors.map((error) => error.error).join(" "));
+      }
+    }
+    let removedPlaylistIds = selectedRemovePlaylistIds;
+    if (selectedRemovePlaylistIds.length > 0) {
+      const response = await fetch(`${apiBaseUrl}/auth/playback/playlist-tracks`, {
+        method: "DELETE",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playlist_ids: selectedRemovePlaylistIds,
+          track_uri: trackUri,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response, `Playlist update failed (${response.status}).`));
+      }
+      const payload = await response.json() as { removed_playlist_ids?: string[]; errors?: { playlist_id: string; error: string }[] };
+      removedPlaylistIds = payload.removed_playlist_ids ?? selectedRemovePlaylistIds;
+      if (payload.errors?.length) {
+        setPlayerError(payload.errors.map((error) => error.error).join(" "));
+      }
+    }
+    const playlistById = new Map((profile?.owned_playlists ?? []).map((playlist) => [playlist.playlist_id, playlist]));
+    for (const playlist of createdPlaylists) {
+      playlistById.set(playlist.playlist_id, playlist);
+    }
+    const trackId = spotifyTrackIdFromUri(trackUri);
+    const previewArtistName = selectedPreview.artists
+      ?.map((artist) => typeof artist === "string" ? artist : artist.name)
+      .find((name) => Boolean(name?.trim()))
+      ?? selectedPreview.sourceTrack?.artist_name
+      ?? selectedPreview.meta
+      ?? null;
+    const newMemberships: PlaylistMembership[] = [
+      ...addedPlaylistIds,
+      ...createdPlaylists.map((playlist) => playlist.playlist_id).filter((playlistId): playlistId is string => Boolean(playlistId)),
+    ]
+      .filter((playlistId, index, all) => all.indexOf(playlistId) === index)
+      .map((playlistId) => {
+        const playlist = playlistById.get(playlistId);
+        return {
+          playlist_id: playlistId,
+          playlist_name: playlist?.name ?? "Untitled playlist",
+          playlist_url: playlist?.url ?? null,
+          playlist_image_url: playlist?.image_url ?? null,
+          owner_name: playlist?.owner_name ?? null,
+          owner_id: playlist?.owner_id ?? null,
+          is_collaborative: playlist?.is_collaborative ?? null,
+          is_owned: playlist?.is_owned ?? null,
+          position: Math.max(0, playlist?.track_count ?? 1) - 1,
+          spotify_track_id: trackId,
+          track_name: selectedPreview.label,
+          artist_name: previewArtistName,
+          added_at: new Date().toISOString(),
+          release_track_id: selectedPreview.releaseTrackId ?? null,
+          recording_cluster_id: null,
+          representative_release_track_id: null,
+        };
+      });
+    if (newMemberships.length > 0) {
+      setSelectedPreviewPlaylistMemberships((current) => {
+        const membershipByPlaylistId = new Map(current.map((membership) => [membership.playlist_id, membership]));
+        for (const playlistId of removedPlaylistIds) {
+          membershipByPlaylistId.delete(playlistId);
+        }
+        for (const membership of newMemberships) {
+          membershipByPlaylistId.set(membership.playlist_id, membership);
+        }
+        return Array.from(membershipByPlaylistId.values());
+      });
+    } else if (removedPlaylistIds.length > 0) {
+      setSelectedPreviewPlaylistMemberships((current) => current.filter((membership) => !removedPlaylistIds.includes(membership.playlist_id)));
+    }
+    if (createdPlaylists.length > 0) {
+      setProfile((current) => current
+        ? {
+          ...current,
+          owned_playlists: [
+            ...createdPlaylists,
+            ...current.owned_playlists.filter((playlist) => !createdPlaylists.some((created) => created.playlist_id === playlist.playlist_id)),
+          ],
+          owned_playlists_available: true,
+        }
+        : current);
+    }
   }
 
   async function handlePlaylistTrackPlayback(track: RecentTrack, action: PlaybackAction) {
@@ -6499,26 +7086,6 @@ export function App() {
     }
   }
 
-  async function reconnectSpotify() {
-    const response = await fetch(`${apiBaseUrl}/cache/rebuild`, {
-      method: "POST",
-      credentials: "include",
-    });
-    if (!response.ok) {
-      let detail = "Failed to refresh cache before reconnecting Spotify.";
-      try {
-        const payload = (await response.json()) as { detail?: string };
-        if (payload.detail) {
-          detail = payload.detail;
-        }
-      } catch {
-        // Keep fallback detail.
-      }
-      throw new Error(detail);
-    }
-    startLogin();
-  }
-
   function handleAuthAction() {
     if (experienceMode === "local") {
       setProfile(null);
@@ -6528,7 +7095,7 @@ export function App() {
       return;
     }
     if (session?.authenticated) {
-      void reconnectSpotify();
+      startLogin();
       return;
     }
     startLogin();
@@ -6549,17 +7116,6 @@ export function App() {
         }));
       }, 180);
       return;
-    }
-
-    if (
-      section === "playlists"
-      && !isCurrentlyOpen
-      && experienceMode === "full"
-      && profile
-      && !profile.extended_loaded
-      && !loadingExtendedProfile
-    ) {
-      void loadExtendedProfile(recentRange, analysisMode);
     }
 
     setOpenSections((current) => ({
@@ -10314,30 +10870,23 @@ export function App() {
               </button>
             </div>
 
-            <div className={`player-home-album${homeAlbumExpanded ? " player-home-album-expanded" : ""}`}>
-              {playerDisplayTrack?.image ? (
-                <button
-                  aria-expanded={homeAlbumExpanded}
-                  className="player-home-album-art-button"
-                  disabled={!playerDisplayAlbumName}
-                  onClick={() => setHomeAlbumExpanded((current) => !current)}
-                  type="button"
-                >
-                  <img alt={`${playerDisplayAlbumName ?? playerDisplayTrack.album} cover`} className="player-menu-image player-home-album-image" src={playerDisplayTrack.image} />
-                </button>
-              ) : null}
-              {playerDisplayAlbumName ? (
-                <button
-                  className="player-home-album-title single-line-ellipsis"
-                  onClick={openPlayerAlbumDetails}
-                  type="button"
-                >
-                  {playerDisplayAlbumLabel}
-                </button>
-              ) : (
-                <p className="player-home-album-title player-home-album-title-static single-line-ellipsis">{playerDisplayAlbumLabel}</p>
-              )}
-              {homeAlbumExpanded ? (
+            <div className="player-home-album">
+              <HomeAlbumAppearanceStrip
+                currentAlbum={{
+                  name: playerDisplayAlbumName,
+                  imageUrl: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+                  year: playerDisplayAlbumYear,
+                  albumType: playerDisplayKnownTrack?.spotify_album_type ?? null,
+                  onClick: openPlayerTrackDetails,
+                }}
+                recordingMembers={(homeRecordingCandidate?.members ?? []).filter((member) => member.release_track_id !== playerDisplayReleaseTrackId)}
+                recordingMemberAlbumImageUrl={recordingMemberAlbumImageUrl}
+                recordingMemberAlbumName={recordingMemberAlbumName}
+                recordingMemberReleaseYear={recordingMemberReleaseYear}
+                onMemberClick={(member) => openRecordingCandidateReleaseTrack(member, "recording")}
+                sourceTrack={playerDisplayKnownTrack}
+              />
+              {false && homeAlbumExpanded ? (
                 <div className="player-home-album-tracks detail-modal-album-tracks detail-modal-album-tracks-full">
                   <div className="detail-modal-album-header">
                     {hasPremiumPlayback ? (
@@ -10677,6 +11226,12 @@ export function App() {
             </div>
           </aside>
         </div>
+        <PlayerBottomDrawer
+          activeTab={playerDrawerActiveTab}
+          expanded={playerDrawerExpanded}
+          onTabChange={setPlayerDrawerActiveTab}
+          onToggle={() => setPlayerDrawerExpanded((current) => !current)}
+        />
       </section>
     );
   }
@@ -10956,7 +11511,6 @@ export function App() {
     ? `Grouped with ${selectedPreviewReleaseSiblingSourceCount} source ${selectedPreviewReleaseSiblingSourceCount === 1 ? "version" : "versions"}`
     : null;
   const selectedPreviewCanonicalTrackTitle = selectedPreviewReleaseTrackDetailReady?.release_track.name?.trim() || null;
-  const selectedPreviewCanViewReleaseTrack = selectedPreview?.kind === "track" && selectedPreviewReleaseSourceVersions.length > 1;
   const selectedPreviewCurrentSpotifyTrackId = selectedPreview?.kind === "track"
     ? selectedPreview.trackId ?? spotifyTrackIdFromUri(selectedPreview.trackUri)
     : null;
@@ -12784,6 +13338,7 @@ export function App() {
               enqueueVisibleIncompleteLookupAlbums={enqueueVisibleIncompleteLookupAlbums}
               enqueueVisibleIncompleteLookupTracks={enqueueVisibleIncompleteLookupTracks}
               experienceMode={experienceMode}
+              apiBaseUrl={apiBaseUrl}
               likedTracksAvailableForActivity={likedTracksAvailableForActivity}
               likedTracksCacheStatus={likedTracksCacheStatus}
               likedTracksCountMode={likedTracksCountMode}
@@ -12884,6 +13439,9 @@ export function App() {
               setSearchLookupQueueStatus={setSearchLookupQueueStatus}
               setSearchLookupSort={setSearchLookupSort}
               setSelectedPreview={setSelectedPreview}
+              hidePlaylistFromListenLab={hidePlaylistFromListenLab}
+              unhidePlaylistInListenLab={unhidePlaylistInListenLab}
+              deletePlaylistFromSpotify={deletePlaylistFromSpotify}
               setShowDebugLinkFields={setShowDebugLinkFields}
               setTrackCatalogLookupStatus={setTrackCatalogLookupStatus}
               showDebugLinkFields={showDebugLinkFields}
@@ -12906,6 +13464,7 @@ export function App() {
       {selectedPreview ? (
         <Suspense fallback={null}>
           <DetailPreviewModal
+            apiBaseUrl={apiBaseUrl}
             albumTrackEntries={albumTrackEntries}
             albumTrackEntriesError={albumTrackEntriesError}
             albumTrackEntriesLoading={albumTrackEntriesLoading}
@@ -12958,6 +13517,8 @@ export function App() {
             openSelectedArtistMemberPreview={openSelectedArtistMemberPreview}
             openSelectedTrackAlbumPreview={openSelectedTrackAlbumPreview}
             openSelectedTrackArtistPreview={openSelectedTrackArtistPreview}
+            openPlaylistMembershipPreview={openPlaylistMembershipPreview}
+            onAddSelectedTrackToPlaylists={addSelectedTrackToPlaylists}
             pausedTimeFlashOn={pausedTimeFlashOn}
             playbackDurationMs={playbackDurationMs}
             playbackPaused={playbackPaused}
@@ -12966,6 +13527,12 @@ export function App() {
             playlistTrackEntriesError={playlistTrackEntriesError}
             playlistTrackEntriesHasMore={playlistTrackEntriesHasMore}
             playlistTrackEntriesLoading={playlistTrackEntriesLoading}
+            playlistTrackEntriesOffset={playlistTrackEntriesOffset}
+            playlistTrackEntriesShowCollaborativeColumns={selectedPreviewPlaylistIsCollaborative}
+            playlistTrackEntriesTotal={playlistTrackEntriesTotal}
+            loadMorePlaylistTrackEntries={loadMorePlaylistTrackEntries}
+            recentTrackIsKnownLiked={recentTrackIsKnownLiked}
+            togglePlaylistTrackPreview={togglePlaylistTrackPreview}
             handlePlaylistPlayAll={handlePlaylistPlayAll}
             handlePlaylistTrackPlayback={handlePlaylistTrackPlayback}
             playerSummaryFromAlbumTrack={playerSummaryFromAlbumTrack}
@@ -12993,11 +13560,12 @@ export function App() {
             selectedPreviewAlbumContextTagLabel={selectedPreviewAlbumContextTagLabel}
             selectedPreviewAppearsOnAlbums={selectedPreviewAppearsOnAlbumsForMode}
             selectedPreviewArtistAlbumsForDisplay={selectedPreviewArtistAlbumsForMode}
+            selectedPreviewArtistFollowStatusKnown={selectedPreviewArtistFollowStatusKnown}
             selectedPreviewArtistImageUrl={selectedPreviewArtistImageUrl}
+            selectedPreviewArtistIsSpotifyFollowed={selectedPreviewArtistIsSpotifyFollowed}
             selectedPreviewArtists={selectedPreviewArtists}
             selectedPreviewCanOpenAlbum={selectedPreviewCanOpenAlbum}
             selectedPreviewCanOpenArtist={selectedPreviewCanOpenArtist}
-            selectedPreviewCanViewReleaseTrack={selectedPreviewCanViewReleaseTrack}
             selectedPreviewCanonicalTrackTitle={selectedPreviewCanonicalTrackTitle}
             selectedPreviewCurrentSpotifyTrackId={selectedPreviewCurrentSpotifyTrackId}
             selectedPreviewCurrentVersionIsSpotifyLiked={selectedPreviewCurrentVersionIsSpotifyLiked}
@@ -13013,8 +13581,14 @@ export function App() {
             selectedPreviewListenCountLabel={selectedPreviewListenCountLabel}
             selectedPreviewOtherRecordingMembers={selectedPreviewOtherRecordingMembers}
             selectedPreviewPlaybackTrackUri={selectedPreviewPlaybackTrackUri}
+            selectedPreviewPlaylistMemberships={selectedPreviewPlaylistMemberships}
+            selectedPreviewPlaylistMembershipsLoading={selectedPreviewPlaylistMembershipsLoading}
+            selectedPreviewPlaylistIndexStatus={selectedPreviewPlaylistIndexStatus}
+            selectedPreviewPlaylistOwnerFollowedByYou={selectedPreviewPlaylistOwnerFollowedByYou}
+            selectedPreviewAvailablePlaylists={(profile?.owned_playlists ?? []).filter((playlist) => !playlist.hidden_by_user)}
             selectedPreviewPrimaryArtistAlbums={selectedPreviewPrimaryArtistAlbumsForMode}
             selectedPreviewRecordingCandidateError={selectedPreviewRecordingCandidateError}
+            selectedPreviewRecordingMembers={selectedPreviewRecordingMembers}
             selectedPreviewReleaseAlbumVariationCount={selectedPreviewReleaseAlbumVariationCount}
             selectedPreviewReleaseSiblingSourceCount={selectedPreviewReleaseSiblingSourceCount}
             selectedPreviewReleaseSourceVersionNeedsArrows={selectedPreviewReleaseSourceVersionNeedsArrows}

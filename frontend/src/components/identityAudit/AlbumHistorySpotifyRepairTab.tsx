@@ -50,44 +50,57 @@ function CandidateCard({ candidate }: { candidate: ReleaseAlbumHistorySpotifyRep
         <div className="identity-audit-card-title-button">
           <span>
             <strong>{candidate.release_album_name || "Untitled album"}</strong>
-            <small>{candidate.normalized_artist || "unknown artist"} · release_album {candidate.release_album_ids.join(", ")}</small>
+            <small>{candidate.normalized_artist || "unknown artist"}</small>
           </span>
         </div>
         <span className={`identity-audit-type-badge ${candidate.safe ? "recording-track-good" : "recording-track-warn"}`}>
-          {candidate.safe ? "safe" : "blocked"}
+          {candidate.safe ? "ready to apply" : "needs review"}
         </span>
       </div>
 
-      <div className="identity-audit-stats">
-        <span className="identity-audit-stat"><span>survivor</span><strong>{candidate.survivor_release_album_id}</strong></span>
-        <span className="identity-audit-stat"><span>merge</span><strong>{candidate.merge_release_album_ids.join(", ")}</strong></span>
-        <span className="identity-audit-stat"><span>readiness</span><strong>{candidate.merge_readiness}</strong></span>
-        <span className="identity-audit-stat"><span>source maps</span><strong>{sourceMapCount}</strong></span>
-        <span className="identity-audit-stat"><span>track repoints</span><strong>{trackRepointCount}</strong></span>
-        <span className="identity-audit-stat"><span>conflicts</span><strong>{conflictCount}</strong></span>
+      <div className="identity-audit-card-summary">
+        <div>
+          <span>What happened</span>
+          <strong>History-only album matches a Spotify-backed album.</strong>
+        </div>
+        <div>
+          <span>{candidate.safe ? "Why safe" : "Why blocked"}</span>
+          <strong>{candidate.safe ? candidateChangeSummary(candidate) : candidate.blocked_reasons.join(", ") || "Repair evidence is incomplete."}</strong>
+        </div>
+        <div>
+          <span>Action</span>
+          <strong>{candidate.safe ? "Can be applied from the latest dry run." : "Blocked candidates are not applied."}</strong>
+        </div>
       </div>
 
-      <p className="identity-audit-tab-copy">{candidateChangeSummary(candidate)}</p>
-
-      {candidate.spotify_album_id ? (
-        <a className="identity-audit-note" href={spotifyAlbumUrl(candidate.spotify_album_id)} rel="noreferrer" target="_blank">
-          Spotify album {candidate.spotify_album_id}
-        </a>
-      ) : null}
-
-      {candidate.blocked_reasons.length > 0 ? (
-        <div className="album-repair-reasons" aria-label={`${title} blocked reasons`}>
-          {candidate.blocked_reasons.map((reason) => (
-            <span className="identity-audit-stat recording-track-warn" key={`${candidate.release_album_ids.join("-")}-${reason}`}>
-              <strong>{reason}</strong>
-            </span>
-          ))}
+      <details className="identity-audit-details">
+        <summary>Details</summary>
+        <div className="identity-audit-stats">
+          <span className="identity-audit-stat"><span>survivor</span><strong>{candidate.survivor_release_album_id}</strong></span>
+          <span className="identity-audit-stat"><span>merge</span><strong>{candidate.merge_release_album_ids.join(", ")}</strong></span>
+          <span className="identity-audit-stat"><span>readiness</span><strong>{candidate.merge_readiness}</strong></span>
+          <span className="identity-audit-stat"><span>source maps</span><strong>{sourceMapCount}</strong></span>
+          <span className="identity-audit-stat"><span>track repoints</span><strong>{trackRepointCount}</strong></span>
+          <span className="identity-audit-stat"><span>conflicts</span><strong>{conflictCount}</strong></span>
         </div>
-      ) : null}
 
-      {firstRepoints.length > 0 || firstConflicts.length > 0 ? (
-        <details>
-          <summary>Track moves</summary>
+        {candidate.spotify_album_id ? (
+          <a className="identity-audit-note" href={spotifyAlbumUrl(candidate.spotify_album_id)} rel="noreferrer" target="_blank">
+            Spotify album {candidate.spotify_album_id}
+          </a>
+        ) : null}
+
+        {candidate.blocked_reasons.length > 0 ? (
+          <div className="album-repair-reasons" aria-label={`${title} blocked reasons`}>
+            {candidate.blocked_reasons.map((reason) => (
+              <span className="identity-audit-stat recording-track-warn" key={`${candidate.release_album_ids.join("-")}-${reason}`}>
+                <strong>{reason}</strong>
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {firstRepoints.length > 0 || firstConflicts.length > 0 ? (
           <div className="album-repair-plan-list">
             {firstRepoints.map((row, index) => (
               <span className="identity-audit-stat" key={`album-repair-repoint-${candidate.release_album_ids.join("-")}-${index}`}>
@@ -108,8 +121,8 @@ function CandidateCard({ candidate }: { candidate: ReleaseAlbumHistorySpotifyRep
               </span>
             ) : null}
           </div>
-        </details>
-      ) : null}
+        ) : null}
+      </details>
     </article>
   );
 }

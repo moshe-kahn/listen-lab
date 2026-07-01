@@ -202,7 +202,7 @@ async def debug_tracks_recording_track_candidate_by_release(
     release_track_id: int,
 ) -> dict[str, Any]:
     _require_local_data_session(request)
-    items = get_recording_track_candidates_for_release_track(release_track_id)
+    items = get_recording_track_candidates_for_release_track(release_track_id, refresh_stale_display=False)
     item = items[0] if items else None
     return {
         "item": item,

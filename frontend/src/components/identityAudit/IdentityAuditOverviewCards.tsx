@@ -38,22 +38,22 @@ export function TrackIdentityAuditOverviewCards({
       cards={[
         {
           title: "Suspicious Splits",
-          copy: "Same normalized title/artist with multiple Spotify IDs.",
+          copy: "Tracks that may be split across multiple Spotify IDs.",
           value: canonicalCount,
         },
         {
-          title: "Ambiguous Mappings",
-          copy: "Multiple source tracks folded under a single release track.",
+          title: "Source Mapping Issues",
+          copy: "Source tracks that may be folded together incorrectly.",
           value: releaseCount,
         },
         {
-          title: "Grouping Concerns",
-          copy: "Release tracks grouped together for analysis.",
+          title: "Recording Groups",
+          copy: "Release tracks grouped as possible recording versions.",
           value: compositionCount,
         },
         {
-          title: "Suggested Matches",
-          copy: "Conservative title/artist matches awaiting review.",
+          title: "Ready To Review",
+          copy: "Conservative title/artist matches ready for judgment.",
           value: suggestedCount,
         },
         {
@@ -83,13 +83,13 @@ export function AlbumIdentityAuditOverviewCards({
     <IdentityAuditOverviewGrid
       cards={[
         {
-          title: "Duplicate Albums",
-          copy: "Strongest album duplicate signal using one resolved Spotify album.",
+          title: "Likely Duplicate Albums",
+          copy: "Album rows with strong Spotify-backed duplicate evidence.",
           value: duplicateAlbumCount,
         },
         {
-          title: "Duplicate Name + Artist",
-          copy: "Weaker text-based album duplicate signal when Spotify ID is missing or mixed.",
+          title: "Name Conflicts",
+          copy: "Same album and artist text, but weaker provider evidence.",
           value: duplicateNameArtistCount,
         },
         {

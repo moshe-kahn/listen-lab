@@ -171,8 +171,21 @@ function IssueCard({ issue, reviewState, expandedIssueKeys, setIssueReviewState,
           </div>
           <span className="identity-audit-type-badge">{issue.typeLabel}</span>
         </div>
+        <div className="identity-audit-card-summary">
+          <div>
+            <span>What happened</span>
+            <strong>{issue.entityLabel}</strong>
+          </div>
+          <div>
+            <span>Why flagged</span>
+            <strong>{issue.evidenceSummary}</strong>
+          </div>
+          <div>
+            <span>Action</span>
+            <strong>{issue.suggestedAction}</strong>
+          </div>
+        </div>
         <div className="identity-audit-stats">
-          <span className="identity-audit-stat"><span>Evidence</span><strong>{issue.evidenceSummary}</strong></span>
           <span className="identity-audit-stat"><span>Affected</span><strong>{issue.affectedCount}</strong></span>
           <span className="identity-audit-stat"><span>Confidence</span><strong>{issue.confidenceLabel}</strong></span>
           <span className="identity-audit-stat"><span>Review</span><strong>{reviewStatus}</strong></span>

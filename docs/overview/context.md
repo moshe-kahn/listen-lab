@@ -63,7 +63,8 @@ Current note:
 - liked-track sync failure simulation exists only for local/dev QA and requires both `LISTENLAB_ENABLE_DEBUG_SYNC_FAILURE=1` and `X-ListenLab-Debug-Sync-Failure: 1`
 - the backend now also persists raw play events from both Spotify recent-play API data and Spotify extended streaming history in a local SQLite database
 - the current calibration workflow also includes recent-ingest probe/debug flows, live playback observation, and a dedicated tracks comparison page for testing ranking formulas against the same data
-- the dashboard now also includes a recording-first track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, release/recording view switching, variation/family album cards, playlist tracklist overlays, full-width album overlay tracklists, and a merged-event `Listening Log` page for chronology/source inspection
+- the dashboard now also includes a recording-first track-detail overlay iteration with same-album in-place switching, preview playback with base-playback resume, richer player/queue controls, release/recording view switching, variation/family album cards, playlist tracklist overlays, full-width album overlay tracklists, playlist-membership links from track overlays, and a merged-event `Listening Log` page for chronology/source inspection
+- Spotify playlist metadata, save counts, user hide/category state, and track pages are cached in SQLite after dashboard load or explicit playlist opening; this supports local playlist overlays, track-to-playlist membership display, and focused navigation back into the playlist row without refetching every playlist page on every login
 - track identity work now includes a conservative identity model:
   - `source_track`
   - `release_track`
@@ -133,12 +134,28 @@ Current rule:
 - Release view uses exact Spotify source-track history and liked/star state; recording view may aggregate across generated recording members.
 
 ### Source track play-count cache
-A derived SQLite cache keyed by Spotify track ID, storing play count plus first/last listened timestamps from `fact_play_event`.
+A derived SQLite cache keyed by Spotify track ID, storing qualified listen count plus observed/qualified timestamps from `fact_play_event`.
 
 Current rule:
 - The cache is refreshed by the play-event projection path after touched fact rows are reloaded.
 - It supports fast release-source history, album-track `Last` values in release view, and generated recording candidate member counts.
 - It is not canonical history; `fact_play_event` remains the source of truth.
+- `play_count` counts qualified listens only, currently using the 65% duration rule.
+- `first_played_at` is the first qualified listen and stays null when a track only has short skip/preview history.
+- `last_played_at` is the latest observed interaction for that Spotify track, including short skips/previews. In tracklists, `Last` with `play_count=0` means observed but not meaningfully listened, not truly unheard.
+- Duration lookup for qualified counting should use recent/player-provided duration first, then Spotify track catalog duration, then cached album-track duration, and only then the unknown-duration fallback.
+
+### Playlist membership index
+A derived SQLite cache of Spotify playlist metadata, playlist track pages, and best-effort source/release-track identity links for playlist rows.
+
+Current rule:
+- `spotify_playlist_cache` and `spotify_playlist_track_cache` preserve Spotify playlist metadata and page rows observed through the user's current account permissions.
+- `spotify_playlist_track_identity` is a derived navigation/index table used to answer "which playlists contain this track?" from local SQL.
+- `playlist_category` and `playlist_category_member` store user-defined playlist category labels and membership.
+- `hidden_by_user` playlists are suppressed from playlist membership displays/counts unless a playlist-edit surface explicitly shows hidden rows.
+- `followers_total` is displayed as playlist saves when Spotify returns a positive count; zero or missing counts are hidden in the dashboard card.
+- Playlist identity links do not create canonical listening history and do not replace `fact_play_event`.
+- Playlist owner/followed-star state and followed artist state are cached for roughly one day to reduce Spotify calls; these stars are UI signals, not identity decisions.
 
 ### Generated recording cluster
 A SQLite cache of read-only recording/track-family candidate groups derived from release-track evidence.

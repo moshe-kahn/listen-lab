@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
@@ -14,6 +15,7 @@ from backend.app.spotify_rate_limit import (
 )
 
 settings = get_settings()
+_client_credentials_token: dict[str, Any] = {}
 
 
 def _spotify_error_detail(response: httpx.Response) -> str:
@@ -124,6 +126,47 @@ async def _spotify_get(access_token: str, url: str, params: dict[str, Any] | Non
         )
 
     return response.json()
+
+
+async def _spotify_client_credentials_token() -> str:
+    token = str(_client_credentials_token.get("access_token") or "").strip()
+    expires_at = float(_client_credentials_token.get("expires_at") or 0)
+    if token and expires_at > time.time() + 60:
+        return token
+    if not settings.spotify_client_id or not settings.spotify_client_secret:
+        raise HTTPException(status_code=503, detail="Spotify client credentials are not configured.")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                settings.spotify_token_url,
+                data={"grant_type": "client_credentials"},
+                auth=(settings.spotify_client_id, settings.spotify_client_secret),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=503, detail="Spotify public-read token request timed out.") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=503, detail="Spotify public-read token request could not connect.") from exc
+    if response.status_code >= 400:
+        detail = _spotify_error_detail(response)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Spotify public-read token request failed{f': {detail}' if detail else ''}.",
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="Spotify public-read token response was invalid.") from exc
+    access_token = str(payload.get("access_token") or "").strip()
+    expires_in = int(payload.get("expires_in") or 0)
+    if not access_token:
+        raise HTTPException(status_code=502, detail="Spotify public-read token response missing access_token.")
+    _client_credentials_token.clear()
+    _client_credentials_token.update({
+        "access_token": access_token,
+        "expires_at": time.time() + max(60, expires_in),
+    })
+    return access_token
 
 
 async def _spotify_post(access_token: str, url: str, json_body: dict[str, Any] | None = None) -> dict[str, Any]:

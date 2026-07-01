@@ -54,6 +54,8 @@ Current extracted modules:
   - representative artist/album track preview helpers
 - `backend/app/liked_tracks.py`
   - user-scoped read-only liked-track cache listing, contains checks, Spotify saved-track quick/full sync, sync metadata, unlike marking after completed full sync, and guarded dev/test failure simulation response shape
+- `backend/app/playlist_index.py`
+  - user-scoped Spotify playlist metadata cache, per-position playlist track cache, derived playlist-track identity index, cached playlist page reads, track-to-playlist membership lookup, and shared Spotify playlist-item paging
 
 Extracted route modules:
 - `backend/app/routes/audit_routes.py`
@@ -218,6 +220,15 @@ Current frontend extraction:
 - `frontend/src/constants/appConstants.ts`
   - shared app constants, initial section state, Spotify logo URL, UI option arrays
 - `frontend/src/types/appTypes.ts`
+- `frontend/src/components/playback/HomeAlbumAppearanceStrip.tsx`
+  - focused homepage current-track album appearance/recording context strip
+- `frontend/src/components/playback/PlayerBottomDrawer.tsx`
+  - focused homepage player drawer with previous-queue/album-context tabs
+- `frontend/src/components/dashboard/DashboardPlaylistsSection.tsx`
+  - focused homepage playlist section with persisted owner/category filters, public/private subfilters, SQL-backed category migration/editing, hidden-playlist controls, and closed-preview selection from the saved filter result
+- `frontend/src/components/dashboard/DashboardColumns.tsx`
+  - playlist dashboard cards include image-confined edit popovers for hide/delete/category/pin actions, positive save-count display, and edit-only privacy/collaboration markers
+- Identity Audit artist duplicate/promotion skip UI has been folded into `ArtistDuplicateAuditTab.tsx`; the old standalone `ArtistPromotionSkipsTab.tsx` is removed in the current dirty scope.
   - broad response/UI/player/profile/catalog/audit types
 - `frontend/src/utils/identityAuditPrefs.ts`
   - Identity Audit localStorage preference load/save helpers and persisted preference types
@@ -280,6 +291,7 @@ Current playback UI behavior:
 - Homepage compact album tracklists use play/title/played columns only, hide preview/tags, stretch across the left column, and only show the scrollbar marker when the list can scroll.
 - Album expansion must not stretch or hide the queue column.
 - Queue item text opens the track overlay; queue item art starts playback at that queue item.
+- The homepage player now has a bottom drawer for queue/album-context surfaces and a separate album appearance strip component to keep new playback UI out of `App.tsx` where practical.
 - Repeated Spotify queue cycles such as `A, B, A, B` are collapsed for display.
 - Back/Forward and track-end auto-advance use the ListenLab queue cursor and explicitly start the target track.
 - Delay menu behavior:
@@ -323,6 +335,13 @@ Current playback UI behavior:
   - album context tags such as `Single`, `Soundtrack`, and `Compilation` appear in the bottom tag row when source album metadata or album-title evidence supports them
   - track overlays keep Spotify source track id/URI as playback identity even when release/recording/family evidence is shown
   - playlist cards open a `PlaylistTrackList` overlay backed by `/auth/playback/playlist-tracks`; backend fetches Spotify `/v1/playlists/{playlist_id}/items` because some user-owned playlists return `403` on `/tracks`
+  - playlist tracklists support backend `offset` / `next_offset` pagination, and dashboard playlists include category metadata (`created`, `private`, `collaborative`, `added`) rather than only public owned playlists
+  - playlist tracklist pages read cached SQL rows first and cache Spotify fallback pages into `spotify_playlist_track_cache`
+  - track overlays show cache-only `In playlists` membership from `/tracks/playlist-memberships`; clicking a membership opens the playlist overlay focused on the exact cached position
+  - homepage playlist filters persist across reloads; the collapsed five-image preview uses the current saved filter result
+  - homepage playlist edit mode can hide/unhide playlists, pin playlists, and assign multiple SQL-backed categories without opening the playlist card
+  - playlist track identity is derived from source/release/generated-recording evidence and must stay separate from canonical merge decisions
+  - album/playlist tracklist `Last` now represents latest observed play interaction, while adjacent listen count remains qualified listens; `Last` with count `0` indicates skip/preview-only history
   - the unauthenticated landing hero only shows the mode toggle and primary login/open button; old recent-ingest/probe debug buttons were removed
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.

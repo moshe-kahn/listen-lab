@@ -11,6 +11,9 @@ import { ArtistIdentityAuditTab } from "./ArtistIdentityAuditTab";
 import { RecordingTrackCandidatesTab } from "./RecordingTrackCandidatesTab";
 import { ReleaseTrackDurationConflictsTab } from "./ReleaseTrackDurationConflictsTab";
 
+type TrackAuditWorkflow = "ready_review" | "needs_evidence" | "repair_tools" | "catalog_checks";
+type AlbumAuditWorkflow = "ready_repair" | "needs_review" | "catalog_health";
+
 type IdentityAuditPageProps = {
   identityAuditLoading: boolean;
   identityAuditSuggestedLoading: boolean;
@@ -44,19 +47,68 @@ type IdentityAuditPageProps = {
   renderAlbumCatalogTab: () => ReactNode;
 };
 
-const trackTabs: Array<{ value: TrackIdentityAuditTab; label: string }> = [
-  { value: "problems", label: "Problems" },
-  { value: "mapping", label: "Mapping" },
-  { value: "review_queue", label: "Review Queue" },
-  { value: "recording_tracks", label: "Recording Tracks" },
-  { value: "duration_conflicts", label: "Duration Conflicts" },
+const trackWorkflowGroups: Array<{
+  value: TrackAuditWorkflow;
+  label: string;
+  copy: string;
+  tabs: Array<{ value: TrackIdentityAuditTab; label: string }>;
+}> = [
+  {
+    value: "ready_review",
+    label: "Ready to Review",
+    copy: "Start here: issue cards and saved review decisions.",
+    tabs: [
+      { value: "problems", label: "Issues" },
+      { value: "review_queue", label: "Saved Reviews" },
+    ],
+  },
+  {
+    value: "needs_evidence",
+    label: "Needs Evidence",
+    copy: "Inspect source-track mapping before making a judgment.",
+    tabs: [{ value: "mapping", label: "Mapping Review" }],
+  },
+  {
+    value: "repair_tools",
+    label: "Repair Tools",
+    copy: "Inspect and open generated recording groups.",
+    tabs: [{ value: "recording_tracks", label: "Recording Groups" }],
+  },
+  {
+    value: "catalog_checks",
+    label: "Catalog Checks",
+    copy: "Check metadata problems that can block identity decisions.",
+    tabs: [{ value: "duration_conflicts", label: "Duration Checks" }],
+  },
 ];
 
-const albumTabs: Array<{ value: AlbumIdentityAuditTab; label: string }> = [
-  { value: "problems", label: "Problems" },
-  { value: "merge_review", label: "Merge Review" },
-  { value: "history_spotify_repair", label: "Repair" },
-  { value: "catalog", label: "Catalog" },
+const albumWorkflowGroups: Array<{
+  value: AlbumAuditWorkflow;
+  label: string;
+  copy: string;
+  tabs: Array<{ value: AlbumIdentityAuditTab; label: string }>;
+}> = [
+  {
+    value: "ready_repair",
+    label: "Ready to Repair",
+    copy: "Run safe repairs or inspect a specific merge preview.",
+    tabs: [
+      { value: "history_spotify_repair", label: "Safe Repair" },
+      { value: "merge_review", label: "Merge Review" },
+    ],
+  },
+  {
+    value: "needs_review",
+    label: "Needs Review",
+    copy: "Review likely album duplicates and weaker name conflicts.",
+    tabs: [{ value: "problems", label: "Issues" }],
+  },
+  {
+    value: "catalog_health",
+    label: "Catalog Health",
+    copy: "Check album metadata and tracklist coverage.",
+    tabs: [{ value: "catalog", label: "Catalog Health" }],
+  },
 ];
 
 const identityEntityTabs: Array<{ value: IdentityAuditEntityTab; label: string }> = [
@@ -64,6 +116,14 @@ const identityEntityTabs: Array<{ value: IdentityAuditEntityTab; label: string }
   { value: "albums", label: "Albums" },
   { value: "artists", label: "Artists" },
 ];
+
+function activeTrackWorkflow(tab: TrackIdentityAuditTab) {
+  return trackWorkflowGroups.find((group) => group.tabs.some((item) => item.value === tab)) ?? trackWorkflowGroups[0];
+}
+
+function activeAlbumWorkflow(tab: AlbumIdentityAuditTab) {
+  return albumWorkflowGroups.find((group) => group.tabs.some((item) => item.value === tab)) ?? albumWorkflowGroups[0];
+}
 
 export function IdentityAuditPage({
   identityAuditLoading,
@@ -98,6 +158,13 @@ export function IdentityAuditPage({
   renderAlbumCatalogTab,
 }: IdentityAuditPageProps) {
   const reloading = identityAuditLoading || identityAuditSuggestedLoading || identityAuditAmbiguousLoading;
+  const currentTrackWorkflow = activeTrackWorkflow(trackIdentityAuditTab);
+  const currentAlbumWorkflow = activeAlbumWorkflow(albumIdentityAuditTab);
+  const activeWorkflowCopy = identityAuditEntityTab === "tracks"
+    ? currentTrackWorkflow.copy
+    : identityAuditEntityTab === "albums"
+      ? currentAlbumWorkflow.copy
+      : "Review artist identity repair and review cases.";
 
   return (
     <section className="info-card info-card-wide tracks-only-card" id="identity-audit-page">
@@ -157,31 +224,65 @@ export function IdentityAuditPage({
         ))}
       </div>
       {identityAuditEntityTab !== "artists" ? (
-        <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit sections">
-          {identityAuditEntityTab === "tracks"
-            ? trackTabs.map((tab) => (
-              <button
-                className={`track-ranking-chip${trackIdentityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
-                key={`track-identity-tab-${tab.value}`}
-                onClick={() => setTrackIdentityAuditTab(tab.value)}
-                type="button"
-              >
-                {tab.label}
-              </button>
-            ))
-            : null}
-          {identityAuditEntityTab === "albums"
-            ? albumTabs.map((tab) => (
+        <div className="identity-audit-workflow-nav">
+          <div className="track-ranking-toggle identity-audit-tabs" role="group" aria-label="Identity audit workflow">
+            {identityAuditEntityTab === "tracks"
+              ? trackWorkflowGroups.map((group) => (
+                <button
+                  className={`track-ranking-chip${currentTrackWorkflow.value === group.value ? " track-ranking-chip-active" : ""}`}
+                  key={`track-identity-workflow-${group.value}`}
+                  onClick={() => setTrackIdentityAuditTab(group.tabs[0].value)}
+                  type="button"
+                >
+                  {group.label}
+                </button>
+              ))
+              : null}
+            {identityAuditEntityTab === "albums"
+              ? albumWorkflowGroups.map((group) => (
+                <button
+                  className={`track-ranking-chip${currentAlbumWorkflow.value === group.value ? " track-ranking-chip-active" : ""}`}
+                  key={`album-identity-workflow-${group.value}`}
+                  onClick={() => setAlbumIdentityAuditTab(group.tabs[0].value)}
+                  type="button"
+                >
+                  {group.label}
+                </button>
+              ))
+              : null}
+          </div>
+          <div className="identity-audit-next-action">
+            <span>Next action</span>
+            <strong>{activeWorkflowCopy}</strong>
+          </div>
+          {identityAuditEntityTab === "tracks" && currentTrackWorkflow.tabs.length > 1 ? (
+            <div className="track-ranking-toggle identity-audit-tool-tabs" role="group" aria-label="Track audit tools">
+              {currentTrackWorkflow.tabs.map((tab) => (
+                <button
+                  className={`track-ranking-chip${trackIdentityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
+                  key={`track-identity-tool-${tab.value}`}
+                  onClick={() => setTrackIdentityAuditTab(tab.value)}
+                  type="button"
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {identityAuditEntityTab === "albums" && currentAlbumWorkflow.tabs.length > 1 ? (
+            <div className="track-ranking-toggle identity-audit-tool-tabs" role="group" aria-label="Album audit tools">
+              {currentAlbumWorkflow.tabs.map((tab) => (
               <button
                 className={`track-ranking-chip${albumIdentityAuditTab === tab.value ? " track-ranking-chip-active" : ""}`}
-                key={`album-identity-tab-${tab.value}`}
+                key={`album-identity-tool-${tab.value}`}
                 onClick={() => setAlbumIdentityAuditTab(tab.value)}
                 type="button"
               >
                 {tab.label}
               </button>
-            ))
-            : null}
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {identityAuditEntityTab === "tracks" && trackIdentityAuditTab === "problems" ? renderTrackProblemsTab() : null}

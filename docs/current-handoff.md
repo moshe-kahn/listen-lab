@@ -16,13 +16,17 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- pending: playlist tracklists, album overlay layout, soundtrack listen-history enrichment, and related frontend/backend cleanup
+- pending commit: dashboard/playback UI extraction, playlist pagination/indexing/categories, persistent follow-state cache, Identity Audit UI cleanup, and play-count cache semantics
 
 Worktree at handoff:
-- current playlist/album batch is verified and being committed
-- pre-existing Identity Audit UI edits are still dirty and intentionally not part of this commit unless explicitly requested:
-  - `frontend/src/components/identityAudit/*`
+- current dirty scope is intentionally broad and is the commit candidate:
+  - backend playlist category/pagination, playlist-track indexing, persistent follow-state cache, and play-count cache changes
+  - frontend dashboard/playback extraction and playlist/home-album/player drawer work
+  - Identity Audit UI cleanup, including artist duplicate workflow and promotion skip integration
   - deleted `frontend/src/components/identityAudit/ArtistPromotionSkipsTab.tsx`
+- untracked component files to include if committing this full scope:
+  - `frontend/src/components/playback/HomeAlbumAppearanceStrip.tsx`
+  - `frontend/src/components/playback/PlayerBottomDrawer.tsx`
 - do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in commits
 
 Important local instruction:
@@ -71,6 +75,49 @@ Latest checks for this batch:
 - `./.venv/bin/python -m py_compile backend/app/release_track_metadata.py backend/app/routes/playback_routes.py backend/app/spotify_http.py backend/app/main.py backend/app/config.py` passed during the session.
 - `cd frontend && npm run build` passed; existing large-chunk warning remains.
 - `git diff --check` passed on edited backend/frontend/doc files.
+
+## Latest Completed: Persistent Playlist Index And Follow-State Cache
+
+Backend:
+- SQLite schema version `37` adds `spotify_follow_state_cache`.
+  - caches followed artists and followed Spotify users by `(user_id, entity_type, spotify_id)`
+  - stores `is_followed`, `checked_at`, optional display metadata, and raw JSON
+  - follow-state lookup checks memory cache, then SQLite rows newer than 24 hours, then Spotify
+- SQLite schema version `38` adds playlist index tables:
+  - `spotify_playlist_cache` for playlist metadata, category, owner/follow state, snapshot id, track count, and sync status
+  - `spotify_playlist_track_cache` for raw per-position playlist track occurrences
+  - `spotify_playlist_track_identity` for derived source/release/generated-recording links
+- SQLite schema versions `39` through `41` extend playlist state:
+  - `hidden_by_user` on `spotify_playlist_cache`
+  - SQL-backed `playlist_category` and `playlist_category_member`
+  - `followers_total` on `spotify_playlist_cache`
+- New `backend/app/playlist_index.py` owns playlist metadata upsert, page caching, identity-index refresh, cached page reads, membership lookup, and shared Spotify playlist item paging.
+- Playlist category endpoints are available at:
+  - `GET /playlists/categories`
+  - `POST /playlists/categories`
+  - `PUT /playlists/categories/{category_id}/playlists/{playlist_id}`
+- `/me` stores playlist metadata and schedules a non-blocking background playlist index sync after profile load.
+- Background sync fetches all accessible playlist metadata, then syncs only playlists with missing/stale track cache or changed `snapshot_id` / track count.
+- `/auth/playback/playlist-tracks` now serves cached SQL pages first; on cache miss it fetches Spotify, stores that page, refreshes the identity index, and returns the Spotify rows.
+- `/tracks/playlist-memberships` returns local-only playlist memberships for a track/release/recording context. It does not call Spotify.
+
+Frontend:
+- Homepage playlist section now has persisted owner filters (`All Owners`, `Yours`, `Collabs`, `Spotify`, `Others`), category filters (`All categories`, `None`, selected categories), and public/private icon toggles for `Yours` and `Collabs`.
+- Closed playlist previews use the first five rows from the last saved filter result.
+- Playlist cards are image-first grid cards; zero saves are hidden, one save is singular, and positive save counts display under the title.
+- Edit mode supports hiding/unhiding, deleting, pinning, and assigning playlists to multiple SQL-backed categories through a confined image-area popover.
+- Hidden playlists are excluded from track-overlay playlist memberships and playlist counts unless edit mode explicitly shows them.
+- Track overlays show an `In playlists` section when cached playlist memberships exist.
+- Clicking a playlist membership opens the playlist overlay on the page containing that exact occurrence.
+- Playlist overlay highlights and scrolls to the focused row using `playlist_id + position`, preserving duplicate track occurrences.
+- Playlist rows keep collaborative `Added by` / `Added` columns, and playlist cards/overlays show a filled star when the playlist owner is a Spotify user the listener follows.
+- Artist overlays show a filled star only when the artist is in the cached Spotify followed-artist list; no empty star is shown for unknown/not-followed states.
+
+Latest checks:
+- `./.venv/bin/python -m py_compile backend/app/db.py backend/app/main.py backend/app/playlist_index.py backend/app/routes/playback_routes.py` passed.
+- `cd frontend && npm run build` passed; existing large-chunk warning remains.
+- migrations applied locally through schema version `41`; playlist index/category/follower tables and columns exist.
+- `git diff --check` passed for the playlist/follow-state files.
 
 ## Completed: Recover Orphan History Projection
 The user discovered that `Radiohead - Paranoid Android` incorrectly had no qualified listen. The missing complete play was:
@@ -137,7 +184,22 @@ Local data and checks:
 - `git diff --check` passed
 
 ## Immediate Next Task
-After the pending commit, restart backend, hard refresh, and manually QA:
+After this commit, restart backend, hard refresh, and manually QA:
+- Drive soundtrack album overlay:
+  - tracks with skip/preview-only history show `Last` but `listens=0`
+  - `Nightcall`, `Under Your Spell`, `A Real Hero`, `Oh My Love`, and `Tick of the Clock` show recording-level listens in recording view
+  - release view still shows exact-source history
+- Playlist overlay:
+  - paginated tracklists load additional pages from `offset` / `next_offset`
+  - all user playlists are categorized (`created`, `private`, `collaborative`, `added`)
+  - opening a playlist after cold start uses cache if present and Spotify fallback if missing
+  - background playlist index fills `spotify_playlist_track_cache` without blocking page load
+  - `In playlists` appears on track overlays after the background index has cached memberships
+  - clicking an `In playlists` row opens the playlist overlay and highlights the exact cached occurrence
+  - collaborative playlists show `Added by` and `Added` columns when Spotify returns those fields
+  - playlists by followed Spotify users show a filled star; non-followed/unknown owners show no empty star
+- Player dashboard:
+  - bottom drawer tabs and home album appearance strip render correctly after hard refresh
 - Activity updates immediately after recent sync inserts rows.
 - KID A / Amnesiac / KID A MNESIA edition switching:
   - Kid A shows Kid A + Extended Edition only.
@@ -151,7 +213,29 @@ After the pending commit, restart backend, hard refresh, and manually QA:
   - artist image appears beside artist name at top.
   - All Tracks appears before Albums / Appears On.
   - artist tracks open normal track detail.
-  - album rows missing cached tracklists may still be absent from All Tracks.
+- album rows missing cached tracklists may still be absent from All Tracks.
+
+## Latest Completed: Play-Count Cache Last/Count Semantics
+The user clarified that tracklist `Last` should mean last observed interaction, while the adjacent listen count should indicate meaningful/qualified listens.
+
+Implemented:
+- `source_track_play_count_cache` now keeps rows for observed Spotify tracks even when no play qualifies.
+- `play_count` remains qualified/full listens only, using the current 65% duration rule.
+- `first_played_at` remains the first qualified listen and is `NULL` for skip/preview-only tracks.
+- `last_played_at` is the latest observed event, including short skips/previews.
+- local player progress updates now refresh the cache when an already-qualified track's last observed timestamp can advance without crossing a new threshold.
+- cache duration resolution now uses `spotify_album_track.duration_ms` when recent/player/catalog duration is missing, before falling back to the unknown-duration `>=30s` rule.
+- local `backend/data/listenlabs.sqlite3` cache was rebuilt after the change; it is not git-tracked.
+
+Drive soundtrack findings:
+- no same-title raw/fact/source rows without Spotify IDs were found for the skip-only Drive cue tracks.
+- skip/preview-only Drive rows now show `play_count=0` plus a `last_played_at`, e.g. `Kick Your Teeth`, `On The Beach`, `Bride of Deluxe`.
+- rows that were previously counted only because duration was unknown (`They Broke His Pelvis`, `Hammer`, `Wrong Floor`, `Bride of Deluxe`) now correctly have `play_count=0` when album-track duration shows they were below 65%.
+
+Checks:
+- `./.venv/bin/python -m unittest backend.tests.test_play_event_projection` passed, 17 tests; existing SQLite ResourceWarnings may print.
+- `./.venv/bin/python -m py_compile backend/app/db.py backend/tests/test_play_event_projection.py` passed.
+- `git diff --check -- backend/app/db.py backend/app/routes/playback_routes.py backend/tests/test_play_event_projection.py` passed.
 
 ## Latest UI/Identity Work This Session
 - General album-family inference now supports complete title-prefix expansions and explicit `Disc N` / `Disk N` companion releases.

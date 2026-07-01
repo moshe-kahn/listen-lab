@@ -26,7 +26,7 @@ export function AlbumIdentityAuditCatalogTab({
   return (
     <div className="identity-audit-grid">
       <p className="identity-audit-tab-copy">
-        Album catalog is operational state: Spotify metadata, tracklist completeness, queue/enrichment status, and catalog lookup.
+        Catalog Health shows whether local album metadata and tracklists are complete enough for audit and playback decisions.
       </p>
       <div className="identity-audit-overview-grid">
         <article className="identity-audit-overview-card">
@@ -53,10 +53,10 @@ export function AlbumIdentityAuditCatalogTab({
       <div className="identity-audit-group">
         <div className="tracks-formula-heading">
           <h3>Catalog Operations</h3>
-          <span>lookup and queue</span>
+          <span>lookup, backfill, refresh</span>
         </div>
         <p className="identity-audit-tab-copy">
-          Search Lookup remains the shared operational lookup tool. Opening it from here defaults the tool to albums.
+          Use lookup for one-off album checks, backfill for queued metadata work, and refresh to update this summary.
         </p>
         <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
           <button

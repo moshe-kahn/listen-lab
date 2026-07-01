@@ -31,15 +31,15 @@ export function AlbumIdentityAuditMergeReviewTab({
   return (
     <div className="identity-audit-grid">
       <p className="identity-audit-tab-copy">
-        Merge Review keeps the selected album group front and center and preserves full preview and dry-run details.
+        Review one duplicate album group at a time. Preview explains the match; dry run shows exact row changes before anything is applied.
       </p>
       {!selectedTarget && reviewedTargets.length === 0 ? (
-        <p className="empty-copy">Choose Preview merge from an album duplicate group to start a review.</p>
+        <p className="empty-copy">Choose Preview merge from an album issue to start a review.</p>
       ) : null}
       {selectedTarget ? (
         <div className="identity-audit-group">
           <div className="tracks-formula-heading">
-            <h3>Selected Group</h3>
+            <h3>Current Review</h3>
             <span>{selectedTarget.sourceLabel}</span>
           </div>
           {renderReleaseAlbumMergePreview(selectedTarget.key)}
@@ -48,7 +48,7 @@ export function AlbumIdentityAuditMergeReviewTab({
       {reviewedTargets.length > 0 ? (
         <div className="identity-audit-group">
           <div className="tracks-formula-heading">
-            <h3>Reviewed Groups</h3>
+            <h3>Recent Reviews</h3>
             <span>{reviewedTargets.length}</span>
           </div>
           <div style={{ display: "grid", gap: "12px" }}>

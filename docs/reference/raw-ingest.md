@@ -29,6 +29,12 @@ The raw ingest layer is not yet responsible for:
 - final ranking/scoring
 - fuzzy matching
 - canonical song clustering
+- playlist membership indexing
+
+Playlist note:
+- playlist metadata, user hide/category state, cached playlist track pages, and derived playlist-row identity links live in `spotify_playlist_cache`, `playlist_category`, `playlist_category_member`, `spotify_playlist_track_cache`, and `spotify_playlist_track_identity`
+- those tables are runtime/navigation caches used by playlist overlays and track-overlay "In playlists" links
+- playlist rows are not canonical listening events and must not be projected into `fact_play_event`
 
 Downstream entity backfill boundary:
 - history/recent projection may create source/release/artist rows conservatively after canonical music facts are projected
@@ -258,6 +264,25 @@ Key fields:
   - `artist_names_json`
   - `album_name`
   - `progress_ms`
+
+### Playlist cache tables
+Playlist indexing is intentionally separate from raw/canonical listening ingest.
+
+`spotify_playlist_cache` stores observed Spotify playlist metadata for the current account context, including owner, collaborative/public flags, snapshot id, total track count, images, owner-followed state when available, user hide state, and positive follower/save counts when Spotify returns them.
+
+`playlist_category` and `playlist_category_member` store user-defined playlist category labels and membership. These are user organization metadata, not Spotify facts.
+
+`spotify_playlist_track_cache` stores cached Spotify playlist item rows by playlist id and position, including added-at/added-by metadata, basic track metadata, album art, artists, and raw item payload.
+
+`spotify_playlist_track_identity` stores best-effort links from cached playlist rows to local `source_track` and `release_track` ids so track overlays can show local playlist membership and reopen a playlist focused on the matching row.
+
+Current rule:
+- these tables are caches/indexes, not source-of-truth listening history
+- cache misses may fetch Spotify playlist pages when the user has permission
+- login/dashboard flows may schedule background refresh for changed playlists based on metadata such as `snapshot_id`
+- hidden playlists are excluded from membership/count surfaces by default, but remain cached
+- category membership is UI organization state and does not affect canonical play-event projection
+- `fact_play_event` remains the only canonical music-listen fact table
   - `duration_ms`
   - `is_playing`
   - `device_id`
@@ -354,7 +379,11 @@ This is intentionally a fallback, not source truth.
 - A session counts one listen for every full track duration, plus one when its remaining listened time reaches 65% of the duration.
 - A different track or a gap over four hours starts a new accumulation session.
 - Recent-API-only `default_guess` sessions are capped at one duration because Spotify does not provide actual played time. Exact history or chronology timing can support multiple listens.
+- Duration lookup for source-track cache counting uses recent/player duration first, then Spotify track catalog duration, then cached `spotify_album_track.duration_ms`, and only then treats duration as unknown.
 - Events with no known duration retain the conservative 30-second fallback. Legacy events with no `ms_played` remain countable for compatibility.
+- `source_track_play_count_cache.play_count` is qualified listen count only.
+- `source_track_play_count_cache.first_played_at` is the first qualified listen and stays null for skip/preview-only tracks.
+- `source_track_play_count_cache.last_played_at` is the latest observed event for the Spotify track, including short skips/previews. This lets tracklists show `Last` for observed-but-not-qualified rows while the adjacent count remains `0`.
 
 ### Fallback classification note (2026-04-20)
 - Introduced `fallback_short_transition` to isolate a narrow cohort of problematic fallback rows without changing matcher behavior or canonical precedence.

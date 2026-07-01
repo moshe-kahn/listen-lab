@@ -17,7 +17,7 @@ from backend.app.release_track_metadata import enrich_album_track_rows_with_rele
 _EDITION_SUFFIX = re.compile(
     r"\s*[\[(]\s*(expanded\s+deluxe(?:\s+edition)?|deluxe(?:\s+edition)?|expanded(?:\s+edition)?|"
     r"(?:\d+(?:st|nd|rd|th)\s+)?anniversary\s+remaster(?:ed)?(?:\s+edition)?|"
-    r"anniversary(?:\s+edition)?|remaster(?:ed)?(?:\s+edition)?|mono|stereo|rework|"
+    r"anniversary(?:\s+edition)?|(?:\d{4}\s+)?remaster(?:ed)?(?:\s+edition)?|mono|stereo|rework|"
     r"(?:bonus\s+)?(?:disc|disk)\s+\d+)\s*[\])]\s*$",
     re.IGNORECASE,
 )
@@ -88,6 +88,21 @@ def _combined_edition_group(spotify_album_id: str) -> dict[str, Any] | None:
         if spotify_album_id in {version_id for version_id, _label in group["versions"]}:
             return group
     return None
+
+
+def _artist_signature_from_json(value: Any) -> str:
+    try:
+        artists = json.loads(str(value or "[]")) if not isinstance(value, list) else value
+    except (TypeError, ValueError):
+        artists = []
+    tokens: list[str] = []
+    for artist in artists if isinstance(artists, list) else []:
+        if not isinstance(artist, dict):
+            continue
+        token = str(artist.get("id") or artist.get("name") or "").strip().lower()
+        if token:
+            tokens.append(token)
+    return "|".join(tokens)
 
 
 def _album_rows(connection: sqlite3.Connection, release_album_ids: list[int]) -> list[sqlite3.Row]:
@@ -457,6 +472,128 @@ def build_album_family_context(
                 """,
                 (selected_spotify_album_id,) * 5,
             ).fetchone()
+            selected_catalog = connection.execute(
+                """
+                SELECT spotify_album_id, name, release_date, total_tracks, artists_json,
+                       json_extract(images_json, '$[0].url') AS image_url
+                FROM spotify_album_catalog
+                WHERE spotify_album_id = ?
+                  AND lower(COALESCE(last_status, '')) != 'error'
+                """,
+                (selected_spotify_album_id,),
+            ).fetchone()
+            selected_artist_signature = (
+                _artist_signature_from_json(selected_catalog["artists_json"])
+                if selected_catalog is not None
+                else ""
+            )
+            catalog_version_rows: list[sqlite3.Row] = []
+            if selected_catalog is not None and selected_artist_signature:
+                candidate_rows = connection.execute(
+                    """
+                    SELECT
+                      sac.spotify_album_id,
+                      sac.name,
+                      sac.release_date,
+                      sac.total_tracks,
+                      sac.artists_json,
+                      json_extract(sac.images_json, '$[0].url') AS image_url,
+                      durations.total_duration_ms
+                    FROM spotify_album_catalog sac
+                    LEFT JOIN (
+                      SELECT spotify_album_id, sum(COALESCE(duration_ms, 0)) AS total_duration_ms
+                      FROM spotify_album_track
+                      WHERE lower(COALESCE(last_status, '')) != 'error'
+                      GROUP BY spotify_album_id
+                    ) durations ON durations.spotify_album_id = sac.spotify_album_id
+                    WHERE lower(COALESCE(sac.last_status, '')) != 'error'
+                    """,
+                ).fetchall()
+                catalog_version_rows = [
+                    row
+                    for row in candidate_rows
+                    if _normalize(_core_album_name(str(row["name"] or ""))) == _normalize(selected_core_name)
+                    and _artist_signature_from_json(row["artists_json"]) == selected_artist_signature
+                ]
+            if len(catalog_version_rows) > 1:
+                def catalog_release_year(row: sqlite3.Row) -> int | None:
+                    release_date = str(row["release_date"] or "")
+                    return int(release_date[:4]) if re.match(r"^\d{4}", release_date) else None
+
+                versions = [
+                    {
+                        "release_album_id": selected_release_album_id if str(row["spotify_album_id"]) == selected_spotify_album_id else 0,
+                        "spotify_album_id": str(row["spotify_album_id"]),
+                        "name": str(row["name"] or ""),
+                        "label": _edition_label(str(row["name"] or ""), selected_core_name),
+                        "menu_label": _edition_menu_label(
+                            str(row["name"] or ""),
+                            _edition_label(str(row["name"] or ""), selected_core_name),
+                        ),
+                        "release_year": catalog_release_year(row),
+                        "total_tracks": int(row["total_tracks"]) if row["total_tracks"] is not None else None,
+                        "total_duration_ms": int(row["total_duration_ms"]) if row["total_duration_ms"] is not None else None,
+                        "image_url": str(row["image_url"]) if row["image_url"] else None,
+                        "is_selected": str(row["spotify_album_id"]) == selected_spotify_album_id,
+                        "is_canonical": str(row["spotify_album_id"]) == selected_spotify_album_id,
+                        "is_catalog_only": str(row["spotify_album_id"]) != selected_spotify_album_id,
+                    }
+                    for row in sorted(
+                        catalog_version_rows,
+                        key=lambda row: (
+                            int(row["total_tracks"]) if row["total_tracks"] is not None else 999999,
+                            catalog_release_year(row) or 999999,
+                            str(row["spotify_album_id"]),
+                        ),
+                    )
+                ]
+                items_by_album = {
+                    version["spotify_album_id"]: enrich_album_track_rows_with_release_metadata(
+                        selected_items if version["spotify_album_id"] == selected_spotify_album_id else _cached_album_items(connection, version["spotify_album_id"]),
+                        refresh_dirty_clusters=False,
+                    )
+                    for version in versions
+                }
+                selected_rows = [dict(item) for item in items_by_album.get(selected_spotify_album_id, [])]
+                selected_keys = {
+                    f"release:{item.get('release_track_id')}" if isinstance(item.get("release_track_id"), int) else f"spotify:{item.get('id') or ''}"
+                    for item in selected_rows
+                }
+                availability: dict[str, list[dict[str, Any]]] = {}
+                item_by_key: dict[str, dict[str, Any]] = {}
+                for version in versions:
+                    for item in items_by_album.get(version["spotify_album_id"], []):
+                        key = f"release:{item.get('release_track_id')}" if isinstance(item.get("release_track_id"), int) else f"spotify:{item.get('id') or ''}"
+                        availability.setdefault(key, []).append(version)
+                        item_by_key.setdefault(key, item)
+                for item in selected_rows:
+                    key = f"release:{item.get('release_track_id')}" if isinstance(item.get("release_track_id"), int) else f"spotify:{item.get('id') or ''}"
+                    item["family_exclusive"] = False
+                    item["family_available_versions"] = availability.get(key, [version for version in versions if version["is_selected"]])
+                    item["family_has_edition_relation"] = len(item["family_available_versions"]) > 1
+                    item["family_has_external_recording_relation"] = False
+                ghost_rows: list[dict[str, Any]] = []
+                for key, available_versions in availability.items():
+                    if key in selected_keys:
+                        continue
+                    switch_version = available_versions[0]
+                    ghost = dict(item_by_key[key])
+                    ghost["family_exclusive"] = True
+                    ghost["family_available_versions"] = available_versions
+                    ghost["family_switch_album_id"] = switch_version["spotify_album_id"]
+                    ghost["family_switch_label"] = switch_version["label"]
+                    ghost["family_has_edition_relation"] = True
+                    ghost["family_has_external_recording_relation"] = False
+                    ghost_rows.append(ghost)
+                return {
+                    "album_family_id": selected_release_album_id,
+                    "core_name": selected_core_name,
+                    "selected_spotify_album_id": selected_spotify_album_id,
+                    "release_album_ids": [version["release_album_id"] for version in versions if int(version["release_album_id"]) > 0],
+                    "versions": versions,
+                    "items": selected_rows + ghost_rows,
+                    "catalog_only": True,
+                }
             track_remaster_year = next((
                 int(match.group(1))
                 for item in selected_items
@@ -620,7 +757,8 @@ def build_album_family_context(
                 equivalent_version["is_selected"] = True
         items_by_album = {
             version["spotify_album_id"]: enrich_album_track_rows_with_release_metadata(
-                selected_items if version["spotify_album_id"] == selected_spotify_album_id else _cached_album_items(connection, version["spotify_album_id"])
+                selected_items if version["spotify_album_id"] == selected_spotify_album_id else _cached_album_items(connection, version["spotify_album_id"]),
+                refresh_dirty_clusters=False,
             )
             for version in versions
         }

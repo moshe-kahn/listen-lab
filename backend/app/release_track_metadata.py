@@ -162,7 +162,11 @@ def _fallback_recording_play_history_for_rows(rows: list[dict[str, Any]]) -> dic
     }
 
 
-def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict[str, Any]]:
+def release_track_metadata_for_spotify_ids(
+    spotify_track_ids: list[str],
+    *,
+    refresh_dirty_clusters: bool = True,
+) -> dict[str, dict[str, Any]]:
     normalized_ids = sorted({str(track_id or "").strip() for track_id in spotify_track_ids if str(track_id or "").strip()})
     if not normalized_ids:
         return {}
@@ -215,8 +219,14 @@ def release_track_metadata_for_spotify_ids(spotify_track_ids: list[str]) -> dict
     release_track_ids = sorted({int(row["release_track_id"]) for row in rows if row["release_track_id"] is not None})
     from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
 
-    cluster_metadata_by_release_track_id = candidate_cluster_metadata_for_release_track_ids(release_track_ids)
-    recording_release_track_ids_by_release_track_id = recording_release_track_ids_for_release_track_ids(release_track_ids)
+    cluster_metadata_by_release_track_id = candidate_cluster_metadata_for_release_track_ids(
+        release_track_ids,
+        refresh_dirty=refresh_dirty_clusters,
+    )
+    recording_release_track_ids_by_release_track_id = recording_release_track_ids_for_release_track_ids(
+        release_track_ids,
+        refresh_dirty_clusters=refresh_dirty_clusters,
+    )
 
     metadata: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -290,13 +300,20 @@ def release_track_play_history_for_release_track_ids(release_track_ids: list[int
     }
 
 
-def recording_play_history_for_release_track_ids(release_track_ids: list[int]) -> dict[int, dict[str, Any]]:
+def recording_play_history_for_release_track_ids(
+    release_track_ids: list[int],
+    *,
+    refresh_dirty_clusters: bool = True,
+) -> dict[int, dict[str, Any]]:
     normalized_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
     if not normalized_ids:
         return {}
     from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
 
-    candidate_cluster_metadata_for_release_track_ids(normalized_ids)
+    candidate_cluster_metadata_for_release_track_ids(
+        normalized_ids,
+        refresh_dirty=refresh_dirty_clusters,
+    )
     placeholders = ",".join("?" for _ in normalized_ids)
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         rows = connection.execute(
@@ -355,13 +372,20 @@ def recording_play_history_for_release_track_ids(release_track_ids: list[int]) -
     }
 
 
-def recording_release_track_ids_for_release_track_ids(release_track_ids: list[int]) -> dict[int, list[int]]:
+def recording_release_track_ids_for_release_track_ids(
+    release_track_ids: list[int],
+    *,
+    refresh_dirty_clusters: bool = True,
+) -> dict[int, list[int]]:
     normalized_ids = sorted({int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0})
     if not normalized_ids:
         return {}
     from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
 
-    candidate_cluster_metadata_for_release_track_ids(normalized_ids)
+    candidate_cluster_metadata_for_release_track_ids(
+        normalized_ids,
+        refresh_dirty=refresh_dirty_clusters,
+    )
     placeholders = ",".join("?" for _ in normalized_ids)
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         rows = connection.execute(
@@ -427,7 +451,11 @@ def play_history_for_spotify_ids(spotify_track_ids: list[str]) -> dict[str, dict
     }
 
 
-def release_track_metadata_for_history_raw_keys(text_keys: list[str]) -> dict[str, dict[str, Any]]:
+def release_track_metadata_for_history_raw_keys(
+    text_keys: list[str],
+    *,
+    refresh_dirty_clusters: bool = True,
+) -> dict[str, dict[str, Any]]:
     normalized_keys = sorted({str(text_key or "").strip() for text_key in text_keys if str(text_key or "").strip()})
     if not normalized_keys:
         return {}
@@ -473,7 +501,10 @@ def release_track_metadata_for_history_raw_keys(text_keys: list[str]) -> dict[st
     release_track_ids = sorted({int(row["release_track_id"]) for row in rows if row["release_track_id"] is not None})
     from backend.app.recording_track_candidates import candidate_cluster_metadata_for_release_track_ids
 
-    cluster_metadata_by_release_track_id = candidate_cluster_metadata_for_release_track_ids(release_track_ids)
+    cluster_metadata_by_release_track_id = candidate_cluster_metadata_for_release_track_ids(
+        release_track_ids,
+        refresh_dirty=refresh_dirty_clusters,
+    )
 
     metadata: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -512,19 +543,26 @@ def enrich_track_rows_with_release_metadata(
     items: list[dict[str, Any]],
     *,
     track_id_key: str = "track_id",
+    refresh_dirty_clusters: bool = True,
 ) -> list[dict[str, Any]]:
-    metadata_by_track_id = release_track_metadata_for_spotify_ids([
-        str(item.get(track_id_key) or "").strip()
-        for item in items
-        if isinstance(item, dict)
-    ])
-    metadata_by_history_raw_key = release_track_metadata_for_history_raw_keys([
-        history_raw_key
-        for item in items
-        if isinstance(item, dict)
-        for history_raw_key in [_history_raw_key_for_item(item)]
-        if history_raw_key is not None
-    ])
+    metadata_by_track_id = release_track_metadata_for_spotify_ids(
+        [
+            str(item.get(track_id_key) or "").strip()
+            for item in items
+            if isinstance(item, dict)
+        ],
+        refresh_dirty_clusters=refresh_dirty_clusters,
+    )
+    metadata_by_history_raw_key = release_track_metadata_for_history_raw_keys(
+        [
+            history_raw_key
+            for item in items
+            if isinstance(item, dict)
+            for history_raw_key in [_history_raw_key_for_item(item)]
+            if history_raw_key is not None
+        ],
+        refresh_dirty_clusters=refresh_dirty_clusters,
+    )
     enriched: list[dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -551,16 +589,22 @@ def enrich_track_rows_with_release_metadata(
         for row in enriched
         if isinstance(row.get("release_track_id"), int)
     ])
-    recording_history_by_release_track_id = recording_play_history_for_release_track_ids([
-        int(row["release_track_id"])
-        for row in enriched
-        if isinstance(row.get("release_track_id"), int)
-    ])
-    recording_release_track_ids_by_release_track_id = recording_release_track_ids_for_release_track_ids([
-        int(row["release_track_id"])
-        for row in enriched
-        if isinstance(row.get("release_track_id"), int)
-    ])
+    recording_history_by_release_track_id = recording_play_history_for_release_track_ids(
+        [
+            int(row["release_track_id"])
+            for row in enriched
+            if isinstance(row.get("release_track_id"), int)
+        ],
+        refresh_dirty_clusters=refresh_dirty_clusters,
+    )
+    recording_release_track_ids_by_release_track_id = recording_release_track_ids_for_release_track_ids(
+        [
+            int(row["release_track_id"])
+            for row in enriched
+            if isinstance(row.get("release_track_id"), int)
+        ],
+        refresh_dirty_clusters=refresh_dirty_clusters,
+    )
     fallback_recording_history_by_release_track_id = _fallback_recording_play_history_for_rows(enriched)
     play_history_by_track_id = play_history_for_spotify_ids([
         str(row.get(track_id_key) or "").strip()
@@ -628,5 +672,13 @@ def enrich_track_rows_with_release_metadata(
     return enriched
 
 
-def enrich_album_track_rows_with_release_metadata(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return enrich_track_rows_with_release_metadata(items, track_id_key="id")
+def enrich_album_track_rows_with_release_metadata(
+    items: list[dict[str, Any]],
+    *,
+    refresh_dirty_clusters: bool = True,
+) -> list[dict[str, Any]]:
+    return enrich_track_rows_with_release_metadata(
+        items,
+        track_id_key="id",
+        refresh_dirty_clusters=refresh_dirty_clusters,
+    )

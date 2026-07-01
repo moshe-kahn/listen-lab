@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { FollowedArtist, OwnedPlaylist, PreviewItem, SectionKey, TopAlbum } from "../../types/appTypes";
 import { PAGE_SIZE } from "../../constants/appConstants";
 import {
@@ -34,6 +34,20 @@ type AlbumColumnProps = DashboardColumnBaseProps & {
 type PlaylistColumnProps = DashboardColumnBaseProps & {
   items: OwnedPlaylist[];
   paged?: boolean;
+  onHidePlaylist?: (playlist: OwnedPlaylist) => void;
+  onUnhidePlaylist?: (playlist: OwnedPlaylist) => void;
+  onDeletePlaylist?: (playlist: OwnedPlaylist) => void;
+  playlistEditMode?: boolean;
+  playlistLists?: Array<{ id: string; name: string; playlistIds: string[] }>;
+  onTogglePlaylistList?: (playlist: OwnedPlaylist, listId: string) => void;
+  pinnedPlaylistIds?: string[];
+  onTogglePinnedPlaylist?: (playlist: OwnedPlaylist) => void;
+};
+
+type PlaylistActionMode = "add" | "remove";
+type PlaylistActionDraft = {
+  listIds: string[];
+  pinned: boolean;
 };
 
 export function DashboardArtistColumn({
@@ -172,7 +186,103 @@ export function DashboardPlaylistColumn({
   moveSectionPage,
   onSelectPreview,
   paged = true,
+  onHidePlaylist,
+  onUnhidePlaylist,
+  onDeletePlaylist,
+  playlistEditMode = false,
+  playlistLists = [],
+  onTogglePlaylistList,
+  pinnedPlaylistIds = [],
+  onTogglePinnedPlaylist,
 }: PlaylistColumnProps) {
+  const [openPlaylistAction, setOpenPlaylistAction] = useState<{ key: string; mode: PlaylistActionMode } | null>(null);
+  const [playlistActionDrafts, setPlaylistActionDrafts] = useState<Record<string, PlaylistActionDraft>>({});
+
+  const playlistDraftKey = (playlist: OwnedPlaylist, playlistId: string | null | undefined, index: number) => (
+    playlistId ?? playlist.url ?? `${playlist.name ?? "playlist"}-${index}`
+  );
+  const playlistActualListIds = (playlistId: string | null | undefined) => (
+    playlistLists.filter((list) => list.playlistIds.includes(playlistId ?? "")).map((list) => list.id)
+  );
+  const draftFromCurrent = (playlistId: string | null | undefined): PlaylistActionDraft => ({
+    listIds: playlistActualListIds(playlistId),
+    pinned: pinnedPlaylistIds.includes(playlistId ?? ""),
+  });
+  const applyPlaylistDraft = (playlist: OwnedPlaylist, playlistId: string | null | undefined, draft: PlaylistActionDraft) => {
+    const actualListIds = playlistActualListIds(playlistId);
+    const actualPinned = pinnedPlaylistIds.includes(playlistId ?? "");
+    playlistLists.forEach((list) => {
+      const shouldInclude = draft.listIds.includes(list.id);
+      const doesInclude = actualListIds.includes(list.id);
+      if (shouldInclude !== doesInclude) {
+        onTogglePlaylistList?.(playlist, list.id);
+      }
+    });
+    if (draft.pinned !== actualPinned) {
+      onTogglePinnedPlaylist?.(playlist);
+    }
+  };
+  const openAction = (playlist: OwnedPlaylist, playlistId: string | null | undefined, index: number, mode: PlaylistActionMode) => {
+    const key = playlistDraftKey(playlist, playlistId, index);
+    setOpenPlaylistAction({ key, mode });
+    if (mode === "add") {
+      setPlaylistActionDrafts((current) => current[key] ? current : { ...current, [key]: draftFromCurrent(playlistId) });
+    }
+  };
+  const discardAction = (playlist: OwnedPlaylist, playlistId: string | null | undefined, index: number) => {
+    const key = playlistDraftKey(playlist, playlistId, index);
+    setOpenPlaylistAction((current) => current?.key === key ? null : current);
+    setPlaylistActionDrafts((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+  const confirmAction = (playlist: OwnedPlaylist, playlistId: string | null | undefined, index: number) => {
+    const key = playlistDraftKey(playlist, playlistId, index);
+    const draft = playlistActionDrafts[key];
+    if (draft) {
+      applyPlaylistDraft(playlist, playlistId, draft);
+    }
+    discardAction(playlist, playlistId, index);
+  };
+
+  useEffect(() => {
+    if (playlistEditMode) {
+      return;
+    }
+    const playlistByKey = new Map<string, { playlist: OwnedPlaylist; playlistId: string | null | undefined }>();
+    items.forEach((playlist, index) => {
+      const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+      playlistByKey.set(playlistDraftKey(playlist, playlistId, index), { playlist, playlistId });
+    });
+    Object.entries(playlistActionDrafts).forEach(([key, draft]) => {
+      const match = playlistByKey.get(key);
+      if (match) {
+        applyPlaylistDraft(match.playlist, match.playlistId, draft);
+      }
+    });
+    setPlaylistActionDrafts({});
+    setOpenPlaylistAction(null);
+  }, [playlistEditMode]);
+
+  useEffect(() => {
+    if (!playlistEditMode) {
+      return;
+    }
+    function closeOpenPlaylistActionMenus(event: MouseEvent) {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".card-playlist-edit-actions")) {
+        return;
+      }
+      setOpenPlaylistAction(null);
+    }
+    document.addEventListener("mousedown", closeOpenPlaylistActionMenus);
+    return () => {
+      document.removeEventListener("mousedown", closeOpenPlaylistActionMenus);
+    };
+  }, [playlistEditMode]);
+
   if (!available) {
     return <p className="empty-copy">{unavailableCopy}</p>;
   }
@@ -186,6 +296,9 @@ export function DashboardPlaylistColumn({
       <div className="item-list">
         {pageItems.map((playlist, index) => {
           const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+          const draftKey = playlistDraftKey(playlist, playlistId, index);
+          const activeAction = openPlaylistAction?.key === draftKey ? openPlaylistAction.mode : null;
+          const playlistDraft = playlistActionDrafts[draftKey] ?? draftFromCurrent(playlistId);
           return (
             <DashboardListCard
               key={playlistId ?? `${playlist.name}-${index}-${section}`}
@@ -196,19 +309,206 @@ export function DashboardPlaylistColumn({
               fallbackLabel="P"
               primaryText={playlist.name ?? "Untitled playlist"}
               primaryClamp="two-line-clamp"
-              secondaryText={playlist.description?.trim() || null}
-              tertiaryText={
-                playlist.track_count != null ? `${playlist.track_count} tracks` : "Playlist"
-              }
+              secondaryText={typeof playlist.followers_total === "number" && playlist.followers_total > 0 ? `${playlist.followers_total.toLocaleString()} ${playlist.followers_total === 1 ? "save" : "saves"}` : null}
+              tertiaryText={null}
+              playlistOwnerFollowedByYou={playlist.owner_followed_by_you ?? null}
+              muted={Boolean(playlist.hidden_by_user)}
+              cardClassName="dashboard-card-row-playlist"
               previewKind="playlist"
               previewTrackUri={null}
               onSelectPreview={onSelectPreview}
+              rowAction={playlistEditMode ? (
+                <span
+                  className="card-playlist-edit-actions"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                  onMouseDown={(event) => {
+                    event.stopPropagation();
+                  }}
+                >
+                  {playlist.hidden_by_user ? (
+                    <button
+                      className="card-playlist-unhide-button"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onUnhidePlaylist?.(playlist);
+                      }}
+                      type="button"
+                    >
+                      <span aria-hidden="true">+</span>
+                      <span>Unhide</span>
+                    </button>
+                  ) : (
+                    <>
+                      <span className="card-playlist-action-buttons">
+                        {activeAction ? (
+                          <>
+                            <button
+                              aria-label="Discard playlist edit options"
+                              className="card-playlist-symbol-button"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                discardAction(playlist, playlistId, index);
+                              }}
+                              type="button"
+                            >
+                              ×
+                            </button>
+                            <button
+                              aria-label="Save playlist edit options"
+                              className="card-playlist-symbol-button card-playlist-symbol-button-confirm"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                confirmAction(playlist, playlistId, index);
+                              }}
+                              type="button"
+                            >
+                              ✓
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              aria-label="Remove playlist options"
+                              className="card-playlist-symbol-button"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                openAction(playlist, playlistId, index, "remove");
+                              }}
+                              type="button"
+                            >
+                              -
+                            </button>
+                            <button
+                              aria-label="Add playlist options"
+                              className="card-playlist-symbol-button"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                openAction(playlist, playlistId, index, "add");
+                              }}
+                              type="button"
+                            >
+                              +
+                            </button>
+                          </>
+                        )}
+                      </span>
+                      {activeAction === "remove" ? (
+                        <span className="card-playlist-action-popover card-playlist-action-popover-remove">
+                          <span
+                            className="card-playlist-action-item"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              onHidePlaylist?.(playlist);
+                            }}
+                            role="button"
+                            tabIndex={0}
+                          >
+                            Hide
+                          </span>
+                          <span
+                            className="card-playlist-action-item"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              onDeletePlaylist?.(playlist);
+                            }}
+                            role="button"
+                            tabIndex={0}
+                          >
+                            Delete
+                          </span>
+                        </span>
+                      ) : null}
+                      {activeAction === "add" ? (
+                        <span className="card-playlist-action-popover card-playlist-action-popover-wide">
+                          {playlistLists.length > 0 ? playlistLists.map((list) => {
+                            const checked = playlistDraft.listIds.includes(list.id);
+                            return (
+                              <span
+                                aria-checked={checked}
+                                className="card-playlist-action-item"
+                                key={list.id}
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  setPlaylistActionDrafts((current) => {
+                                    const currentDraft = current[draftKey] ?? draftFromCurrent(playlistId);
+                                    const listIds = currentDraft.listIds.includes(list.id)
+                                      ? currentDraft.listIds.filter((listId) => listId !== list.id)
+                                      : [...currentDraft.listIds, list.id];
+                                    return {
+                                      ...current,
+                                      [draftKey]: { ...currentDraft, listIds },
+                                    };
+                                  });
+                                }}
+                                role="checkbox"
+                                tabIndex={0}
+                              >
+                                <span className="card-playlist-action-checkbox" aria-hidden="true">{checked ? "✓" : ""}</span>
+                                <span className="card-playlist-action-label">{list.name}</span>
+                              </span>
+                            );
+                          }) : <span className="card-playlist-action-item card-playlist-action-item-muted">Create a category first</span>}
+                          <span
+                            aria-checked={playlistDraft.pinned}
+                            className="card-playlist-action-item"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setPlaylistActionDrafts((current) => {
+                                const currentDraft = current[draftKey] ?? draftFromCurrent(playlistId);
+                                return {
+                                  ...current,
+                                  [draftKey]: { ...currentDraft, pinned: !currentDraft.pinned },
+                                };
+                              });
+                            }}
+                            role="checkbox"
+                            tabIndex={0}
+                          >
+                            <span className="card-playlist-action-checkbox" aria-hidden="true">
+                              {playlistDraft.pinned ? "✓" : ""}
+                            </span>
+                            <span className="card-playlist-action-label">Pin</span>
+                          </span>
+                        </span>
+                      ) : null}
+                    </>
+                  )}
+                  {playlist.is_public === false ? (
+                    <span
+                      className="card-playlist-lock-marker"
+                      title="open playlist to change lock settings"
+                    >
+                      🔒
+                    </span>
+                  ) : null}
+                  {playlist.is_collaborative ? (
+                    <span
+                      className="card-playlist-collab-marker"
+                      title="collaborative playlist"
+                    >
+                      👥
+                    </span>
+                  ) : null}
+                </span>
+              ) : null}
             />
           );
         })}
-        {Array.from({ length: emptySlots(pageItems) }).map((_, index) => (
+        {paged ? Array.from({ length: emptySlots(pageItems) }).map((_, index) => (
           <div className="list-row list-row-placeholder" key={`${section}-empty-${index}`} aria-hidden="true" />
-        ))}
+        )) : null}
       </div>
       {paged ? (
         <DashboardPaging

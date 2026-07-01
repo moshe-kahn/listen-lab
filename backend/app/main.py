@@ -55,13 +55,31 @@ from backend.app.cache.user_snapshot_cache import (
 from backend.app.config import get_settings
 from backend.app.db import (
     apply_pending_migrations,
+    cached_followed_artists,
+    cached_spotify_follow_states,
     ensure_sqlite_db,
     recover_stale_ingest_runs,
+    upsert_spotify_follow_states,
 )
 from backend.app.history_analysis import get_history_signature, load_history_insights
 from backend.app.play_event_projector import (
     audit_eligible_unlinked_history_rows,
     reconcile_fact_play_events_for_ingest_run,
+)
+from backend.app.playlist_index import (
+    cache_playlist_track_page,
+    create_playlist_category,
+    fetch_playlist_track_page_from_spotify,
+    hidden_playlist_ids_for_user,
+    mark_playlist_sync_completed,
+    mark_playlist_sync_started,
+    playlist_categories_for_user,
+    playlist_index_status_for_user,
+    playlist_memberships_for_track,
+    playlist_needs_track_sync,
+    set_playlist_hidden,
+    set_playlist_category_membership,
+    upsert_playlist_metadata,
 )
 from backend.app.logging_config import configure_logging
 from backend.app.progress_tracker import (
@@ -150,9 +168,16 @@ HISTORY_CACHE_REBUILD_WINDOW_DAYS = 28
 MIN_ALBUM_DISTINCT_TRACKS = 3
 MIN_RECENT_ALBUM_DISTINCT_TRACKS = 2
 SPOTIFY_RECENT_MAX_ITEMS = 50
+FOLLOW_STATE_CACHE_TTL_SECONDS = 24 * 60 * 60
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
 
 app = FastAPI(title="ListenLab API", version="0.1.0")
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+PLAYLIST_INDEX_SYNC_USERS: set[str] = set()
 LOCAL_PROFILE_PAYLOAD_CACHE_TTL_SECONDS = 15.0
 LOCAL_PROFILE_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 
@@ -339,6 +364,8 @@ def _load_local_history_insights_cache(
 def _playlist_cache_needs_refresh(playlists: list[dict[str, Any]]) -> bool:
     if not playlists:
         return False
+    if any("playlist_category" not in playlist or "is_owned" not in playlist for playlist in playlists):
+        return True
     image_count = sum(1 for playlist in playlists if playlist.get("image_url"))
     return image_count == 0
 
@@ -452,7 +479,85 @@ async def _sync_recent_to_db_best_effort(
     return None
 
 
-async def _fetch_owned_playlists(
+def _playlist_category(item: dict[str, Any], spotify_user_id: str | None) -> str:
+    owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+    owner_id = str(owner.get("id") or "").strip()
+    is_owned = bool(spotify_user_id and owner_id == spotify_user_id)
+    if item.get("collaborative"):
+        return "collaborative"
+    if is_owned and item.get("public") is False:
+        return "private"
+    if is_owned:
+        return "created"
+    return "added"
+
+
+async def _check_followed_spotify_users(access_token: str, spotify_user_id: str | None, user_ids: list[str]) -> dict[str, bool]:
+    unique_ids = list(dict.fromkeys(user_id.strip() for user_id in user_ids if user_id.strip()))
+    followed: dict[str, bool] = {}
+    missing_ids: list[str] = []
+    persistent_cached = cached_spotify_follow_states(
+        str(spotify_user_id or ""),
+        "user",
+        unique_ids,
+        max_age_seconds=FOLLOW_STATE_CACHE_TTL_SECONDS,
+    ) if spotify_user_id else {}
+    for owner_id in unique_ids:
+        cached = _get_short_cache(
+            f"followed_spotify_user:{owner_id}",
+            spotify_user_id,
+            1,
+            ttl_seconds=FOLLOW_STATE_CACHE_TTL_SECONDS,
+        )
+        if cached is not None:
+            followed[owner_id] = bool(cached)
+        elif owner_id in persistent_cached:
+            is_followed = bool(persistent_cached[owner_id]["is_followed"])
+            followed[owner_id] = is_followed
+            _set_short_cache(f"followed_spotify_user:{owner_id}", spotify_user_id, 1, is_followed)
+        else:
+            missing_ids.append(owner_id)
+
+    refreshed_entries: list[dict[str, Any]] = []
+    checked_at = _utc_now()
+    for start in range(0, len(missing_ids), 50):
+        batch = missing_ids[start:start + 50]
+        if not batch:
+            continue
+        try:
+            payload = await _spotify_get(
+                access_token,
+                "https://api.spotify.com/v1/me/following/contains",
+                {"type": "user", "ids": ",".join(batch)},
+            )
+        except HTTPException as exc:
+            if exc.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN):
+                return {}
+            raise
+        if not isinstance(payload, list):
+            continue
+        for user_id, is_followed in zip(batch, payload, strict=False):
+            normalized_followed = bool(is_followed)
+            followed[user_id] = normalized_followed
+            _set_short_cache(f"followed_spotify_user:{user_id}", spotify_user_id, 1, normalized_followed)
+            refreshed_entries.append(
+                {
+                    "user_id": user_id,
+                    "id": user_id,
+                    "is_followed": normalized_followed,
+                }
+            )
+    if spotify_user_id and refreshed_entries:
+        upsert_spotify_follow_states(
+            str(spotify_user_id),
+            "user",
+            refreshed_entries,
+            checked_at=checked_at,
+        )
+    return followed
+
+
+async def _fetch_user_playlists(
     access_token: str,
     spotify_user_id: str | None,
     max_items: int | None = None,
@@ -482,15 +587,12 @@ async def _fetch_owned_playlists(
 
         for item in items:
             owner = item.get("owner") or {}
-            if owner.get("id") != spotify_user_id:
-                continue
-            if not item.get("public"):
-                continue
-
             external_urls = item.get("external_urls") or {}
             items_info = item.get("items") or {}
             tracks = item.get("tracks") or {}
             images = item.get("images") or []
+            owner_id = str(owner.get("id") or "").strip() or None
+            is_owned = bool(owner_id and owner_id == spotify_user_id)
 
             results.append(
                 {
@@ -499,6 +601,12 @@ async def _fetch_owned_playlists(
                     "track_count": items_info.get("total", tracks.get("total")),
                     "description": item.get("description"),
                     "is_public": item.get("public"),
+                    "is_collaborative": bool(item.get("collaborative")),
+                    "is_owned": is_owned,
+                    "owner_id": owner_id,
+                    "owner_name": owner.get("display_name"),
+                    "playlist_category": _playlist_category(item, spotify_user_id),
+                    "snapshot_id": item.get("snapshot_id"),
                     "url": external_urls.get("spotify"),
                     "image_url": images[0].get("url") if images else None,
                 }
@@ -512,6 +620,36 @@ async def _fetch_owned_playlists(
 
     if max_items is not None:
         results = results[:max_items]
+
+    for playlist in results:
+        playlist_id = str(playlist.get("playlist_id") or "").strip()
+        if not playlist_id:
+            continue
+        try:
+            detail = await _spotify_get(
+                access_token,
+                f"https://api.spotify.com/v1/playlists/{playlist_id}",
+                {"fields": "followers(total)"},
+            )
+        except HTTPException:
+            continue
+        followers = detail.get("followers") if isinstance(detail, dict) else None
+        if isinstance(followers, dict) and isinstance(followers.get("total"), int):
+            playlist["followers_total"] = int(followers["total"])
+
+    hidden_playlist_ids = hidden_playlist_ids_for_user(str(spotify_user_id))
+    for playlist in results:
+        playlist["hidden_by_user"] = str(playlist.get("playlist_id") or "").strip() in hidden_playlist_ids
+
+    owner_ids = [
+        str(playlist.get("owner_id") or "").strip()
+        for playlist in results
+        if str(playlist.get("owner_id") or "").strip()
+    ]
+    followed_owner_by_id = await _check_followed_spotify_users(access_token, spotify_user_id, owner_ids)
+    for playlist in results:
+        owner_id = str(playlist.get("owner_id") or "").strip()
+        playlist["owner_followed_by_you"] = bool(owner_id and followed_owner_by_id.get(owner_id))
 
     return results, True
 
@@ -537,6 +675,101 @@ async def _fetch_playlist_tracks(
         results.append(_normalize_track(track))
 
     return results
+
+
+async def _sync_playlist_index_for_user(access_token: str, spotify_user_id: str) -> None:
+    try:
+        playlists, available = await _fetch_user_playlists(access_token, spotify_user_id, None)
+        if not available:
+            return
+        logger.info(
+            "event=playlist_index_sync_started user_id=%s playlist_count=%s",
+            spotify_user_id,
+            len(playlists),
+        )
+        synced_count = 0
+        upsert_playlist_metadata(str(spotify_user_id), playlists)
+        for playlist in playlists:
+            playlist_id = str(playlist.get("playlist_id") or "").strip()
+            if not playlist_id or not playlist_needs_track_sync(str(spotify_user_id), playlist):
+                continue
+            mark_playlist_sync_started(str(spotify_user_id), playlist_id)
+            try:
+                offset = 0
+                total: int | None = None
+                while True:
+                    payload = await fetch_playlist_track_page_from_spotify(
+                        access_token,
+                        playlist_id,
+                        limit=100,
+                        offset=offset,
+                    )
+                    total = int(payload.get("total") or 0)
+                    cache_playlist_track_page(
+                        str(spotify_user_id),
+                        playlist_id,
+                        payload.get("items") or [],
+                        offset=offset,
+                        total=total,
+                    )
+                    if not payload.get("has_more"):
+                        break
+                    next_offset = payload.get("next_offset")
+                    offset = int(next_offset) if isinstance(next_offset, int) else offset + len(payload.get("items") or [])
+                    if total and offset >= total:
+                        break
+                mark_playlist_sync_completed(str(spotify_user_id), playlist_id, complete=True)
+                synced_count += 1
+            except HTTPException as exc:
+                error = f"{exc.status_code}: {exc.detail}"
+                if exc.status_code == 403:
+                    logger.info(
+                        "event=playlist_index_sync_playlist_denied user_id=%s playlist_id=%s error=%s",
+                        spotify_user_id,
+                        playlist_id,
+                        error,
+                    )
+                else:
+                    logger.warning(
+                        "event=playlist_index_sync_playlist_failed user_id=%s playlist_id=%s error=%s",
+                        spotify_user_id,
+                        playlist_id,
+                        error,
+                    )
+                mark_playlist_sync_completed(str(spotify_user_id), playlist_id, complete=False, error=error)
+            except Exception as exc:
+                logger.warning(
+                    "event=playlist_index_sync_playlist_failed user_id=%s playlist_id=%s error=%s",
+                    spotify_user_id,
+                    playlist_id,
+                    exc,
+                )
+                mark_playlist_sync_completed(str(spotify_user_id), playlist_id, complete=False, error=str(exc))
+        logger.info(
+            "event=playlist_index_sync_completed user_id=%s playlist_count=%s synced_count=%s",
+            spotify_user_id,
+            len(playlists),
+            synced_count,
+        )
+    except Exception:
+        logger.exception("event=playlist_index_sync_failed user_id=%s", spotify_user_id)
+
+
+def _schedule_playlist_index_sync(access_token: str, spotify_user_id: str | None) -> None:
+    if not spotify_user_id:
+        return
+    user_key = str(spotify_user_id)
+    if user_key in PLAYLIST_INDEX_SYNC_USERS:
+        return
+    PLAYLIST_INDEX_SYNC_USERS.add(user_key)
+    task = asyncio.create_task(_sync_playlist_index_for_user(access_token, user_key))
+    BACKGROUND_TASKS.add(task)
+
+    def _discard_playlist_sync(done_task: asyncio.Task[Any]) -> None:
+        PLAYLIST_INDEX_SYNC_USERS.discard(user_key)
+        BACKGROUND_TASKS.discard(done_task)
+
+    task.add_done_callback(_discard_playlist_sync)
 
 
 async def _fetch_recent_liked_tracks(access_token: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
@@ -580,6 +813,89 @@ async def _fetch_followed_artists_total(access_token: str) -> tuple[int | None, 
 
     artists = payload.get("artists") or {}
     return artists.get("total"), True
+
+
+async def _fetch_followed_artists(access_token: str) -> tuple[list[dict[str, Any]], int | None, bool]:
+    results: list[dict[str, Any]] = []
+    after: str | None = None
+    total: int | None = None
+    try:
+        while True:
+            params: dict[str, Any] = {"type": "artist", "limit": 50}
+            if after:
+                params["after"] = after
+            payload = await _spotify_get(
+                access_token,
+                "https://api.spotify.com/v1/me/following",
+                params,
+            )
+            artists_payload = payload.get("artists") or {}
+            if total is None and isinstance(artists_payload.get("total"), int):
+                total = int(artists_payload["total"])
+            items = artists_payload.get("items") or []
+            if not items:
+                break
+            for artist in items:
+                if not isinstance(artist, dict) or not artist.get("id"):
+                    continue
+                normalized = _normalize_artist(artist)
+                normalized["is_followed"] = True
+                results.append(normalized)
+                _remember_artist_metadata(normalized)
+            cursors = artists_payload.get("cursors") or {}
+            after = cursors.get("after") if isinstance(cursors, dict) else None
+            if not artists_payload.get("next") or not after:
+                break
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            return [], None, False
+        raise
+
+    _save_static_metadata_cache(_load_static_metadata_cache())
+    return results, total if total is not None else len(results), True
+
+
+async def _get_followed_artists_cached(
+    access_token: str,
+    spotify_user_id: str,
+) -> tuple[list[dict[str, Any]], int | None, bool]:
+    memory_cache_limit = -1
+    cached = _get_short_cache(
+        "followed_artists_list",
+        spotify_user_id,
+        memory_cache_limit,
+        ttl_seconds=FOLLOW_STATE_CACHE_TTL_SECONDS,
+    )
+    if cached is not None:
+        return cached
+    persistent = cached_followed_artists(
+        str(spotify_user_id),
+        max_age_seconds=FOLLOW_STATE_CACHE_TTL_SECONDS,
+    )
+    if persistent is not None:
+        artists, total = persistent
+        result = (artists, total, True)
+        _set_short_cache("followed_artists_list", spotify_user_id, memory_cache_limit, result)
+        return result
+    artists, total, available = await _fetch_followed_artists(access_token)
+    if available:
+        checked_at = _utc_now()
+        upsert_spotify_follow_states(
+            str(spotify_user_id),
+            "artist",
+            [
+                {
+                    **artist,
+                    "spotify_id": artist.get("artist_id"),
+                    "is_followed": True,
+                }
+                for artist in artists
+            ],
+            checked_at=checked_at,
+        )
+    result = (artists, total, available)
+    _set_short_cache("followed_artists_list", spotify_user_id, memory_cache_limit, result)
+    return result
 
 
 async def _enrich_tracks_from_spotify(
@@ -1801,15 +2117,19 @@ async def _fetch_playlist_track_ids(
     while offset < max_tracks:
         payload = await _spotify_get(
             access_token,
-            f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
-            {"limit": limit, "offset": offset},
+            f"https://api.spotify.com/v1/playlists/{playlist_id}/items",
+            {
+                "limit": limit,
+                "offset": offset,
+                "fields": "items(item(id)),total,next",
+            },
         )
         items = payload.get("items") or []
         if not items:
             break
 
         for item in items:
-            track = item.get("track") or {}
+            track = item.get("item") or item.get("track") or {}
             track_id = track.get("id")
             if track_id:
                 track_ids.add(track_id)
@@ -2622,6 +2942,95 @@ async def tracks_release_track_metadata(request: Request, body: dict[str, Any] =
         if len(track_ids) >= 1000:
             break
     return {"items": release_track_metadata_for_spotify_ids(track_ids)}
+
+
+@app.get("/tracks/playlist-memberships")
+async def tracks_playlist_memberships(
+    request: Request,
+    track_id: str | None = None,
+    release_track_id: int | None = None,
+    recording_release_track_ids: str | None = None,
+    mode: str = "representative",
+) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    release_ids: list[int] = []
+    if release_track_id is not None and release_track_id > 0:
+        release_ids.append(release_track_id)
+    for value in str(recording_release_track_ids or "").split(","):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            continue
+        if parsed > 0:
+            release_ids.append(parsed)
+    items = playlist_memberships_for_track(
+        str(user_id),
+        spotify_track_id=str(track_id or "").strip() or None,
+        release_track_ids=release_ids,
+        include_recording_cluster=str(mode or "").strip().lower() != "individual",
+    )
+    return {
+        "items": items,
+        "playlist_index_status": playlist_index_status_for_user(str(user_id)),
+    }
+
+
+@app.post("/playlists/{playlist_id}/hidden")
+async def playlists_set_hidden(
+    request: Request,
+    playlist_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    normalized_playlist_id = str(playlist_id or "").strip()
+    if not normalized_playlist_id:
+        raise HTTPException(status_code=400, detail="playlist_id is required.")
+    hidden = bool(body.get("hidden", True))
+    set_playlist_hidden(str(user_id), normalized_playlist_id, hidden)
+    return {
+        "playlist_id": normalized_playlist_id,
+        "hidden": hidden,
+    }
+
+
+@app.get("/playlists/categories")
+async def playlists_categories(request: Request) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    return {"items": playlist_categories_for_user(str(user_id))}
+
+
+@app.post("/playlists/categories")
+async def playlists_create_category(
+    request: Request,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    try:
+        category = create_playlist_category(str(user_id), str(body.get("name") or ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"category": category}
+
+
+@app.put("/playlists/categories/{category_id}/playlists/{playlist_id}")
+async def playlists_set_category_membership(
+    request: Request,
+    category_id: str,
+    playlist_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    try:
+        return set_playlist_category_membership(
+            str(user_id),
+            category_id,
+            playlist_id,
+            bool(body.get("included", True)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/me/liked-tracks/sync")
@@ -3543,31 +3952,42 @@ async def me(
 
         if not is_full_analysis:
             quick_item_limit = SECTION_PREVIEW_LIMIT
-            quick_playlist_limit = SECTION_PREVIEW_LIMIT
+            quick_playlist_limit = -1
+            followed_artist_cache_limit = -1
             cached_playlists = _get_short_cache("owned_playlists", user_id, quick_playlist_limit)
             if cached_playlists is not None and not _playlist_cache_needs_refresh(cached_playlists[0]):
                 playlists, owned_playlists_available = cached_playlists
             else:
                 _set_load_progress(request, "playlists (quick)")
-                playlists, owned_playlists_available = await _fetch_owned_playlists(token, user_id, quick_playlist_limit)
+                playlists, owned_playlists_available = await _fetch_user_playlists(token, user_id)
                 _set_short_cache(
                     "owned_playlists",
                     user_id,
                     quick_playlist_limit,
                     (playlists, owned_playlists_available),
                 )
+            if owned_playlists_available:
+                _schedule_playlist_index_sync(token, str(user_id))
 
-            cached_followed_total = _get_short_cache("followed_artists_total", user_id, 1)
-            if cached_followed_total is not None:
-                followed_artists_total, followed_artists_available = cached_followed_total
+            cached_followed_artists = _get_short_cache(
+                "followed_artists_list",
+                user_id,
+                followed_artist_cache_limit,
+                ttl_seconds=FOLLOW_STATE_CACHE_TTL_SECONDS,
+            )
+            if cached_followed_artists is not None:
+                followed_artists, followed_artists_total, followed_artists_available = cached_followed_artists
             else:
-                _set_load_progress(request, "followed artist count (quick)")
-                followed_artists_total, followed_artists_available = await _fetch_followed_artists_total(token)
+                _set_load_progress(request, "followed artists (quick)")
+                followed_artists, followed_artists_total, followed_artists_available = await _get_followed_artists_cached(
+                    token,
+                    str(user_id),
+                )
                 _set_short_cache(
-                    "followed_artists_total",
+                    "followed_artists_list",
                     user_id,
-                    1,
-                    (followed_artists_total, followed_artists_available),
+                    followed_artist_cache_limit,
+                    (followed_artists, followed_artists_total, followed_artists_available),
                 )
 
             cached_top_artists_all_time = _get_short_cache("top_artists_long_term", user_id, quick_item_limit)
@@ -3665,8 +4085,8 @@ async def me(
                 "followers_total": followers.get("total"),
                 "followed_artists_total": followed_artists_total,
                 "followed_artists_available": followed_artists_available,
-                "followed_artists": top_artists_all_time,
-                "followed_artists_list_available": top_artists_all_time_available,
+                "followed_artists": followed_artists,
+                "followed_artists_list_available": followed_artists_available,
                 "recent_top_artists": [],
                 "recent_top_artists_available": False,
                 "top_tracks": top_tracks_all_time,
@@ -3734,32 +4154,43 @@ async def me(
         if cached_playlists is not None and not _playlist_cache_needs_refresh(cached_playlists[0]):
             playlists, owned_playlists_available = cached_playlists
         else:
-            playlists, owned_playlists_available = await _fetch_owned_playlists(token, user_id, playlist_limit)
+            playlists, owned_playlists_available = await _fetch_user_playlists(token, user_id, playlist_limit)
             _set_short_cache(
                 "owned_playlists",
                 user_id,
                 playlist_cache_limit,
                 (playlists, owned_playlists_available),
             )
+        if owned_playlists_available:
+            _schedule_playlist_index_sync(token, str(user_id))
         if is_full_analysis:
             _set_load_progress(request, "liked tracks")
             recent_likes_tracks, recent_likes_available = await _fetch_recent_liked_tracks(token, item_limit)
         else:
             recent_likes_tracks, recent_likes_available = [], False
-        cached_followed_total = _get_short_cache("followed_artists_total", user_id, 1)
+        followed_artist_cache_limit = -1
+        cached_followed_artists = _get_short_cache(
+            "followed_artists_list",
+            user_id,
+            followed_artist_cache_limit,
+            ttl_seconds=FOLLOW_STATE_CACHE_TTL_SECONDS,
+        )
         _set_load_progress(
             request,
-            "followed artist count (cache hit)" if cached_followed_total is not None else "followed artist count (fresh)",
+            "followed artists (cache hit)" if cached_followed_artists is not None else "followed artists (fresh)",
         )
-        if cached_followed_total is not None:
-            followed_artists_total, followed_artists_available = cached_followed_total
+        if cached_followed_artists is not None:
+            followed_artists, followed_artists_total, followed_artists_available = cached_followed_artists
         else:
-            followed_artists_total, followed_artists_available = await _fetch_followed_artists_total(token)
+            followed_artists, followed_artists_total, followed_artists_available = await _get_followed_artists_cached(
+                token,
+                str(user_id),
+            )
             _set_short_cache(
-                "followed_artists_total",
+                "followed_artists_list",
                 user_id,
-                1,
-                (followed_artists_total, followed_artists_available),
+                followed_artist_cache_limit,
+                (followed_artists, followed_artists_total, followed_artists_available),
             )
         cached_top_artists_all_time = _get_short_cache("top_artists_long_term", user_id, item_limit)
         _set_load_progress(
@@ -4088,8 +4519,8 @@ async def me(
             "followers_total": followers.get("total"),
             "followed_artists_total": followed_artists_total,
             "followed_artists_available": followed_artists_available,
-            "followed_artists": top_artists_all_time,
-            "followed_artists_list_available": top_artists_all_time_available,
+            "followed_artists": followed_artists,
+            "followed_artists_list_available": followed_artists_available,
             "recent_top_artists": top_artists_recent,
             "recent_top_artists_available": top_artists_recent_available,
             "top_tracks": top_tracks_all_time,

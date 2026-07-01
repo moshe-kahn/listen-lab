@@ -27,7 +27,7 @@ class Settings:
     listenlab_enable_debug_sync_failure: bool = False
     spotify_scope: str = (
         "user-read-email user-read-private user-read-recently-played playlist-read-private playlist-read-collaborative "
-        "playlist-modify-private user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
+        "playlist-modify-private playlist-modify-public user-follow-read user-library-read user-top-read streaming user-modify-playback-state "
         "user-read-playback-state user-read-currently-playing"
     )
 

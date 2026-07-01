@@ -1575,9 +1575,13 @@ def drain_generated_recording_track_cluster_dirty(*, limit: int = 50) -> dict[st
     return result
 
 
-def _generated_candidate_items_for_release_track(release_track_id: int) -> list[dict[str, Any]]:
+def _generated_candidate_items_for_release_track(
+    release_track_id: int,
+    *,
+    refresh_stale_display: bool = True,
+) -> list[dict[str, Any]]:
     dirty_ids = dirty_generated_recording_track_cluster_ids([release_track_id], limit=1)
-    if dirty_ids:
+    if refresh_stale_display and dirty_ids:
         refresh_generated_recording_track_clusters_for_release_tracks(dirty_ids)
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         if not _generated_cluster_tables_available(connection):
@@ -1601,7 +1605,7 @@ def _generated_candidate_items_for_release_track(release_track_id: int) -> list[
         if isinstance(value, dict):
             items.append(value)
     items = _hydrate_candidate_items_with_current_member_metadata(items)
-    if any(_generated_item_needs_display_refresh(item) for item in items):
+    if refresh_stale_display and any(_generated_item_needs_display_refresh(item) for item in items):
         refresh_generated_recording_track_clusters_for_release_tracks([release_track_id])
         with sqlite_connection(row_factory=sqlite3.Row) as connection:
             rows = connection.execute(
@@ -1636,11 +1640,15 @@ def get_recording_track_candidate_for_release_track(release_track_id: int) -> di
     return matches[0]
 
 
-def get_recording_track_candidates_for_release_track(release_track_id: int) -> list[dict[str, Any]]:
+def get_recording_track_candidates_for_release_track(
+    release_track_id: int,
+    *,
+    refresh_stale_display: bool = True,
+) -> list[dict[str, Any]]:
     target_id = int(release_track_id)
     if target_id <= 0:
         return []
-    matches = _generated_candidate_items_for_release_track(target_id)
+    matches = _generated_candidate_items_for_release_track(target_id, refresh_stale_display=refresh_stale_display)
     if not matches:
         return []
     return sorted(
@@ -1654,12 +1662,16 @@ def get_recording_track_candidates_for_release_track(release_track_id: int) -> l
     )
 
 
-def candidate_cluster_metadata_for_release_track_ids(release_track_ids: list[int]) -> dict[int, dict[str, Any]]:
+def candidate_cluster_metadata_for_release_track_ids(
+    release_track_ids: list[int],
+    *,
+    refresh_dirty: bool = True,
+) -> dict[int, dict[str, Any]]:
     target_ids = {int(release_track_id) for release_track_id in release_track_ids if int(release_track_id) > 0}
     if not target_ids:
         return {}
     dirty_ids = dirty_generated_recording_track_cluster_ids(target_ids, limit=len(target_ids))
-    if dirty_ids:
+    if refresh_dirty and dirty_ids:
         refresh_generated_recording_track_clusters_for_release_tracks(dirty_ids)
     placeholders = ",".join("?" for _ in target_ids)
     with sqlite_connection(row_factory=sqlite3.Row) as connection:

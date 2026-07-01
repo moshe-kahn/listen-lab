@@ -10,6 +10,8 @@ This document is the implementation-oriented technical source of truth for the L
 - The dashboard currently renders profile identity, playlists, recent listening, liked tracks, top tracks, top artists, and top albums.
 - The dashboard also includes playback controls plus a local/full/test mode model for working through Spotify rate limits and local-only sessions.
 - Recent Likes now has a read-only user-scoped SQLite cache/sync path for Spotify saved tracks, with the old direct Spotify latest-likes payload retained only as a clearly labeled transition fallback.
+- Spotify follow-state is cached in SQLite for followed artists and followed playlist owners, with a 24-hour freshness window before Spotify is queried again.
+- Playlist metadata, user hide state, user categories, follower totals, and track membership are cached in SQLite so track overlays can show local playlist membership and playlist overlays can open from cached rows before falling back to Spotify.
 - The auth layer now also supports a dedicated recent-ingest OAuth path with PKCE plus probe and poll-now endpoints for recent-play API debugging.
 - A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
 - The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
@@ -38,6 +40,7 @@ This document is the implementation-oriented technical source of truth for the L
 - Catalog Backfill now separates identity-critical metadata from catalog-expansion work, with explicit target modes for tracks, albums, album tracklists, and all targets.
 - A local Spotify track metadata worker exists for bounded identity metadata enrichment. It supports one-shot CLI runs by default, optional loop mode, JSONL event logging, condensed terminal output, local cooldowns, and a rolling request-budget guard.
 - Generated recording/track-family candidate clusters are cached in SQLite for fast local lookup. Startup builds the generated cache if empty, and source/release mapping changes mark affected release tracks dirty so later refreshes can be scoped instead of rebuilding all candidates.
+- Playlist track identity is a derived index from cached raw Spotify playlist positions into existing source/release/generated-recording evidence. It must not be treated as a canonical merge decision.
 - Identity Audit includes read-only track/release diagnostics, release-album merge preview/dry-run tooling, release-album history/Spotify repair dry-run/apply tooling, and evidence-gated artist duplicate repair with dry-run/write separation.
 - The core overlooked-artist analysis flow and playlist creation flow are still not implemented.
 
@@ -74,6 +77,7 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend queue organizer, preview-resume handling, album play-all controls, and Recent Likes cache/sync UI
 - frontend playback-action menu for overlay and album play controls, with `Play now`, `Play next`, and `Add to queue` actions backed by the ListenLab queue
 - frontend recording/release track views with collapsible same-recording album appearances, compact two-column `Song Family` relationship rows, source-version album cards in release view, exact-source vs aggregate listen/date semantics, liked-state fallback checks, playlist tracklist overlays, and in-place album tracklist scrolling/highlighting
+- frontend track overlays can show cached `In playlists` memberships and open the playlist overlay focused on the exact playlist occurrence
 - frontend homepage playback album expansion uses a compact tracklist while keeping the queue visible; repeated Spotify queue cycles are collapsed for display
 - frontend local/full/test mode controls with cached-state indicators
 - frontend tracks-only comparison page for current vs new all-time ranking formulas
@@ -103,6 +107,8 @@ This document is the implementation-oriented technical source of truth for the L
 - on-disk local analysis cache, per-user snapshot cache, and shared static metadata cache for artists, albums, and tracks
 - SQLite schema migrations and `raw_play_event`, `raw_play_event_membership`, `live_playback_event`, `ingest_run`, and `spotify_sync_state` tables
 - SQLite liked-track cache tables for read-only saved-track cache state and sync metadata
+- SQLite follow-state cache tables for followed artists and followed playlist-owner users
+- SQLite playlist index/category tables for playlist metadata, user hide/category state, follower totals, raw per-position track membership, and derived playlist-track identity matches
 - raw ingest helpers with source-row dedupe plus conservative cross-source upgrade matching
 - ingest-run listing, fetch, and deletion helpers plus a unified top-track query on raw data
 - history JSON file loader and batch history ingest path
@@ -176,6 +182,17 @@ Album-family candidate report review:
   - stores user-scoped active/inactive Spotify saved-track cache rows keyed by `(user_id, spotify_track_id)`
 - `spotify_liked_track_sync_state`
   - stores user-scoped liked-track sync metadata, including last quick/full attempts, stopped reason, active count, and page/track counts
+- `spotify_follow_state_cache`
+  - stores user-scoped followed artist/user booleans keyed by `(user_id, entity_type, spotify_id)`
+  - uses `checked_at` so artist and playlist-owner follow markers can survive backend restarts without re-querying Spotify on every login
+- `spotify_playlist_cache`
+  - stores user-scoped Spotify playlist metadata, owner/category/followed-owner state, user hide state, follower total, `snapshot_id`, track count, and track-cache sync status
+- `spotify_playlist_track_cache`
+  - stores raw playlist track occurrences keyed by `(user_id, playlist_id, position)` so duplicate occurrences are preserved
+- `spotify_playlist_track_identity`
+  - stores derived source/release/generated-recording links for cached playlist rows and supports local track-overlay membership lookup
+- `playlist_category` and `playlist_category_member`
+  - store user-defined playlist categories and playlist membership in those categories
 - `raw_play_event`
   - stores the raw play event plus ingest provenance and duration quality method
 - `raw_play_event_membership`
@@ -367,6 +384,8 @@ The FastAPI backend is responsible for:
 
 ### Persistent cache sections
 - user-scoped liked-track cache populated from Spotify saved tracks
+- user-scoped follow-state cache populated from Spotify followed artists and user-follow checks
+- user-scoped playlist metadata, category state, hide state, follower totals, and track membership index populated from `/me/playlists`, playlist detail fetches, and playlist item pages
 - history-calibrated artist favorites
 - history-calibrated album favorites
 - stable image and URL enrichment for those history-ranked results

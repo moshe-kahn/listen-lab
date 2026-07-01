@@ -1,10 +1,13 @@
-import { Fragment, useEffect, useState, type CSSProperties, type Dispatch, type MouseEvent, type ReactNode, type Ref, type RefObject, type SetStateAction } from "react";
+import { Fragment, useEffect, useState, type CSSProperties, type Dispatch, type FormEvent, type MouseEvent, type ReactNode, type Ref, type RefObject, type SetStateAction } from "react";
 
 import type {
   AlbumFamilyContext,
   AlbumTrackEntry,
   ArtistAlbumEntry,
   PlaybackActionRequest,
+  PlaylistIndexStatus,
+  PlaylistMembership,
+  OwnedPlaylist,
   PlayerQueueTrack,
   PlayerTrackSummary,
   PreviewItem,
@@ -38,6 +41,13 @@ type AlbumPlaybackQueue = {
 };
 
 type AppearsOnReleaseType = "Single" | "Soundtrack" | "Compilation" | "Album" | "Release";
+type PlaylistAddSortMode = "recent" | "name" | "tracks" | "membership";
+type PlaylistAddCategoryFilter = "active" | "all" | "none" | string;
+type PlaylistCategory = {
+  id: string;
+  name: string;
+  playlistIds: string[];
+};
 
 const appearsOnReleaseTypeOrder: AppearsOnReleaseType[] = [
   "Single",
@@ -86,7 +96,28 @@ function appearsOnSummary(members: RecordingTrackCandidateMember[]) {
     .join(" · ");
 }
 
+function recordingVersionTagLabel(version: ReleaseTrackDetailSourceVersion | null) {
+  const rawName = String(version?.name ?? "").trim();
+  const suffix = versionDescriptorFromText(rawName);
+  if (suffix) {
+    return suffix;
+  }
+  const albumName = String(version?.album_name ?? "").trim();
+  const albumMatch = versionDescriptorFromText(albumName);
+  if (albumMatch) return albumMatch;
+  return version?.is_representative_choice ? "Representative" : "Version";
+}
+
+function versionDescriptorFromText(value: string | null | undefined) {
+  const raw = String(value ?? "").trim();
+  const match = raw.match(/\s[-\u2013\u2014]\s((?:(?:\d{4}\s+)?remaster(?:ed)?|deluxe|expanded|anniversary|mono|stereo|live|demo|acoustic|instrumental|edit|mix|version).*)$/i)
+    ?? raw.match(/\(([^)]*(?:remaster(?:ed)?|deluxe|expanded|anniversary|mono|stereo|live|demo|acoustic|instrumental|edit|mix|version)[^)]*)\)\s*$/i)
+    ?? raw.match(/\[([^\]]*(?:remaster(?:ed)?|deluxe|expanded|anniversary|mono|stereo|live|demo|acoustic|instrumental|edit|mix|version)[^\]]*)\]\s*$/i);
+  return match?.[1]?.trim().replace(/\s+/g, " ") ?? null;
+}
+
 type DetailPreviewModalProps = {
+  apiBaseUrl: string;
   albumFamilyContext: AlbumFamilyContext | null;
   albumTrackEntries: AlbumTrackEntry[];
   albumTrackEntriesError: string | null;
@@ -130,6 +161,8 @@ type DetailPreviewModalProps = {
   openSelectedArtistMemberPreview: (artist: TrackArtistEntry) => void;
   openSelectedTrackAlbumPreview: () => void;
   openSelectedTrackArtistPreview: (artist?: TrackArtistEntry) => void;
+  openPlaylistMembershipPreview: (membership: PlaylistMembership) => void;
+  onAddSelectedTrackToPlaylists: (playlistIds: string[], removePlaylistIds: string[], newPlaylistName: string | null) => Promise<void>;
   pausedTimeFlashOn: boolean;
   playbackDurationMs: number;
   playbackPaused: boolean;
@@ -138,6 +171,12 @@ type DetailPreviewModalProps = {
   playlistTrackEntriesError: string | null;
   playlistTrackEntriesHasMore: boolean;
   playlistTrackEntriesLoading: boolean;
+  playlistTrackEntriesOffset: number;
+  playlistTrackEntriesShowCollaborativeColumns: boolean;
+  playlistTrackEntriesTotal: number | null;
+  loadMorePlaylistTrackEntries: () => Promise<void>;
+  recentTrackIsKnownLiked: (track: RecentTrack | null | undefined, fallbackTrackId?: string | null) => boolean;
+  togglePlaylistTrackPreview: (track: RecentTrack, rowTrackUri: string | null) => Promise<void>;
   handlePlaylistPlayAll: (action: PlaybackAction) => Promise<void>;
   handlePlaylistTrackPlayback: (track: RecentTrack, action: PlaybackAction) => Promise<void>;
   playerSummaryFromAlbumTrack: (track: AlbumTrackEntry) => PlayerTrackSummary;
@@ -165,11 +204,12 @@ type DetailPreviewModalProps = {
   selectedPreviewAlbumContextTagLabel: string | null;
   selectedPreviewAppearsOnAlbums: ArtistAlbumEntry[];
   selectedPreviewArtistAlbumsForDisplay: ArtistAlbumEntry[];
+  selectedPreviewArtistFollowStatusKnown: boolean;
   selectedPreviewArtistImageUrl: string | null;
+  selectedPreviewArtistIsSpotifyFollowed: boolean;
   selectedPreviewArtists: TrackArtistEntry[];
   selectedPreviewCanOpenAlbum: boolean;
   selectedPreviewCanOpenArtist: boolean;
-  selectedPreviewCanViewReleaseTrack: boolean;
   selectedPreviewCanonicalTrackTitle: string | null;
   selectedPreviewCurrentSpotifyTrackId: string | null;
   selectedPreviewCurrentVersionIsSpotifyLiked: boolean;
@@ -190,8 +230,14 @@ type DetailPreviewModalProps = {
   selectedPreviewListenCountLabel: string | null;
   selectedPreviewOtherRecordingMembers: RecordingTrackCandidateMember[];
   selectedPreviewPlaybackTrackUri: string | null;
+  selectedPreviewPlaylistIndexStatus: PlaylistIndexStatus | null;
+  selectedPreviewPlaylistMemberships: PlaylistMembership[];
+  selectedPreviewPlaylistMembershipsLoading: boolean;
+  selectedPreviewPlaylistOwnerFollowedByYou: boolean;
+  selectedPreviewAvailablePlaylists: OwnedPlaylist[];
   selectedPreviewPrimaryArtistAlbums: ArtistAlbumEntry[];
   selectedPreviewRecordingCandidateError: string | null;
+  selectedPreviewRecordingMembers: RecordingTrackCandidateMember[];
   selectedPreviewReleaseAlbumVariationCount: number;
   selectedPreviewReleaseSiblingSourceCount: number | null;
   selectedPreviewReleaseSourceVersionNeedsArrows: boolean;
@@ -220,6 +266,7 @@ type DetailPreviewModalProps = {
 
 export function DetailPreviewModal(props: DetailPreviewModalProps) {
   const {
+    apiBaseUrl,
     albumFamilyContext,
     albumTrackEntries,
     albumTrackEntriesError,
@@ -263,6 +310,8 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     openSelectedArtistMemberPreview,
     openSelectedTrackAlbumPreview,
     openSelectedTrackArtistPreview,
+    openPlaylistMembershipPreview,
+    onAddSelectedTrackToPlaylists,
     pausedTimeFlashOn,
     playbackDurationMs,
     playbackPaused,
@@ -271,6 +320,12 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     playlistTrackEntriesError,
     playlistTrackEntriesHasMore,
     playlistTrackEntriesLoading,
+    playlistTrackEntriesOffset,
+    playlistTrackEntriesShowCollaborativeColumns,
+    playlistTrackEntriesTotal,
+    loadMorePlaylistTrackEntries,
+    recentTrackIsKnownLiked,
+    togglePlaylistTrackPreview,
     handlePlaylistPlayAll,
     handlePlaylistTrackPlayback,
     playerSummaryFromAlbumTrack,
@@ -298,11 +353,12 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     selectedPreviewAlbumContextTagLabel,
     selectedPreviewAppearsOnAlbums,
     selectedPreviewArtistAlbumsForDisplay,
+    selectedPreviewArtistFollowStatusKnown,
     selectedPreviewArtistImageUrl,
+    selectedPreviewArtistIsSpotifyFollowed,
     selectedPreviewArtists,
     selectedPreviewCanOpenAlbum,
     selectedPreviewCanOpenArtist,
-    selectedPreviewCanViewReleaseTrack,
     selectedPreviewCanonicalTrackTitle,
     selectedPreviewCurrentSpotifyTrackId,
     selectedPreviewCurrentVersionIsSpotifyLiked,
@@ -318,8 +374,14 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     selectedPreviewListenCountLabel,
     selectedPreviewOtherRecordingMembers,
     selectedPreviewPlaybackTrackUri,
+    selectedPreviewPlaylistIndexStatus,
+    selectedPreviewPlaylistMemberships,
+    selectedPreviewPlaylistMembershipsLoading,
+    selectedPreviewPlaylistOwnerFollowedByYou,
+    selectedPreviewAvailablePlaylists,
     selectedPreviewPrimaryArtistAlbums,
     selectedPreviewRecordingCandidateError,
+    selectedPreviewRecordingMembers,
     selectedPreviewReleaseAlbumVariationCount,
     selectedPreviewReleaseSiblingSourceCount,
     selectedPreviewReleaseSourceVersionNeedsArrows,
@@ -373,6 +435,34 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
   const selectedReleaseSourceVersion = selectedPreviewReleaseSourceVersions.find(
     (version) => version.spotify_track_id === selectedPreviewCurrentSpotifyTrackId,
   ) ?? selectedPreviewReleaseSourceVersions[0] ?? null;
+  const recordingMemberVersionTagLabel = (member: RecordingTrackCandidateMember | null) => {
+    if (!member) {
+      return "Version";
+    }
+    const subtitle = variationSubtitleFromTitle(member.title);
+    if (subtitle) {
+      return subtitle;
+    }
+    const evidenceTokens = member.evidence?.version_tokens?.filter(Boolean).join(" ");
+    if (evidenceTokens) {
+      return evidenceTokens;
+    }
+    const albumDescriptor = versionDescriptorFromText(recordingMemberAlbumName(member));
+    if (albumDescriptor) {
+      return albumDescriptor;
+    }
+    return member.release_track_id === selectedPreview?.releaseTrackId ? "Original" : "Version";
+  };
+  const selectedRecordingVersionMember = selectedPreviewRecordingMembers.find(
+    (member) => member.release_track_id === selectedPreview?.releaseTrackId,
+  ) ?? selectedPreviewRecordingMembers[0] ?? null;
+  const selectedRecordingVersionMembersHaveVariants = selectedPreviewRecordingMembers.some((member) => {
+    const label = recordingMemberVersionTagLabel(member).trim().toLocaleLowerCase();
+    return Boolean(label && label !== "version" && label !== "original");
+  });
+  const selectedRecordingVersionMembersForDropdown = selectedRecordingVersionMembersHaveVariants
+    ? selectedPreviewRecordingMembers
+    : [];
   const trackPanelDiscNumbers = new Set(
     visibleTrackPanelAlbumEntries
       .map((track) => track.discNumber)
@@ -493,13 +583,77 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
   ) : null;
   const [listenBreakdownOpen, setListenBreakdownOpen] = useState(false);
   const [dateBreakdownOpen, setDateBreakdownOpen] = useState(false);
+  const [recordingVersionDropdownOpen, setRecordingVersionDropdownOpen] = useState(false);
+  const [playlistAddOverlayOpen, setPlaylistAddOverlayOpen] = useState(false);
+  const [playlistAddSelectedIds, setPlaylistAddSelectedIds] = useState<Set<string>>(new Set());
+  const [playlistAddInitialSelectedIds, setPlaylistAddInitialSelectedIds] = useState<Set<string>>(new Set());
+  const [playlistAddNewName, setPlaylistAddNewName] = useState("");
+  const [playlistAddSearch, setPlaylistAddSearch] = useState("");
+  const [playlistAddSortMode, setPlaylistAddSortMode] = useState<PlaylistAddSortMode>("recent");
+  const [playlistAddCategoryFilter, setPlaylistAddCategoryFilter] = useState<PlaylistAddCategoryFilter>("active");
+  const [playlistCategories, setPlaylistCategories] = useState<PlaylistCategory[]>([]);
+  const [playlistAddSaving, setPlaylistAddSaving] = useState(false);
+  const [playlistAddError, setPlaylistAddError] = useState<string | null>(null);
+  useEffect(() => {
+    setRecordingVersionDropdownOpen(false);
+    setPlaylistAddOverlayOpen(false);
+    setPlaylistAddSelectedIds(new Set());
+    setPlaylistAddInitialSelectedIds(new Set());
+    setPlaylistAddNewName("");
+    setPlaylistAddSearch("");
+    setPlaylistAddSortMode("recent");
+    setPlaylistAddCategoryFilter("active");
+    setPlaylistAddError(null);
+  }, [selectedPreview]);
+  useEffect(() => {
+    if (selectedPreview?.kind !== "track") {
+      return;
+    }
+    const membershipIds = new Set(selectedPreviewPlaylistMemberships.map((membership) => membership.playlist_id));
+    setPlaylistAddSelectedIds(membershipIds);
+    setPlaylistAddInitialSelectedIds(membershipIds);
+    setPlaylistAddError(null);
+  }, [playlistAddOverlayOpen, selectedPreviewPlaylistMemberships]);
+  useEffect(() => {
+    if (!playlistAddOverlayOpen) {
+      return;
+    }
+    let cancelled = false;
+    async function loadPlaylistCategories() {
+      try {
+        const response = await fetch(`${apiBaseUrl}/playlists/categories`, { credentials: "include" });
+        if (!response.ok) {
+          throw new Error(`Playlist categories failed to load (${response.status}).`);
+        }
+        const payload = await response.json() as { items?: PlaylistCategory[] };
+        if (!cancelled) {
+          setPlaylistCategories(Array.isArray(payload.items) ? payload.items : []);
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setPlaylistCategories([]);
+        }
+      }
+    }
+    void loadPlaylistCategories();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBaseUrl, selectedPreview?.kind]);
   const handleModalClick = (event: MouseEvent<HTMLElement>) => {
     event.stopPropagation();
-    if (!detailOptionsOpen && !listenBreakdownOpen && !dateBreakdownOpen) {
+    if (!detailOptionsOpen && !listenBreakdownOpen && !dateBreakdownOpen && !recordingVersionDropdownOpen && !playlistAddOverlayOpen) {
       return;
     }
     const target = event.target;
     if (target instanceof Element && target.closest(".detail-modal-options")) {
+      return;
+    }
+    if (target instanceof Element && target.closest(".detail-modal-recording-version-selector")) {
+      return;
+    }
+    if (target instanceof Element && target.closest(".detail-modal-playlist-add-overlay")) {
       return;
     }
     if (target instanceof Element && target.closest(".detail-track-action-listen-popover-wrap")) {
@@ -508,7 +662,101 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     setDetailOptionsOpen(false);
     setListenBreakdownOpen(false);
     setDateBreakdownOpen(false);
+    setRecordingVersionDropdownOpen(false);
+    setPlaylistAddOverlayOpen(false);
   };
+  const existingPlaylistMembershipIds = new Set(selectedPreviewPlaylistMemberships.map((membership) => membership.playlist_id));
+  const archiveCategoryIds = playlistCategories
+    .filter((category) => category.name.trim().toLocaleLowerCase() === "archive")
+    .map((category) => category.id);
+  const playlistCategoryNames = (playlistId: string | null | undefined) => {
+    if (!playlistId) {
+      return [];
+    }
+    return playlistCategories
+      .filter((category) => category.playlistIds.includes(playlistId))
+      .map((category) => category.name)
+      .filter(Boolean);
+  };
+  const playlistAddSearchQuery = playlistAddSearch.trim().toLocaleLowerCase();
+  const availablePlaylistOptions = selectedPreviewAvailablePlaylists
+    .filter((playlist) => Boolean(playlist.playlist_id))
+    .filter((playlist) => Boolean(playlist.is_owned || playlist.is_collaborative))
+    .filter((playlist) => {
+      const playlistId = playlist.playlist_id ?? "";
+      const categoryIds = playlistCategories
+        .filter((category) => category.playlistIds.includes(playlistId))
+        .map((category) => category.id);
+      if (playlistAddCategoryFilter === "all") {
+        return true;
+      }
+      if (playlistAddCategoryFilter === "none") {
+        return categoryIds.length === 0;
+      }
+      if (playlistAddCategoryFilter === "active") {
+        return !archiveCategoryIds.some((categoryId) => categoryIds.includes(categoryId));
+      }
+      return categoryIds.includes(playlistAddCategoryFilter);
+    })
+    .filter((playlist) => {
+      if (!playlistAddSearchQuery) {
+        return true;
+      }
+      return [
+        playlist.name,
+        playlist.owner_name,
+        playlist.description,
+      ].some((value) => String(value ?? "").toLocaleLowerCase().includes(playlistAddSearchQuery));
+    })
+    .map((playlist, index) => ({ playlist, index }))
+    .sort((a, b) => {
+      if (playlistAddSortMode === "name") {
+        return String(a.playlist.name ?? "").localeCompare(String(b.playlist.name ?? ""));
+      }
+      if (playlistAddSortMode === "tracks") {
+        return (b.playlist.track_count ?? -1) - (a.playlist.track_count ?? -1)
+          || String(a.playlist.name ?? "").localeCompare(String(b.playlist.name ?? ""));
+      }
+      if (playlistAddSortMode === "membership") {
+        return Number(playlistAddInitialSelectedIds.has(b.playlist.playlist_id ?? "")) - Number(playlistAddInitialSelectedIds.has(a.playlist.playlist_id ?? ""))
+          || String(a.playlist.name ?? "").localeCompare(String(b.playlist.name ?? ""));
+      }
+      return a.index - b.index;
+    })
+    .map(({ playlist }) => playlist);
+  const handlePlaylistAddSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (playlistAddSaving) {
+      return;
+    }
+    const playlistIds = Array.from(playlistAddSelectedIds).filter((playlistId) => !existingPlaylistMembershipIds.has(playlistId));
+    const removePlaylistIds = Array.from(existingPlaylistMembershipIds).filter((playlistId) => !playlistAddSelectedIds.has(playlistId));
+    const newPlaylistName = playlistAddNewName.trim();
+    if (playlistIds.length === 0 && removePlaylistIds.length === 0 && !newPlaylistName) {
+      setPlaylistAddError("Choose a playlist or enter a new playlist name.");
+      return;
+    }
+    setPlaylistAddSaving(true);
+    setPlaylistAddError(null);
+    try {
+      await onAddSelectedTrackToPlaylists(playlistIds, removePlaylistIds, newPlaylistName || null);
+      setPlaylistAddOverlayOpen(false);
+      setPlaylistAddNewName("");
+    } catch (error) {
+      setPlaylistAddError(error instanceof Error ? error.message : "Could not add this track to playlists.");
+    } finally {
+      setPlaylistAddSaving(false);
+    }
+  };
+  const selectedPreviewPlaylistMembershipStatusMessage = selectedPreview?.kind === "track" && !selectedPreviewPlaylistMembershipsLoading && selectedPreviewPlaylistMemberships.length === 0
+    ? !selectedPreviewPlaylistIndexStatus?.has_playlist_metadata
+      ? "Playlist cache is still starting. It will appear here after playlist metadata loads."
+      : !selectedPreviewPlaylistIndexStatus.has_track_cache
+        ? "Playlist tracks are still being cached. This song will appear here once that background index finishes."
+        : !selectedPreviewPlaylistIndexStatus.has_identity_index
+          ? "Playlist tracks are cached, but their track identities are still being indexed."
+          : "No cached playlist contains this song yet."
+    : null;
   return selectedPreview ? (
         <div
           aria-modal="true"
@@ -516,8 +764,8 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
           onClick={() => setSelectedPreview(null)}
           role="dialog"
         >
-          <section className={`detail-modal${selectedPreview.kind === "track" ? " detail-modal-track-view" : ""}${selectedPreview.kind === "album" ? " detail-modal-album-view" : ""}`} onClick={handleModalClick}>
-            {selectedPreview.kind !== "track" ? (
+          <section className={`detail-modal${selectedPreview.kind === "track" ? " detail-modal-track-view" : ""}${selectedPreview.kind === "album" ? " detail-modal-album-view" : ""}${selectedPreview.kind === "playlist" ? " detail-modal-playlist-view" : ""}`} onClick={handleModalClick}>
+            {selectedPreview.kind !== "track" && selectedPreview.kind !== "playlist" ? (
               <div className="detail-modal-options">
                 <button
                   aria-expanded={detailOptionsOpen}
@@ -559,6 +807,51 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
               </div>
             ) : null}
             <div className="detail-modal-copy">
+              {selectedPreview.kind === "track" && selectedRecordingVersionMembersForDropdown.length > 1 ? (
+                <div className="detail-modal-recording-version-selector">
+                  <button
+                    aria-expanded={recordingVersionDropdownOpen}
+                    className="detail-modal-recording-version-button"
+                    onClick={() => setRecordingVersionDropdownOpen((current) => !current)}
+                    type="button"
+                  >
+                    <span>{recordingMemberVersionTagLabel(selectedRecordingVersionMember)}</span>
+                    <span aria-hidden="true">⌄</span>
+                  </button>
+                  {recordingVersionDropdownOpen ? (
+                    <div className="detail-modal-recording-version-menu">
+                      {selectedRecordingVersionMembersForDropdown.map((member) => {
+                        const isSelectedRecordingMember = member.release_track_id === selectedPreview.releaseTrackId;
+                        const albumImageUrl = recordingMemberAlbumImageUrl(member);
+                        return (
+                          <button
+                            aria-current={isSelectedRecordingMember}
+                            className={`detail-modal-recording-version-option${isSelectedRecordingMember ? " detail-modal-recording-version-option-active" : ""}`}
+                            key={`recording-version-option-${member.release_track_id}`}
+                            onClick={() => {
+                              openRecordingCandidateReleaseTrack(member, "recording");
+                              setRecordingVersionDropdownOpen(false);
+                            }}
+                            type="button"
+                          >
+                            {albumImageUrl ? (
+                              <img alt="" src={albumImageUrl} />
+                            ) : (
+                              <span className="detail-modal-recording-version-fallback" aria-hidden="true">
+                                {(recordingMemberAlbumName(member) || member.title || "?").slice(0, 1).toUpperCase()}
+                              </span>
+                            )}
+                            <span className="detail-modal-recording-version-copy">
+                              <strong>{recordingMemberVersionTagLabel(member)}</strong>
+                              <span>{[recordingMemberReleaseYear(member), recordingMemberAlbumName(member), member.play_count != null ? `${member.play_count} ${member.play_count === 1 ? "listen" : "listens"}` : null].filter(Boolean).join(" · ")}</span>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <h2 className={selectedPreview.kind === "track" ? "detail-modal-track-title" : undefined}>
                 {selectedPreview.kind === "artist" ? (
                   selectedPreview.image ? (
@@ -569,7 +862,10 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     </span>
                   )
                 ) : null}
-                {selectedPreview.kind !== "track" && selectedPreviewIsKnownLiked ? <LikedBadge className="detail-liked-badge" /> : null}
+                {(
+                  (selectedPreview.kind !== "track" && selectedPreview.kind !== "playlist" && selectedPreviewIsKnownLiked)
+                  || (selectedPreview.kind === "playlist" && selectedPreviewPlaylistOwnerFollowedByYou)
+                ) ? <LikedBadge className="detail-liked-badge" /> : null}
                 {selectedPreview.kind !== "track" && selectedPreviewHasReleaseSibling ? (
                   <ReleaseSiblingBadge
                     className="detail-release-sibling-badge"
@@ -579,6 +875,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     clusterRelationshipKind={selectedPreview.releaseTrackClusterRelationshipKind}
                   />
                 ) : null}
+                <span className={selectedPreview.kind === "track" ? "detail-modal-title-scroll" : undefined}>
                 {selectedPreviewIsSharedArtistPage ? (
                   <span className="detail-modal-artist-links">
                     {selectedPreviewArtists.map((artist, index) => {
@@ -603,7 +900,19 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 ) : selectedPreview.kind === "track" && selectedPreviewCanonicalTrackTitle
                   ? displayTrackName(selectedPreviewCanonicalTrackTitle)
                   : selectedPreview.label}
+                </span>
               </h2>
+              {selectedPreview.kind === "artist" && selectedPreviewArtistFollowStatusKnown && selectedPreviewArtistIsSpotifyFollowed ? (
+                <button
+                  aria-label="Followed artist on Spotify"
+                  aria-pressed="true"
+                  className="secondary-button detail-track-action-button detail-track-star-button detail-artist-star-button detail-track-action-button-active"
+                  title="Followed on Spotify."
+                  type="button"
+                >
+                  <span aria-hidden="true">★</span>
+                </button>
+              ) : null}
               {hasPremiumPlayback && selectedPreview.kind === "track" && selectedPreviewPlaybackTrackUri ? (
                 <div className="detail-modal-play-menu detail-modal-play-menu-inline">
                   <PlaybackActionMenu
@@ -899,30 +1208,6 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     />
                   ) : null}
                 </div>
-                <div className="detail-modal-track-album-panel-art">
-                  {selectedPreviewDetailView === "recording" ? (
-                    <button
-                      aria-label="Open album view"
-                      className="detail-modal-image-button"
-                      onClick={openSelectedTrackAlbumPreview}
-                      type="button"
-                    >
-                      {selectedPreview.image ? (
-                        <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
-                      ) : (
-                        <span className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
-                          {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
-                        </span>
-                      )}
-                    </button>
-                  ) : selectedPreview.image ? (
-                    <img alt={selectedPreview.label} className="detail-modal-image" src={selectedPreview.image} />
-                  ) : (
-                    <div className="detail-modal-image detail-modal-image-fallback" aria-hidden="true">
-                      {selectedPreview.fallbackLabel ?? selectedPreview.label.slice(0, 1).toUpperCase()}
-                    </div>
-                  )}
-                </div>
                               <div className={`detail-modal-album-tracks detail-modal-album-tracks-full${selectedPreview.kind === "track" ? " detail-modal-album-tracks-track detail-modal-album-tracks-no-with" : ""}${selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? "" : " detail-modal-album-tracks-no-with"}`}>
                                 <div className="detail-modal-album-header">
                                   {hasPremiumPlayback ? (
@@ -947,6 +1232,8 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                   )}
                                   {selectedPreview.kind !== "track" && selectedPreviewAlbumHasGuestArtists ? <span className="detail-modal-album-with-header">With</span> : null}
                                   <span className="detail-modal-album-liked-header">Tags</span>
+                                  {selectedPreview.kind === "track" ? <span className="detail-modal-album-listens-header">Listens</span> : null}
+                                  {selectedPreview.kind === "track" ? <span className="detail-modal-album-playlists-header">Lists</span> : null}
                                   <span className="detail-modal-album-actions-header">
                                     {selectedPreview.kind !== "track" ? <span className="detail-modal-album-preview-header">Preview</span> : null}
                                     <button
@@ -1002,6 +1289,9 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                       const rowHistoryPlayCount = selectedPreviewDetailView === "release"
                                         ? track.sourcePlayCount === undefined ? track.playCount : track.sourcePlayCount
                                         : track.recordingPlayCount === undefined ? track.playCount : track.recordingPlayCount;
+                                      const rowPlaylistCount = selectedPreviewDetailView === "release"
+                                        ? track.sourcePlaylistCount === undefined ? 0 : track.sourcePlaylistCount
+                                        : track.recordingPlaylistCount === undefined ? (track.sourcePlaylistCount ?? 0) : track.recordingPlaylistCount;
                                       const rowLastPlayed = formatCompactRelativeAge(rowHistoryLastPlayedAt);
                                       const rowIsUnlistened = !rowHistoryLastPlayedAt && rowHistoryPlayCount <= 0;
                                       const rowRelationTagsResult = trackRelationTags({
@@ -1204,6 +1494,16 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                                               ) : null}
                                             </span>
                                           </span>
+                                          {selectedPreview.kind === "track" ? (
+                                            <span className="detail-album-track-listen-count">
+                                              {rowHistoryPlayCount > 0 ? rowHistoryPlayCount.toLocaleString() : "-"}
+                                            </span>
+                                          ) : null}
+                                          {selectedPreview.kind === "track" ? (
+                                            <span className="detail-album-track-playlist-count">
+                                              {rowPlaylistCount > 0 ? rowPlaylistCount.toLocaleString() : "-"}
+                                            </span>
+                                          ) : null}
                                           <div className="detail-album-track-actions">
                                             {selectedPreview.kind !== "track" && hasPremiumPlayback ? (
                                               <button
@@ -1644,19 +1944,214 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                 currentTrackUri={currentTrack?.uri ?? null}
                 entries={playlistTrackEntries}
                 error={playlistTrackEntriesError}
+                formatCompactRelativeAge={formatCompactRelativeAge}
                 formatPlaybackClock={formatPlaybackClock}
                 hasMore={playlistTrackEntriesHasMore}
                 hasPremiumPlayback={hasPremiumPlayback}
                 isTrackPlaying={isTrackPlaying}
+                isTrackLiked={recentTrackIsKnownLiked}
                 loading={playlistTrackEntriesLoading}
+                onPreviewTrack={togglePlaylistTrackPreview}
+                rowOffset={playlistTrackEntriesOffset}
+                focusPlaylistPosition={selectedPreview.focusPlaylistPosition ?? null}
+                focusSpotifyTrackId={selectedPreview.focusSpotifyTrackId ?? null}
+                showCollaborativeColumns={playlistTrackEntriesShowCollaborativeColumns}
+                total={playlistTrackEntriesTotal}
                 onPlayAll={handlePlaylistPlayAll}
                 onPlayTrack={handlePlaylistTrackPlayback}
                 onSelectTrack={openRecentPlayerTrackDetails}
                 playbackDurationMs={playbackDurationMs}
                 playbackPaused={playbackPaused}
                 playbackPositionMs={playbackPositionMs}
+                previewingTrackUri={previewingTrackUri}
+                previewPlayedTrackKeys={previewPlayedTrackKeys}
                 trackUriWithFallback={trackUriWithFallback}
               />
+            ) : null}
+            {selectedPreview.kind === "track" ? (
+              <div className="detail-modal-recording-variations detail-modal-playlist-memberships">
+                <div className="detail-modal-recording-variations-header">
+                  <span>Playlists</span>
+                  {selectedPreviewPlaylistMemberships.length > 0 ? (
+                    <button
+                      className="detail-modal-playlist-edit-button"
+                      onClick={() => {
+                        setPlaylistAddSortMode("membership");
+                        setPlaylistAddOverlayOpen(true);
+                      }}
+                      type="button"
+                    >
+                      Edit
+                    </button>
+                  ) : null}
+                </div>
+                {selectedPreviewPlaylistMembershipsLoading && selectedPreviewPlaylistMemberships.length === 0 ? (
+                  <p className="detail-modal-preview-missing">Checking cached playlists...</p>
+                ) : (
+                  <>
+                    {selectedPreviewPlaylistMembershipStatusMessage ? (
+                      <p className="detail-modal-preview-missing">{selectedPreviewPlaylistMembershipStatusMessage}</p>
+                    ) : null}
+                    <div className="detail-modal-playlist-membership-list">
+                      {selectedPreviewPlaylistMemberships.map((membership) => (
+                        <button
+                          className="detail-modal-playlist-membership"
+                          key={`${membership.playlist_id}-${membership.position}-${membership.spotify_track_id ?? "track"}`}
+                          onClick={() => openPlaylistMembershipPreview(membership)}
+                          type="button"
+                        >
+                          {membership.playlist_image_url ? (
+                            <img alt="" src={membership.playlist_image_url} />
+                          ) : (
+                            <span className="detail-modal-playlist-membership-fallback" aria-hidden="true">P</span>
+                          )}
+                          <span className="detail-modal-playlist-membership-copy">
+                            <strong className="single-line-ellipsis">{membership.playlist_name ?? "Untitled playlist"}</strong>
+                            <span className="single-line-ellipsis">
+                              {playlistCategoryNames(membership.playlist_id).join(" · ") || "Playlist"}
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+                      {selectedPreviewPlaylistMemberships.length === 0 ? (
+                        <button
+                          className="detail-modal-playlist-membership detail-modal-playlist-add-card"
+                          onClick={() => {
+                            setPlaylistAddSortMode("recent");
+                            setPlaylistAddOverlayOpen(true);
+                          }}
+                          type="button"
+                        >
+                          <span className="detail-modal-playlist-add-plus" aria-hidden="true">+</span>
+                          <span className="detail-modal-playlist-membership-copy">
+                            <strong>Add to playlist</strong>
+                            <span>{availablePlaylistOptions.length > 0 ? `${availablePlaylistOptions.length} playlists available` : "Create a new playlist"}</span>
+                          </span>
+                        </button>
+                      ) : null}
+                    </div>
+                    {playlistAddOverlayOpen ? (
+                      <div className="detail-modal-playlist-add-overlay" role="dialog" aria-modal="false" aria-label="Add to playlist">
+                        <form className="detail-modal-playlist-add-panel" onSubmit={handlePlaylistAddSubmit}>
+                          <div className="detail-modal-playlist-add-header">
+                            <span>Add to playlist</span>
+                            <button
+                              aria-label="Close add to playlist"
+                              className="detail-modal-playlist-add-close"
+                              onClick={() => setPlaylistAddOverlayOpen(false)}
+                              type="button"
+                            >
+                              ×
+                            </button>
+                          </div>
+                          <div className="detail-modal-playlist-add-toolbar">
+                            <input
+                              disabled={playlistAddSaving}
+                              onChange={(event) => setPlaylistAddSearch(event.target.value)}
+                              placeholder="Search playlists"
+                              type="search"
+                              value={playlistAddSearch}
+                            />
+                            <select
+                              disabled={playlistAddSaving}
+                              onChange={(event) => setPlaylistAddSortMode(event.target.value as PlaylistAddSortMode)}
+                              value={playlistAddSortMode}
+                            >
+                              <option value="recent">Recently edited</option>
+                              <option value="membership">In playlist</option>
+                              <option value="tracks">Track count</option>
+                              <option value="name">Name</option>
+                            </select>
+                            <select
+                              disabled={playlistAddSaving}
+                              onChange={(event) => setPlaylistAddCategoryFilter(event.target.value)}
+                              value={playlistAddCategoryFilter}
+                            >
+                              <option value="active">Active categories</option>
+                              <option value="all">All categories</option>
+                              <option value="none">None</option>
+                              {playlistCategories.map((category) => (
+                                <option key={category.id} value={category.id}>{category.name}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="detail-modal-playlist-add-list detail-modal-playlist-add-grid">
+                            {availablePlaylistOptions.length > 0 ? availablePlaylistOptions.map((playlist) => {
+                              const playlistId = playlist.playlist_id ?? "";
+                              const alreadyContainsTrack = existingPlaylistMembershipIds.has(playlistId);
+                              const isChecked = playlistAddSelectedIds.has(playlistId);
+                              const categoryNames = playlistCategoryNames(playlistId);
+                              return (
+                                <label className="detail-modal-playlist-add-option" key={playlistId}>
+                                  <input
+                                    checked={isChecked}
+                                    disabled={playlistAddSaving}
+                                    onChange={(event) => {
+                                      setPlaylistAddSelectedIds((current) => {
+                                        const next = new Set(current);
+                                        if (event.target.checked) {
+                                          next.add(playlistId);
+                                        } else {
+                                          next.delete(playlistId);
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                    type="checkbox"
+                                  />
+                                  <span className="detail-modal-playlist-add-checkbox" aria-hidden="true" />
+                                  {playlist.image_url ? (
+                                    <img className="detail-modal-playlist-add-image" alt="" src={playlist.image_url} />
+                                  ) : (
+                                    <span className="detail-modal-playlist-add-image detail-modal-playlist-add-image-fallback" aria-hidden="true">P</span>
+                                  )}
+                                  <span className="detail-modal-playlist-add-option-copy">
+                                    <strong className="single-line-ellipsis">{playlist.name ?? "Untitled playlist"}</strong>
+                                    <span className="single-line-ellipsis">
+                                      {[
+                                        categoryNames.length > 0 ? categoryNames.join(", ") : null,
+                                        alreadyContainsTrack ? "In playlist" : null,
+                                        playlist.is_collaborative ? "Collaborative" : null,
+                                        playlist.track_count != null ? `${playlist.track_count.toLocaleString()} tracks` : null,
+                                      ].filter(Boolean).join(" · ")}
+                                    </span>
+                                  </span>
+                                </label>
+                              );
+                            }) : (
+                              <p className="detail-modal-preview-missing">No cached playlists are available yet.</p>
+                            )}
+                          </div>
+                          <label className="detail-modal-playlist-new-field">
+                            <span>New playlist</span>
+                            <input
+                              disabled={playlistAddSaving}
+                              onChange={(event) => setPlaylistAddNewName(event.target.value)}
+                              placeholder="Playlist name"
+                              type="text"
+                              value={playlistAddNewName}
+                            />
+                          </label>
+                          {playlistAddError ? <p className="detail-modal-playlist-add-error">{playlistAddError}</p> : null}
+                          <div className="detail-modal-playlist-add-actions">
+                            <button
+                              className="detail-modal-options-item"
+                              disabled={playlistAddSaving}
+                              onClick={() => setPlaylistAddOverlayOpen(false)}
+                              type="button"
+                            >
+                              Cancel
+                            </button>
+                            <button className="detail-modal-playlist-add-submit" disabled={playlistAddSaving} type="submit">
+                              {playlistAddSaving ? "Saving..." : "Save"}
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </div>
             ) : null}
             {selectedPreview.kind === "track" && selectedPreviewDetailView === "release" && selectedPreviewReleaseSourceVersions.length > 1 ? (
               <div className="detail-modal-recording-variations detail-modal-release-source-albums">
@@ -1735,18 +2230,16 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                           Open in Spotify
                         </a>
                       ) : null}
-                      {selectedPreviewCanViewReleaseTrack || selectedPreviewDetailView === "release" ? (
-                        <button
-                          className="detail-modal-options-item"
-                          onClick={() => {
-                            setSelectedPreviewDetailView((current) => current === "release" ? "recording" : "release");
-                            setDetailOptionsOpen(false);
-                          }}
-                          type="button"
-                        >
-                          {selectedPreviewDetailView === "release" ? "View recording track" : "View release track"}
-                        </button>
-                      ) : null}
+                      <button
+                        className="detail-modal-options-item"
+                        onClick={() => {
+                          setSelectedPreviewDetailView((current) => current === "release" ? "recording" : "release");
+                          setDetailOptionsOpen(false);
+                        }}
+                        type="button"
+                      >
+                        {selectedPreviewDetailView === "release" ? "Show representative" : "Show individual"}
+                      </button>
                     </div>
                   ) : null}
                 </div>
@@ -1812,6 +2305,48 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
                     ) : null}
                   </span>
                 ) : selectedPreviewListenCountLabel ? <span>{selectedPreviewListenCountLabel}</span> : null}
+              </div>
+            ) : null}
+            {selectedPreview.kind === "playlist" ? (
+              <div className="detail-modal-bottom-tags" aria-label="Playlist options">
+                <div className="detail-modal-options detail-modal-options-bottom">
+                  <button
+                    aria-expanded={detailOptionsOpen}
+                    aria-label="Playlist options"
+                    className="detail-modal-options-button"
+                    onClick={() => setDetailOptionsOpen((current) => !current)}
+                    type="button"
+                  >
+                    <span aria-hidden="true">⚙</span>
+                  </button>
+                  {detailOptionsOpen ? (
+                    <div className="detail-modal-options-menu">
+                      {playlistTrackEntriesHasMore ? (
+                        <button
+                          className="detail-modal-options-item"
+                          disabled={playlistTrackEntriesLoading}
+                          onClick={() => {
+                            setDetailOptionsOpen(false);
+                            void loadMorePlaylistTrackEntries();
+                          }}
+                          type="button"
+                        >
+                          {playlistTrackEntriesLoading ? "Fetching..." : "Fetch next 500 tracks"}
+                        </button>
+                      ) : null}
+                      {selectedPreview.url ? (
+                        <a
+                          className="detail-modal-options-item"
+                          href={selectedPreview.url}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          Open in Spotify
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </section>

@@ -19,7 +19,9 @@ export function DashboardListCard({
   tertiaryText,
   metricText,
   primaryBadgeText,
+  primaryInlineBadgeText,
   liked,
+  playlistOwnerFollowedByYou,
   releaseSibling,
   releaseSiblingSourceCount,
   releaseSiblingDuplicateSourceCount,
@@ -34,6 +36,9 @@ export function DashboardListCard({
   previewKind,
   previewTrackUri,
   onSelectPreview,
+  rowAction,
+  muted = false,
+  cardClassName,
 }: DashboardListCardComponentProps) {
   const secondaryValue = secondaryText && secondaryText.trim().length > 0 ? secondaryText : "\u00A0";
   const tertiaryValue = tertiaryText && tertiaryText.trim().length > 0 ? tertiaryText : "\u00A0";
@@ -43,7 +48,11 @@ export function DashboardListCard({
 
   return (
     <button
-      className="list-row list-link dashboard-card-row"
+      className={[
+        "list-row list-link dashboard-card-row",
+        cardClassName,
+        muted ? "dashboard-card-row-muted" : null,
+      ].filter(Boolean).join(" ")}
       onClick={() =>
         onSelectPreview({
           image: imageUrl ?? null,
@@ -68,21 +77,26 @@ export function DashboardListCard({
           albumId: previewTrack?.album_id ?? null,
           artistName: previewTrack?.artist_name ?? null,
           sourceTrack: previewTrack ?? null,
+          playlistOwnerFollowedByYou: playlistOwnerFollowedByYou ?? null,
         })}
       type="button"
     >
       <div className="dashboard-card-layout">
         <div className="list-primary">
-          {imageUrl ? (
-            <img alt={imageAlt} className="list-art" src={imageUrl} />
-          ) : (
-            <div className="list-art list-art-fallback" aria-hidden="true">
-              {fallbackLabel}
-            </div>
-          )}
+          <div className="list-art-frame">
+            {imageUrl ? (
+              <img alt={imageAlt} className="list-art" src={imageUrl} />
+            ) : (
+              <div className="list-art list-art-fallback" aria-hidden="true">
+                {fallbackLabel}
+              </div>
+            )}
+            {rowAction ? <div className="card-row-action">{rowAction}</div> : null}
+          </div>
           <div className="card-copy">
             <div className="card-primary-line">
               <strong className={`card-primary ${primaryClamp}`}>{primaryText}</strong>
+              {primaryInlineBadgeText ? <span className="card-primary-inline-badge">{primaryInlineBadgeText}</span> : null}
             </div>
             <p
               aria-hidden={secondaryPlaceholder}

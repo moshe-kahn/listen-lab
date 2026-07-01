@@ -1,4 +1,5 @@
 import type { TrackIdentityAuditExample } from "../components/identityAudit/IdentityAuditDiagnostics";
+import type { ReactNode } from "react";
 
 export type SessionResponse = {
   authenticated: boolean;
@@ -77,9 +78,11 @@ export type RecentTrack = {
   first_played_at?: string | null;
   last_played_at?: string | null;
   source_play_count?: number | null;
+  source_playlist_count?: number | null;
   source_first_played_at?: string | null;
   source_last_played_at?: string | null;
   recording_play_count?: number | null;
+  recording_playlist_count?: number | null;
   recording_first_played_at?: string | null;
   recording_last_played_at?: string | null;
   listening_span_days?: number | null;
@@ -101,6 +104,15 @@ export type RecentTrack = {
   raw_spotify_history_id?: number | null;
   liked_at?: string | null;
   is_liked?: boolean | null;
+  playlist_added_at?: string | null;
+  playlist_added_by?: {
+    user_id?: string | null;
+    id?: string | null;
+    display_name?: string | null;
+    uri?: string | null;
+    url?: string | null;
+  } | null;
+  playlist_position?: number | null;
   first_seen_at?: string | null;
   unliked_at?: string | null;
   spotify_skipped?: boolean | null;
@@ -290,7 +302,9 @@ export type ArtistTrackEvidenceItem = {
   track_number: number | null;
   play_count: number;
   source_play_count?: number | null;
+  source_playlist_count?: number | null;
   recording_play_count?: number | null;
+  recording_playlist_count?: number | null;
   first_played_at: string | null;
   last_played_at: string | null;
   url: string | null;
@@ -328,8 +342,46 @@ export type OwnedPlaylist = {
   track_count: number | null;
   description?: string | null;
   is_public?: boolean | null;
+  is_collaborative?: boolean | null;
+  is_owned?: boolean | null;
+  owner_id?: string | null;
+  owner_name?: string | null;
+  owner_followed_by_you?: boolean | null;
+  followers_total?: number | null;
+  hidden_by_user?: boolean | null;
+  playlist_category?: "created" | "private" | "collaborative" | "added" | string | null;
   url: string | null;
   image_url?: string | null;
+};
+
+export type PlaylistMembership = {
+  playlist_id: string;
+  playlist_name: string | null;
+  playlist_url: string | null;
+  playlist_image_url?: string | null;
+  owner_name?: string | null;
+  owner_id?: string | null;
+  is_collaborative?: boolean | null;
+  is_owned?: boolean | null;
+  position: number;
+  spotify_track_id: string | null;
+  track_name: string | null;
+  artist_name: string | null;
+  added_at?: string | null;
+  release_track_id?: number | null;
+  recording_cluster_id?: number | null;
+  representative_release_track_id?: number | null;
+};
+
+export type PlaylistIndexStatus = {
+  playlist_count: number;
+  complete_playlist_count: number;
+  track_count: number;
+  identity_count: number;
+  has_playlist_metadata: boolean;
+  has_track_cache: boolean;
+  has_identity_index: boolean;
+  complete: boolean;
 };
 
 export type FollowedArtist = {
@@ -338,6 +390,7 @@ export type FollowedArtist = {
   followers_total: number | null;
   genres: string[];
   popularity?: number | null;
+  is_followed?: boolean | null;
   url: string | null;
   image_url?: string | null;
   debug?: {
@@ -1699,7 +1752,9 @@ export type DashboardListCardProps = {
   tertiaryText?: string | null;
   metricText?: string | null;
   primaryBadgeText?: string | null;
+  primaryInlineBadgeText?: string | null;
   liked?: boolean;
+  playlistOwnerFollowedByYou?: boolean | null;
   releaseSibling?: boolean;
   releaseSiblingSourceCount?: number | null;
   releaseSiblingDuplicateSourceCount?: number | null;
@@ -1711,6 +1766,9 @@ export type DashboardListCardProps = {
   trackUri?: string | null;
   previewTrack?: RecentTrack | null;
   primaryClamp?: "single-line-ellipsis" | "two-line-clamp";
+  rowAction?: ReactNode;
+  muted?: boolean;
+  cardClassName?: string;
 };
 
 export type PreviewItem = {
@@ -1747,6 +1805,9 @@ export type PreviewItem = {
   sourceAlbumUrl?: string | null;
   sourceAlbumYear?: string | null;
   albumHighlightArtistNames?: string[] | null;
+  playlistOwnerFollowedByYou?: boolean | null;
+  focusPlaylistPosition?: number | null;
+  focusSpotifyTrackId?: string | null;
   targetArtists?: Array<{
     artist_id?: string | null;
     id?: string | null;
@@ -1894,8 +1955,10 @@ export type AlbumTrackEntry = {
   lastPlayedAt: string | null;
   sourceLastPlayedAt?: string | null;
   sourcePlayCount?: number;
+  sourcePlaylistCount?: number;
   recordingLastPlayedAt?: string | null;
   recordingPlayCount?: number;
+  recordingPlaylistCount?: number;
   recordingHistoryAvailable?: boolean;
   familyExclusive: boolean;
   familyAvailableVersions: AlbumFamilyVersion[];

@@ -88,6 +88,31 @@ function renderAuditVariantList(items: TrackIdentityAuditExample[], kind: "canon
   );
 }
 
+function identityAuditActionLabel(kind: "canonical" | "release" | "composition") {
+  if (kind === "canonical") {
+    return "Review whether the Spotify IDs are separate versions or the same recording.";
+  }
+  if (kind === "release") {
+    return "Review source-track mappings before folding source history together.";
+  }
+  return "Review whether these release tracks belong in the same recording group.";
+}
+
+function countLabel(value: unknown, fallback: string) {
+  const count = auditNumber(value);
+  return count == null ? fallback : String(count);
+}
+
+function identityAuditWhyLabel(example: TrackIdentityAuditExample, kind: "canonical" | "release" | "composition") {
+  if (kind === "canonical") {
+    return `${countLabel(example.spotify_track_id_count, "Multiple")} Spotify IDs share the same normalized title/artist.`;
+  }
+  if (kind === "release") {
+    return `${countLabel(example.source_track_count, "Multiple")} source tracks are folded into one release track.`;
+  }
+  return `${countLabel(example.release_track_count, "Multiple")} release tracks are grouped for analysis.`;
+}
+
 export function renderIdentityAuditExample(example: TrackIdentityAuditExample, index: number) {
   const exampleType = auditString(example.example_type, "identity");
   const isCanonical = exampleType === "same_name_canonical_split";
@@ -113,6 +138,20 @@ export function renderIdentityAuditExample(example: TrackIdentityAuditExample, i
           {isCanonical ? "Canonical" : isRelease ? "Release" : "Composition"}
         </span>
       </div>
+      <div className="identity-audit-card-summary">
+        <div>
+          <span>What happened</span>
+          <strong>{title}</strong>
+        </div>
+        <div>
+          <span>Why flagged</span>
+          <strong>{identityAuditWhyLabel(example, variantKind)}</strong>
+        </div>
+        <div>
+          <span>Action</span>
+          <strong>{identityAuditActionLabel(variantKind)}</strong>
+        </div>
+      </div>
       <div className="identity-audit-stats">
         {renderAuditStat("Spotify IDs", example.spotify_track_id_count)}
         {renderAuditStat("Sources", example.source_track_count)}
@@ -124,7 +163,10 @@ export function renderIdentityAuditExample(example: TrackIdentityAuditExample, i
       {typeof example.grouping_note === "string" ? (
         <p className="identity-audit-note">{example.grouping_note}</p>
       ) : null}
-      {renderAuditVariantList(variantItems, variantKind)}
+      <details className="identity-audit-details">
+        <summary>Details</summary>
+        {renderAuditVariantList(variantItems, variantKind)}
+      </details>
     </article>
   );
 }

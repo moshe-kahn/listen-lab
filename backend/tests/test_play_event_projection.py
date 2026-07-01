@@ -801,7 +801,7 @@ class PlayEventProjectionTests(unittest.TestCase):
             before = connection.execute(
                 "SELECT play_count FROM source_track_play_count_cache WHERE spotify_track_id = 'threshold-track'"
             ).fetchone()
-        self.assertIsNone(before)
+        self.assertEqual((0,), before)
 
         below = update_listenlab_player_play_progress(
             row_id=int(inserted["row_id"]),
@@ -825,6 +825,22 @@ class PlayEventProjectionTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(1, after[0])
         self.assertEqual("2026-06-20T12:01:05Z", after[1])
+
+        later_short_progress = update_listenlab_player_play_progress(
+            row_id=int(inserted["row_id"]),
+            user_id="user-1",
+            ms_played=90_000,
+            ms_played_confidence="listened",
+        )
+        self.assertFalse(later_short_progress["crossed_listen_threshold"])
+        self.assertTrue(later_short_progress["cache_last_played_may_change"])
+        refresh_source_track_play_count_cache()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            later = connection.execute(
+                "SELECT play_count, last_played_at FROM source_track_play_count_cache WHERE spotify_track_id = 'threshold-track'"
+            ).fetchone()
+        self.assertEqual(1, later[0])
+        self.assertEqual("2026-06-20T12:01:30Z", later[1])
 
     def test_play_count_combines_interrupted_same_track_fragments(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -931,8 +947,128 @@ class PlayEventProjectionTests(unittest.TestCase):
                     "SELECT spotify_track_id, play_count FROM source_track_play_count_cache"
                 ).fetchall()
             )
-            self.assertNotIn("split-track", rows)
+            self.assertEqual(0, rows["split-track"])
             self.assertEqual(1, rows["intervening-track"])
+
+    def test_play_count_uses_album_track_duration_before_unknown_duration_fallback(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.executemany(
+                """
+                INSERT INTO spotify_album_track (
+                  spotify_album_id,
+                  spotify_track_id,
+                  track_number,
+                  name,
+                  duration_ms,
+                  fetched_at
+                ) VALUES ('album-duration-source', ?, ?, ?, ?, '2026-06-20T12:00:00Z')
+                """,
+                (
+                    ("album-duration-short", 1, "Short Album Track", 118000),
+                    ("album-duration-qualified", 2, "Qualified Album Track", 100000),
+                ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_started_at,
+                  canonical_ended_at,
+                  canonical_ms_played,
+                  ms_played_confidence,
+                  spotify_track_id,
+                  timing_source,
+                  matched_state
+                ) VALUES (?, ?, ?, 'high', ?, 'history', 'history_only')
+                """,
+                (
+                    ("2026-06-20T12:00:00Z", "2026-06-20T12:00:59Z", 59000, "album-duration-short"),
+                    ("2026-06-20T12:10:00Z", "2026-06-20T12:11:10Z", 70000, "album-duration-qualified"),
+                ),
+            )
+            refresh_source_track_play_count_cache(connection)
+            rows = dict(
+                connection.execute(
+                    "SELECT spotify_track_id, play_count FROM source_track_play_count_cache"
+                ).fetchall()
+            )
+            self.assertEqual(0, rows["album-duration-short"])
+            self.assertEqual(1, rows["album-duration-qualified"])
+
+    def test_last_played_at_uses_latest_short_play_after_track_has_qualified_play(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, duration_ms, fetched_at
+                ) VALUES ('short-replay-track', 100000, '2026-06-20T12:00:00Z')
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_started_at,
+                  canonical_ended_at,
+                  canonical_ms_played,
+                  ms_played_confidence,
+                  spotify_track_id,
+                  timing_source,
+                  matched_state
+                ) VALUES (?, ?, ?, 'high', 'short-replay-track', 'history', 'history_only')
+                """,
+                (
+                    ("2026-06-20T12:00:00Z", "2026-06-20T12:01:10Z", 70000),
+                    ("2026-06-20T13:00:00Z", "2026-06-20T13:00:10Z", 10000),
+                ),
+            )
+            refresh_source_track_play_count_cache(connection)
+            row = connection.execute(
+                """
+                SELECT play_count, first_played_at, last_played_at
+                FROM source_track_play_count_cache
+                WHERE spotify_track_id = 'short-replay-track'
+                """
+            ).fetchone()
+            self.assertEqual((1, "2026-06-20T12:01:10Z", "2026-06-20T13:00:10Z"), row)
+
+    def test_short_only_track_keeps_last_played_at_with_zero_play_count(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO spotify_track_catalog (
+                  spotify_track_id, duration_ms, fetched_at
+                ) VALUES ('short-only-track', 100000, '2026-06-20T12:00:00Z')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO fact_play_event (
+                  canonical_started_at,
+                  canonical_ended_at,
+                  canonical_ms_played,
+                  ms_played_confidence,
+                  spotify_track_id,
+                  timing_source,
+                  matched_state
+                ) VALUES (
+                  '2026-06-20T12:00:00Z',
+                  '2026-06-20T12:00:10Z',
+                  10000,
+                  'high',
+                  'short-only-track',
+                  'history',
+                  'history_only'
+                )
+                """
+            )
+            refresh_source_track_play_count_cache(connection)
+            row = connection.execute(
+                """
+                SELECT play_count, first_played_at, last_played_at
+                FROM source_track_play_count_cache
+                WHERE spotify_track_id = 'short-only-track'
+                """
+            ).fetchone()
+            self.assertEqual((0, None, "2026-06-20T12:00:10Z"), row)
 
 
 if __name__ == "__main__":
