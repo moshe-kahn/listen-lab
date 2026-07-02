@@ -481,14 +481,30 @@ async def auth_playback_playlist_tracks(
         if exc.status_code == status.HTTP_403_FORBIDDEN:
             public_payload: dict[str, Any] | None = None
             public_error: HTTPException | None = None
+            public_token_refreshed_after_401 = False
             try:
-                public_token = await _spotify_client_credentials_token()
-                public_payload = await fetch_playlist_track_page_from_spotify(
-                    public_token,
-                    normalized_playlist_id,
-                    limit=limit,
-                    offset=offset,
-                )
+                for attempt in range(2):
+                    public_token = await _spotify_client_credentials_token(force_refresh=attempt > 0)
+                    try:
+                        public_payload = await fetch_playlist_track_page_from_spotify(
+                            public_token,
+                            normalized_playlist_id,
+                            limit=limit,
+                            offset=offset,
+                        )
+                        break
+                    except HTTPException as fallback_exc:
+                        public_error = fallback_exc
+                        if fallback_exc.status_code == status.HTTP_401_UNAUTHORIZED and attempt == 0:
+                            public_token_refreshed_after_401 = True
+                            logger.info(
+                                "event=playlist_tracks_public_token_refresh playlist_id=%s user_id=%s",
+                                normalized_playlist_id,
+                                user_id,
+                            )
+                            continue
+                        if fallback_exc.status_code != status.HTTP_401_UNAUTHORIZED or attempt > 0:
+                            raise
             except HTTPException as fallback_exc:
                 public_error = fallback_exc
             if public_payload is not None:
@@ -517,6 +533,11 @@ async def auth_playback_playlist_tracks(
             ]
             spotify_detail = str(exc.detail or "").strip().rstrip(".")
             public_detail = str(public_error.detail or "").strip().rstrip(".") if public_error else ""
+            if public_error and public_error.status_code == status.HTTP_401_UNAUTHORIZED and public_token_refreshed_after_401:
+                public_detail = (
+                    "Spotify rejected a freshly requested public-read token with 401. "
+                    "This usually means the playlist cannot be read through Spotify's public playlist API."
+                )
             if missing_scopes:
                 detail = (
                     "Spotify denied access to this playlist's tracks because the current token is missing "

@@ -128,10 +128,10 @@ async def _spotify_get(access_token: str, url: str, params: dict[str, Any] | Non
     return response.json()
 
 
-async def _spotify_client_credentials_token() -> str:
+async def _spotify_client_credentials_token(*, force_refresh: bool = False) -> str:
     token = str(_client_credentials_token.get("access_token") or "").strip()
     expires_at = float(_client_credentials_token.get("expires_at") or 0)
-    if token and expires_at > time.time() + 60:
+    if not force_refresh and token and expires_at > time.time() + 60:
         return token
     if not settings.spotify_client_id or not settings.spotify_client_secret:
         raise HTTPException(status_code=503, detail="Spotify client credentials are not configured.")

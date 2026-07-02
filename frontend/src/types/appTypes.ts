@@ -1766,6 +1766,7 @@ export type DashboardListCardProps = {
   trackUri?: string | null;
   previewTrack?: RecentTrack | null;
   primaryClamp?: "single-line-ellipsis" | "two-line-clamp";
+  imageOverlay?: ReactNode;
   rowAction?: ReactNode;
   muted?: boolean;
   cardClassName?: string;

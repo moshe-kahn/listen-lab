@@ -1964,7 +1964,7 @@ export function App() {
   }, [appPage, listeningLogLoaded, listeningLogLoading, profile, recentDebugSourceFilter]);
 
   useEffect(() => {
-    if (appPage !== "formulaLab" || !profile) {
+    if (appPage !== "formulaLab" || !profile || !startupDashboardReleased) {
       return;
     }
     if (!mergedTracksLoaded && !mergedTracksLoading) {
@@ -1975,6 +1975,7 @@ export function App() {
     mergedTracksLoaded,
     mergedTracksLoading,
     profile,
+    startupDashboardReleased,
   ]);
 
   useEffect(() => {

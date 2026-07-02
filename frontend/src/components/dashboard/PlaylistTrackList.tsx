@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 import type { RecentTrack } from "../../types/appTypes";
 import { LikedBadge } from "../common/LikedBadge";
@@ -49,6 +49,22 @@ function playlistTrackAddedBy(track: RecentTrack) {
     || "-";
 }
 
+type PlaylistGroupMode = "none" | "artist" | "album";
+
+function playlistTrackListenCount(track: RecentTrack) {
+  return Number(track.recording_play_count ?? track.source_play_count ?? track.play_count ?? 0);
+}
+
+function playlistTrackGroupLabel(track: RecentTrack, mode: PlaylistGroupMode) {
+  if (mode === "artist") {
+    return playlistTrackArtists(track);
+  }
+  if (mode === "album") {
+    return track.album_name || "Unknown album";
+  }
+  return "";
+}
+
 export function PlaylistTrackList({
   currentTrackUri,
   entries,
@@ -76,14 +92,47 @@ export function PlaylistTrackList({
   previewPlayedTrackKeys,
   trackUriWithFallback,
 }: PlaylistTrackListProps) {
+  const [groupMode, setGroupMode] = useState<PlaylistGroupMode>("none");
   const focusedRowRef = useRef<HTMLLIElement | null>(null);
   const playableEntries = entries.filter((track) => trackUriWithFallback(track.uri, track.track_id));
   const loadedTrackCount = entries.length;
+  const totalTrackCount = total != null ? total : loadedTrackCount;
+  const countsArePartial = totalTrackCount > loadedTrackCount;
+  const likedTrackCount = entries.filter((track) => isTrackLiked(track, track.track_id ?? track.uri ?? null)).length;
+  const unlistenedTrackCount = entries.filter((track) => playlistTrackListenCount(track) <= 0).length;
+  const summaryScopeLabel = countsArePartial ? "loaded" : "";
   const trackCountLabel = total != null && total > loadedTrackCount
     ? `${loadedTrackCount.toLocaleString()} of ${total.toLocaleString()} tracks`
       : loadedTrackCount > 0
       ? `${loadedTrackCount.toLocaleString()} tracks`
       : "Tracks";
+  const displayGroups = useMemo(() => {
+    if (groupMode === "none") {
+      return [{
+        key: "playlist-order",
+        label: "",
+        items: entries.map((track, index) => ({ track, originalIndex: index })),
+      }];
+    }
+    const groups: Array<{
+      key: string;
+      label: string;
+      items: Array<{ track: RecentTrack; originalIndex: number }>;
+    }> = [];
+    const groupByKey = new Map<string, (typeof groups)[number]>();
+    entries.forEach((track, index) => {
+      const label = playlistTrackGroupLabel(track, groupMode);
+      const key = label.toLocaleLowerCase();
+      let group = groupByKey.get(key);
+      if (!group) {
+        group = { key, label, items: [] };
+        groupByKey.set(key, group);
+        groups.push(group);
+      }
+      group.items.push({ track, originalIndex: index });
+    });
+    return groups;
+  }, [entries, groupMode]);
 
   useEffect(() => {
     if (!focusedRowRef.current) {
@@ -94,6 +143,24 @@ export function PlaylistTrackList({
 
   return (
     <div className={`detail-modal-album-tracks detail-modal-album-tracks-full detail-modal-album-tracks-no-with${showCollaborativeColumns ? " detail-modal-playlist-tracks-collaborative" : ""}`}>
+      <div className="detail-modal-playlist-summary">
+        <div className="detail-modal-playlist-summary-counts" aria-label="Playlist summary">
+          <span>{totalTrackCount.toLocaleString()} {totalTrackCount === 1 ? "track" : "tracks"}</span>
+          <span>{unlistenedTrackCount.toLocaleString()} {summaryScopeLabel ? `${summaryScopeLabel} ` : ""}unlistened</span>
+          <span>{likedTrackCount.toLocaleString()} {summaryScopeLabel ? `${summaryScopeLabel} ` : ""}liked</span>
+        </div>
+        <label className="detail-modal-playlist-group-control">
+          <span>Group</span>
+          <select
+            value={groupMode}
+            onChange={(event) => setGroupMode(event.target.value as PlaylistGroupMode)}
+          >
+            <option value="none">Playlist order</option>
+            <option value="artist">Artist</option>
+            <option value="album">Album</option>
+          </select>
+        </label>
+      </div>
       <div className="detail-modal-album-header">
         <span className="detail-modal-album-number-header">#</span>
         <span className="detail-modal-album-preview-header">Preview</span>
@@ -126,14 +193,22 @@ export function PlaylistTrackList({
       {!error && entries.length > 0 ? (
         <>
           <ul className={`detail-album-track-list${loading ? " detail-album-track-list-updating" : ""}`}>
-            {entries.map((track, index) => {
+            {displayGroups.map((group) => (
+              <Fragment key={group.key}>
+                {groupMode !== "none" ? (
+                  <li className="detail-album-track-group-header">
+                    <span>{group.label}</span>
+                    <span>{group.items.length.toLocaleString()} {group.items.length === 1 ? "track" : "tracks"}</span>
+                  </li>
+                ) : null}
+                {group.items.map(({ track, originalIndex }) => {
               const rowTrackUri = trackUriWithFallback(track.uri, track.track_id);
               const rowPlaying = isTrackPlaying(rowTrackUri);
               const rowPreviewPlaying = Boolean(rowTrackUri && previewingTrackUri === rowTrackUri);
               const rowPreviewActive = Boolean(rowPreviewPlaying && rowPlaying);
               const rowPreviewPlayed = previewPlayedTrackKeys.has(playlistTrackPreviewKey(track, rowTrackUri));
               const rowIsCurrentTrack = Boolean(rowTrackUri && currentTrackUri === rowTrackUri);
-              const rowPosition = typeof track.playlist_position === "number" ? track.playlist_position : rowOffset + index;
+              const rowPosition = typeof track.playlist_position === "number" ? track.playlist_position : rowOffset + originalIndex;
               const rowIsFocused = (
                 (typeof focusPlaylistPosition === "number" && rowPosition === focusPlaylistPosition)
                 || Boolean(focusSpotifyTrackId && track.track_id === focusSpotifyTrackId && rowPosition >= rowOffset && rowPosition < rowOffset + entries.length)
@@ -149,7 +224,7 @@ export function PlaylistTrackList({
               return (
                 <li
                   className={`detail-album-track-row${rowIsCurrentTrack ? " detail-album-track-row-selected" : ""}${rowIsFocused ? " detail-album-track-row-focused" : ""}`}
-                  key={`${track.track_id ?? track.uri ?? track.track_name ?? "track"}-${rowPosition}-${index}`}
+                  key={`${track.track_id ?? track.uri ?? track.track_name ?? "track"}-${rowPosition}-${originalIndex}`}
                   ref={rowIsFocused ? focusedRowRef : null}
                 >
                   <span className="detail-album-track-number">{rowPosition + 1}</span>
@@ -232,8 +307,8 @@ export function PlaylistTrackList({
                     </span>
                   </span>
                   <span className="detail-album-track-listen-count">
-                    {Number(track.recording_play_count ?? track.source_play_count ?? track.play_count ?? 0) > 0
-                      ? Number(track.recording_play_count ?? track.source_play_count ?? track.play_count ?? 0).toLocaleString()
+                    {playlistTrackListenCount(track) > 0
+                      ? playlistTrackListenCount(track).toLocaleString()
                       : "-"}
                   </span>
                   <span className="detail-album-track-last-played">
@@ -250,7 +325,9 @@ export function PlaylistTrackList({
                   ) : null}
                 </li>
               );
-            })}
+                })}
+              </Fragment>
+            ))}
           </ul>
           {hasMore ? <p className="detail-modal-preview-missing">Showing first {entries.length} tracks.</p> : null}
         </>

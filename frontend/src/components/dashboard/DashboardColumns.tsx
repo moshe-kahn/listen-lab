@@ -38,6 +38,7 @@ type PlaylistColumnProps = DashboardColumnBaseProps & {
   onUnhidePlaylist?: (playlist: OwnedPlaylist) => void;
   onDeletePlaylist?: (playlist: OwnedPlaylist) => void;
   playlistEditMode?: boolean;
+  playlistEditCloseAction?: "save" | "cancel" | null;
   playlistLists?: Array<{ id: string; name: string; playlistIds: string[] }>;
   onTogglePlaylistList?: (playlist: OwnedPlaylist, listId: string) => void;
   pinnedPlaylistIds?: string[];
@@ -49,6 +50,20 @@ type PlaylistActionDraft = {
   listIds: string[];
   pinned: boolean;
 };
+
+function playlistTrackCountLabel(trackCount: number | null | undefined) {
+  if (typeof trackCount !== "number" || !Number.isFinite(trackCount)) {
+    return "Tracks unknown";
+  }
+  return `${trackCount.toLocaleString()} ${trackCount === 1 ? "track" : "tracks"}`;
+}
+
+function playlistSaveCountLabel(saveCount: number | null | undefined) {
+  if (typeof saveCount !== "number" || !Number.isFinite(saveCount) || saveCount <= 0) {
+    return null;
+  }
+  return `${saveCount.toLocaleString()} ${saveCount === 1 ? "save" : "saves"}`;
+}
 
 export function DashboardArtistColumn({
   section,
@@ -190,6 +205,7 @@ export function DashboardPlaylistColumn({
   onUnhidePlaylist,
   onDeletePlaylist,
   playlistEditMode = false,
+  playlistEditCloseAction = null,
   playlistLists = [],
   onTogglePlaylistList,
   pinnedPlaylistIds = [],
@@ -251,6 +267,14 @@ export function DashboardPlaylistColumn({
     if (playlistEditMode) {
       return;
     }
+    if (playlistEditCloseAction === "cancel") {
+      setPlaylistActionDrafts({});
+      setOpenPlaylistAction(null);
+      return;
+    }
+    if (playlistEditCloseAction !== "save") {
+      return;
+    }
     const playlistByKey = new Map<string, { playlist: OwnedPlaylist; playlistId: string | null | undefined }>();
     items.forEach((playlist, index) => {
       const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
@@ -264,7 +288,7 @@ export function DashboardPlaylistColumn({
     });
     setPlaylistActionDrafts({});
     setOpenPlaylistAction(null);
-  }, [playlistEditMode]);
+  }, [playlistEditMode, playlistEditCloseAction]);
 
   useEffect(() => {
     if (!playlistEditMode) {
@@ -299,6 +323,23 @@ export function DashboardPlaylistColumn({
           const draftKey = playlistDraftKey(playlist, playlistId, index);
           const activeAction = openPlaylistAction?.key === draftKey ? openPlaylistAction.mode : null;
           const playlistDraft = playlistActionDrafts[draftKey] ?? draftFromCurrent(playlistId);
+          const playlistCategoryLabels = playlistLists
+            .filter((list) => list.playlistIds.includes(playlistId ?? ""))
+            .map((list) => list.name);
+          const playlistSaveLabel = playlistSaveCountLabel(playlist.followers_total);
+          const maxPlaylistOverlayRows = 4;
+          const privateRows = playlist.is_public === false ? ["Private"] : [];
+          const categoryRowLimit = Math.max(0, maxPlaylistOverlayRows - privateRows.length);
+          const categoryRows = playlistCategoryLabels.slice(0, categoryRowLimit).map((label, labelIndex) => (
+            labelIndex === categoryRowLimit - 1 && playlistCategoryLabels.length > categoryRowLimit
+              ? `${label} +${playlistCategoryLabels.length - categoryRowLimit}`
+              : label
+          ));
+          const fillerRows = [
+            playlistTrackCountLabel(playlist.track_count),
+            playlistSaveLabel,
+          ].filter((label): label is string => Boolean(label)).slice(0, Math.max(0, maxPlaylistOverlayRows - privateRows.length - categoryRows.length));
+          const playlistOverlayRows = [...privateRows, ...fillerRows, ...categoryRows];
           return (
             <DashboardListCard
               key={playlistId ?? `${playlist.name}-${index}-${section}`}
@@ -309,11 +350,27 @@ export function DashboardPlaylistColumn({
               fallbackLabel="P"
               primaryText={playlist.name ?? "Untitled playlist"}
               primaryClamp="two-line-clamp"
-              secondaryText={typeof playlist.followers_total === "number" && playlist.followers_total > 0 ? `${playlist.followers_total.toLocaleString()} ${playlist.followers_total === 1 ? "save" : "saves"}` : null}
+              secondaryText={null}
               tertiaryText={null}
+              imageOverlay={(
+                <span className="card-playlist-image-hover">
+                  {playlistOverlayRows.map((row, rowIndex) => (
+                    <span
+                      className={rowIndex >= fillerRows.length ? "card-playlist-hover-category" : undefined}
+                      key={`${row}-${rowIndex}`}
+                    >
+                      {row}
+                    </span>
+                  ))}
+                </span>
+              )}
               playlistOwnerFollowedByYou={playlist.owner_followed_by_you ?? null}
               muted={Boolean(playlist.hidden_by_user)}
-              cardClassName="dashboard-card-row-playlist"
+              cardClassName={[
+                "dashboard-card-row-playlist",
+                playlistEditMode ? "dashboard-card-row-playlist-editing" : null,
+                activeAction ? "dashboard-card-row-playlist-action-open" : null,
+              ].filter(Boolean).join(" ")}
               previewKind="playlist"
               previewTrackUri={null}
               onSelectPreview={onSelectPreview}
@@ -346,30 +403,60 @@ export function DashboardPlaylistColumn({
                       <span className="card-playlist-action-buttons">
                         {activeAction ? (
                           <>
-                            <button
-                              aria-label="Discard playlist edit options"
-                              className="card-playlist-symbol-button"
-                              onClick={(event) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                discardAction(playlist, playlistId, index);
-                              }}
-                              type="button"
-                            >
-                              ×
-                            </button>
-                            <button
-                              aria-label="Save playlist edit options"
-                              className="card-playlist-symbol-button card-playlist-symbol-button-confirm"
-                              onClick={(event) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                confirmAction(playlist, playlistId, index);
-                              }}
-                              type="button"
-                            >
-                              ✓
-                            </button>
+                            {activeAction === "remove" ? (
+                              <button
+                                aria-label="Discard playlist edit options"
+                                className="card-playlist-symbol-button"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  discardAction(playlist, playlistId, index);
+                                }}
+                                type="button"
+                              >
+                                ×
+                              </button>
+                            ) : (
+                              <button
+                                aria-label="Save playlist edit options"
+                                className="card-playlist-symbol-button card-playlist-symbol-button-confirm"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  confirmAction(playlist, playlistId, index);
+                                }}
+                                type="button"
+                              >
+                                ✓
+                              </button>
+                            )}
+                            {activeAction === "add" ? (
+                              <button
+                                aria-label="Discard playlist edit options"
+                                className="card-playlist-symbol-button"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  discardAction(playlist, playlistId, index);
+                                }}
+                                type="button"
+                              >
+                                ×
+                              </button>
+                            ) : (
+                              <button
+                                aria-label="Save playlist edit options"
+                                className="card-playlist-symbol-button card-playlist-symbol-button-confirm"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  confirmAction(playlist, playlistId, index);
+                                }}
+                                type="button"
+                              >
+                                ✓
+                              </button>
+                            )}
                           </>
                         ) : (
                           <>
@@ -485,14 +572,6 @@ export function DashboardPlaylistColumn({
                       ) : null}
                     </>
                   )}
-                  {playlist.is_public === false ? (
-                    <span
-                      className="card-playlist-lock-marker"
-                      title="open playlist to change lock settings"
-                    >
-                      🔒
-                    </span>
-                  ) : null}
                   {playlist.is_collaborative ? (
                     <span
                       className="card-playlist-collab-marker"

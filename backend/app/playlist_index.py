@@ -124,7 +124,7 @@ def upsert_playlist_metadata(user_id: str, playlists: list[dict[str, Any]], *, c
               END,
               snapshot_id = excluded.snapshot_id,
               track_count = excluded.track_count,
-              followers_total = excluded.followers_total,
+              followers_total = COALESCE(excluded.followers_total, spotify_playlist_cache.followers_total),
               url = excluded.url,
               image_url = excluded.image_url,
               metadata_cached_at = excluded.metadata_cached_at,
@@ -132,6 +132,25 @@ def upsert_playlist_metadata(user_id: str, playlists: list[dict[str, Any]], *, c
             """,
             rows,
         )
+
+
+def cached_playlist_metadata_for_user(user_id: str) -> dict[str, dict[str, Any]]:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            SELECT playlist_id, followers_total, hidden_by_user
+            FROM spotify_playlist_cache
+            WHERE user_id = ?
+            """,
+            (str(user_id),),
+        ).fetchall()
+    return {
+        str(row["playlist_id"]): {
+            "followers_total": row["followers_total"],
+            "hidden_by_user": bool(row["hidden_by_user"]),
+        }
+        for row in rows
+    }
 
 
 def set_playlist_hidden(user_id: str, playlist_id: str, hidden: bool) -> None:

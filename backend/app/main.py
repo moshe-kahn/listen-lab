@@ -68,6 +68,7 @@ from backend.app.play_event_projector import (
 )
 from backend.app.playlist_index import (
     cache_playlist_track_page,
+    cached_playlist_metadata_for_user,
     create_playlist_category,
     fetch_playlist_track_page_from_spotify,
     hidden_playlist_ids_for_user,
@@ -109,7 +110,7 @@ from backend.app.routes.admin_routes import router as admin_router
 from backend.app.routes.auth_routes import router as auth_router
 from backend.app.routes.audit_routes import router as identity_audit_router
 from backend.app.routes.playback_routes import router as playback_router
-from backend.app.spotify_http import _fetch_spotify_profile, _spotify_get, _spotify_get_many
+from backend.app.spotify_http import _fetch_spotify_profile, _spotify_client_credentials_token, _spotify_get, _spotify_get_many
 from backend.app.spotify_lookup_helpers import (
     _album_enrichment_lookup,
     _artist_enrichment_lookup,
@@ -621,25 +622,15 @@ async def _fetch_user_playlists(
     if max_items is not None:
         results = results[:max_items]
 
-    for playlist in results:
-        playlist_id = str(playlist.get("playlist_id") or "").strip()
-        if not playlist_id:
-            continue
-        try:
-            detail = await _spotify_get(
-                access_token,
-                f"https://api.spotify.com/v1/playlists/{playlist_id}",
-                {"fields": "followers(total)"},
-            )
-        except HTTPException:
-            continue
-        followers = detail.get("followers") if isinstance(detail, dict) else None
-        if isinstance(followers, dict) and isinstance(followers.get("total"), int):
-            playlist["followers_total"] = int(followers["total"])
-
+    cached_playlist_metadata = cached_playlist_metadata_for_user(str(spotify_user_id))
     hidden_playlist_ids = hidden_playlist_ids_for_user(str(spotify_user_id))
     for playlist in results:
-        playlist["hidden_by_user"] = str(playlist.get("playlist_id") or "").strip() in hidden_playlist_ids
+        playlist_id = str(playlist.get("playlist_id") or "").strip()
+        cached_metadata = cached_playlist_metadata.get(playlist_id, {})
+        cached_followers_total = cached_metadata.get("followers_total")
+        if isinstance(cached_followers_total, int):
+            playlist["followers_total"] = cached_followers_total
+        playlist["hidden_by_user"] = playlist_id in hidden_playlist_ids
 
     owner_ids = [
         str(playlist.get("owner_id") or "").strip()
@@ -678,6 +669,37 @@ async def _fetch_playlist_tracks(
 
 
 async def _sync_playlist_index_for_user(access_token: str, spotify_user_id: str) -> None:
+    async def fetch_playlist_index_page(playlist_id: str, *, offset: int) -> tuple[dict[str, Any], str]:
+        try:
+            return (
+                await fetch_playlist_track_page_from_spotify(
+                    access_token,
+                    playlist_id,
+                    limit=100,
+                    offset=offset,
+                ),
+                "user",
+            )
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_403_FORBIDDEN:
+                raise
+            for attempt in range(2):
+                public_token = await _spotify_client_credentials_token(force_refresh=attempt > 0)
+                try:
+                    return (
+                        await fetch_playlist_track_page_from_spotify(
+                            public_token,
+                            playlist_id,
+                            limit=100,
+                            offset=offset,
+                        ),
+                        "public",
+                    )
+                except HTTPException as public_exc:
+                    if public_exc.status_code != status.HTTP_401_UNAUTHORIZED or attempt > 0:
+                        raise exc
+            raise exc
+
     try:
         playlists, available = await _fetch_user_playlists(access_token, spotify_user_id, None)
         if not available:
@@ -697,13 +719,10 @@ async def _sync_playlist_index_for_user(access_token: str, spotify_user_id: str)
             try:
                 offset = 0
                 total: int | None = None
+                used_public_read = False
                 while True:
-                    payload = await fetch_playlist_track_page_from_spotify(
-                        access_token,
-                        playlist_id,
-                        limit=100,
-                        offset=offset,
-                    )
+                    payload, read_source = await fetch_playlist_index_page(playlist_id, offset=offset)
+                    used_public_read = used_public_read or read_source == "public"
                     total = int(payload.get("total") or 0)
                     cache_playlist_track_page(
                         str(spotify_user_id),
@@ -719,6 +738,12 @@ async def _sync_playlist_index_for_user(access_token: str, spotify_user_id: str)
                     if total and offset >= total:
                         break
                 mark_playlist_sync_completed(str(spotify_user_id), playlist_id, complete=True)
+                if used_public_read:
+                    logger.info(
+                        "event=playlist_index_sync_playlist_public_read user_id=%s playlist_id=%s",
+                        spotify_user_id,
+                        playlist_id,
+                    )
                 synced_count += 1
             except HTTPException as exc:
                 error = f"{exc.status_code}: {exc.detail}"

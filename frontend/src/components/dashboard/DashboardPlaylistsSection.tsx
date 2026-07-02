@@ -14,10 +14,16 @@ type PlaylistList = {
   name: string;
   playlistIds: string[];
 };
+type PlaylistEditSnapshot = {
+  playlistLists: PlaylistList[];
+  pinnedPlaylistIds: string[];
+  hiddenPlaylistIds: string[];
+};
 
 const PLAYLIST_LISTS_STORAGE_KEY = "listenlab.playlistLists.v1";
 const PINNED_PLAYLISTS_STORAGE_KEY = "listenlab.pinnedPlaylists.v1";
 const PLAYLIST_FILTERS_STORAGE_KEY = "listenlab.playlistFilters.v1";
+const PLAYLIST_TAB_ORDER_STORAGE_KEY = "listenlab.playlistTabOrder.v1";
 
 const PLAYLIST_TABS: Array<{ key: PlaylistTabKey; label: string }> = [
   { key: "all", label: "All" },
@@ -135,6 +141,33 @@ function readStoredPinnedPlaylistIds(): string[] {
   }
 }
 
+function readStoredPlaylistTabOrder(): PlaylistTabKey[] {
+  const fallback = PLAYLIST_TABS.map((tab) => tab.key);
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PLAYLIST_TAB_ORDER_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) {
+      return fallback;
+    }
+    const stored = parsed.filter((value: unknown): value is PlaylistTabKey => (
+      value === "all"
+      || value === "created"
+      || value === "collaborations"
+      || value === "spotify"
+      || value === "others"
+    ));
+    return [...stored, ...fallback.filter((key) => !stored.includes(key))];
+  } catch {
+    return fallback;
+  }
+}
+
+function clonePlaylistLists(lists: PlaylistList[]): PlaylistList[] {
+  return lists.map((list) => ({ ...list, playlistIds: [...list.playlistIds] }));
+}
+
 function readStoredPlaylistFilters(): {
   selectedTabs: PlaylistTabKey[];
   mineVisibility: MinePlaylistVisibility[];
@@ -249,6 +282,10 @@ export function DashboardPlaylistsSection({
   const [playlistCategoryCreatorOpen, setPlaylistCategoryCreatorOpen] = useState(false);
   const [newPlaylistListName, setNewPlaylistListName] = useState("");
   const [playlistCategoriesLoaded, setPlaylistCategoriesLoaded] = useState(false);
+  const [playlistEditSnapshot, setPlaylistEditSnapshot] = useState<PlaylistEditSnapshot | null>(null);
+  const [draftHiddenPlaylistIds, setDraftHiddenPlaylistIds] = useState<string[]>([]);
+  const [playlistTabOrder, setPlaylistTabOrder] = useState<PlaylistTabKey[]>(() => readStoredPlaylistTabOrder());
+  const [playlistEditCloseAction, setPlaylistEditCloseAction] = useState<"save" | "cancel" | null>(null);
 
   useEffect(() => {
     if (playlistsOpen) {
@@ -259,7 +296,10 @@ export function DashboardPlaylistsSection({
     setPlaylistListMenuOpen(false);
     setPlaylistCategoryCreatorOpen(false);
     setPlaylistEditMode(false);
+    setPlaylistEditCloseAction(null);
     setShowHiddenPlaylists(false);
+    setPlaylistEditSnapshot(null);
+    setDraftHiddenPlaylistIds([]);
     setSelectedPlaylistTabs((current) => current.length > 0 ? current : ["all"]);
     setMineVisibility((current) => current.length > 0 ? current : ["public", "private"]);
     setCollaborationVisibility((current) => current.length > 0 ? current : ["public", "private"]);
@@ -280,7 +320,7 @@ export function DashboardPlaylistsSection({
       if (!(target instanceof Element)) {
         return;
       }
-      if (playlistFiltersRef.current?.contains(target)) {
+      if (target.closest(".playlist-type-dropdown")) {
         return;
       }
       closeOpenPlaylistMenus();
@@ -387,6 +427,13 @@ export function DashboardPlaylistsSection({
     if (typeof window === "undefined") {
       return;
     }
+    window.localStorage.setItem(PLAYLIST_TAB_ORDER_STORAGE_KEY, JSON.stringify(playlistTabOrder));
+  }, [playlistTabOrder]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
     window.localStorage.setItem(PLAYLIST_FILTERS_STORAGE_KEY, JSON.stringify({
       selectedTabs: selectedPlaylistTabs,
       mineVisibility,
@@ -417,13 +464,23 @@ export function DashboardPlaylistsSection({
     setCollaborationOwners((current) => current.length > 0 ? current : ["yours", "others"]);
   }, [selectedPlaylistTabs]);
 
-  const visibleOwnedPlaylists = ownedPlaylists.filter((playlist) => !playlist.hidden_by_user);
+  const hiddenPlaylistIds = new Set(
+    playlistEditMode
+      ? draftHiddenPlaylistIds
+      : ownedPlaylists.map((playlist, index) => playlist.hidden_by_user ? playlistStableId(playlist, index) : "").filter(Boolean),
+  );
+  const ownedPlaylistsForDisplay = playlistEditMode
+    ? ownedPlaylists.map((playlist, index) => ({
+      ...playlist,
+      hidden_by_user: hiddenPlaylistIds.has(playlistStableId(playlist, index)),
+    }))
+    : ownedPlaylists;
+  const visibleOwnedPlaylists = ownedPlaylistsForDisplay.filter((playlist) => !playlist.hidden_by_user);
   const canRenderPlaylistRows = ownedPlaylistsAvailable || ownedPlaylists.length > 0;
-  const hiddenPlaylistCount = ownedPlaylists.length - visibleOwnedPlaylists.length;
   const playlistSelectionSource = playlistEditMode && showHiddenPlaylists
-    ? ownedPlaylists
+    ? ownedPlaylistsForDisplay
     : visibleOwnedPlaylists;
-  const listFilteredOwnedPlaylists = playlistSelectionSource.filter((playlist, index) => {
+  const playlistMatchesCategoryFilter = (playlist: OwnedPlaylist, index: number) => {
     if (playlistCategoryFilterMode === "all") {
       return true;
     }
@@ -438,10 +495,20 @@ export function DashboardPlaylistsSection({
       return false;
     }
     return categoryIds.some((listId) => selectedPlaylistListIds.includes(listId));
-  });
+  };
+  const listFilteredOwnedPlaylists = playlistSelectionSource.filter(playlistMatchesCategoryFilter);
+  const hiddenPlaylistsMatchingFilters = playlistsForSelection(
+    ownedPlaylistsForDisplay.filter((playlist, index) => playlist.hidden_by_user && playlistMatchesCategoryFilter(playlist, index)),
+    selectedPlaylistTabs,
+    mineVisibility,
+    collaborationOwners,
+    collaborationVisibility,
+  );
+  const hiddenPlaylistsMatchingFilterCount = hiddenPlaylistsMatchingFilters.length;
   const selectedPlaylists = playlistsForSelection(listFilteredOwnedPlaylists, selectedPlaylistTabs, mineVisibility, collaborationOwners, collaborationVisibility)
     .slice()
     .sort((a, b) => Number(pinnedPlaylistIds.includes(playlistStableId(b))) - Number(pinnedPlaylistIds.includes(playlistStableId(a))));
+  const allVisiblePlaylistsAreShown = selectedPlaylists.length === visibleOwnedPlaylists.length && !showHiddenPlaylists;
   const collapsedPreviewPlaylists = selectedPlaylists.length > 0 ? selectedPlaylists : visibleOwnedPlaylists;
   const exclusiveMinePlaylists = listFilteredOwnedPlaylists.filter(isExclusiveMinePlaylist);
   const minePublicCount = exclusiveMinePlaylists.filter(isMinePublicPlaylist).length;
@@ -454,18 +521,9 @@ export function DashboardPlaylistsSection({
     (collaborationVisibility.includes("public") && playlist.is_public !== false)
     || (collaborationVisibility.includes("private") && playlist.is_public === false)
   )).length;
-  const collaborationTotalCount = collaborationYoursCount + collaborationOthersCount;
-  const visiblePlaylistTabs = PLAYLIST_TABS.filter((tab) => tab.key !== "collaborations" || collaborationTotalCount > 0);
-
-  useEffect(() => {
-    if (collaborationTotalCount > 0) {
-      return;
-    }
-    setSelectedPlaylistTabs((current) => {
-      const next = current.filter((tab) => tab !== "collaborations");
-      return next.length > 0 ? next : ["all"];
-    });
-  }, [collaborationTotalCount]);
+  const visiblePlaylistTabs = playlistTabOrder
+    .map((key) => PLAYLIST_TABS.find((tab) => tab.key === key))
+    .filter((tab): tab is { key: PlaylistTabKey; label: string } => Boolean(tab));
 
   const playlistTabCounts = visiblePlaylistTabs.reduce<Record<PlaylistTabKey, number>>((counts, tab) => {
     counts[tab.key] = playlistsForTab(listFilteredOwnedPlaylists, tab.key, ["public", "private"], ["yours", "others"], ["public", "private"]).length;
@@ -485,34 +543,23 @@ export function DashboardPlaylistsSection({
     { key: "yours", label: "By you", count: collaborationYoursCount },
     { key: "others", label: "By others", count: collaborationOthersCount },
   ];
-  const toggleMineVisibility = (key: MinePlaylistVisibility) => {
-    setMineVisibility((current) => {
-      if (current.length === 1 && current.includes(key)) {
-        return ["public", "private"];
+  const setMineVisibilityFromOwnerMenu = (nextVisibility: MinePlaylistVisibility[]) => {
+    setSelectedPlaylistTabs((current) => {
+      if (current.includes("all") || current.includes("created")) {
+        return current;
       }
-      return [key];
+      return [...current, "created"];
     });
+    setMineVisibility(nextVisibility);
   };
-  const toggleMineVisibilityFromOwnerMenu = (key: MinePlaylistVisibility) => {
-    setSelectedPlaylistTabs((current) => (
-      current.includes("created")
-        ? current
-        : [...current.filter((tab) => tab !== "all"), "created"]
-    ));
-    toggleMineVisibility(key);
-  };
-  const toggleCollaborationVisibilityFromOwnerMenu = (key: MinePlaylistVisibility) => {
-    setSelectedPlaylistTabs((current) => (
-      current.includes("collaborations")
-        ? current
-        : [...current.filter((tab) => tab !== "all"), "collaborations"]
-    ));
-    setCollaborationVisibility((current) => {
-      if (current.length === 1 && current.includes(key)) {
-        return ["public", "private"];
+  const setCollaborationVisibilityFromOwnerMenu = (nextVisibility: MinePlaylistVisibility[]) => {
+    setSelectedPlaylistTabs((current) => {
+      if (current.includes("all") || current.includes("collaborations")) {
+        return current;
       }
-      return [key];
+      return [...current, "collaborations"];
     });
+    setCollaborationVisibility(nextVisibility);
   };
   const closeCollaborationOwnerMenu = () => {
     setCollaborationOwnerMenuOpen(false);
@@ -541,6 +588,38 @@ export function DashboardPlaylistsSection({
       return current.includes(listId)
         ? current.filter((id) => id !== listId)
         : [...current, listId];
+    });
+  };
+  const reorderPlaylistCategory = (draggedListId: string, targetListId: string) => {
+    if (draggedListId === targetListId) {
+      return;
+    }
+    setPlaylistLists((current) => {
+      const draggedIndex = current.findIndex((list) => list.id === draggedListId);
+      const targetIndex = current.findIndex((list) => list.id === targetListId);
+      if (draggedIndex < 0 || targetIndex < 0) {
+        return current;
+      }
+      const next = [...current];
+      const [dragged] = next.splice(draggedIndex, 1);
+      next.splice(targetIndex, 0, dragged);
+      return next;
+    });
+  };
+  const reorderPlaylistTab = (draggedKey: PlaylistTabKey, targetKey: PlaylistTabKey) => {
+    if (draggedKey === targetKey) {
+      return;
+    }
+    setPlaylistTabOrder((current) => {
+      const draggedIndex = current.indexOf(draggedKey);
+      const targetIndex = current.indexOf(targetKey);
+      if (draggedIndex < 0 || targetIndex < 0) {
+        return current;
+      }
+      const next = [...current];
+      next.splice(draggedIndex, 1);
+      next.splice(targetIndex, 0, draggedKey);
+      return next;
     });
   };
   const createPlaylistList = async () => {
@@ -592,6 +671,9 @@ export function DashboardPlaylistsSection({
           : [...list.playlistIds, playlistId],
       };
     }));
+    if (playlistEditMode) {
+      return;
+    }
     void fetch(`${apiBaseUrl}/playlists/categories/${encodeURIComponent(listId)}/playlists/${encodeURIComponent(playlistId)}`, {
       method: "PUT",
       credentials: "include",
@@ -622,6 +704,14 @@ export function DashboardPlaylistsSection({
     setPinnedPlaylistIds((current) => current.includes(playlistId)
       ? current.filter((id) => id !== playlistId)
       : [...current, playlistId]);
+  };
+  const hidePlaylistInEditMode = (playlist: OwnedPlaylist) => {
+    const playlistId = playlistStableId(playlist);
+    setDraftHiddenPlaylistIds((current) => current.includes(playlistId) ? current : [...current, playlistId]);
+  };
+  const unhidePlaylistInEditMode = (playlist: OwnedPlaylist) => {
+    const playlistId = playlistStableId(playlist);
+    setDraftHiddenPlaylistIds((current) => current.filter((id) => id !== playlistId));
   };
   const toggleCollaborationOwner = (key: CollaborationPlaylistOwner) => {
     setCollaborationOwners((current) => {
@@ -685,14 +775,159 @@ export function DashboardPlaylistsSection({
       if (key === "all") {
         return current.includes("all") ? ["created"] : ["all"];
       }
+      const visibleSpecificTabKeys = visiblePlaylistTabs
+        .map((tab) => tab.key)
+        .filter((tabKey) => tabKey !== "all");
+      if (current.includes("all")) {
+        return visibleSpecificTabKeys.filter((tabKey) => tabKey !== key);
+      }
       const currentSpecificTabs = current.filter((tab) => tab !== "all");
       if (currentSpecificTabs.includes(key)) {
         return currentSpecificTabs.length === 1
-          ? currentSpecificTabs
+          ? visibleSpecificTabKeys.filter((tabKey) => tabKey !== key)
           : currentSpecificTabs.filter((tab) => tab !== key);
       }
       return [...currentSpecificTabs, key];
     });
+  };
+  const showAllPlaylists = () => {
+    setPlaylistCategoryFilterMode("all");
+    setSelectedPlaylistListIds([]);
+    setSelectedPlaylistTabs(["all"]);
+    setMineVisibility(["public", "private"]);
+    setCollaborationVisibility(["public", "private"]);
+    setCollaborationOwners(["yours", "others"]);
+    setShowHiddenPlaylists(false);
+  };
+  const beginPlaylistEditMode = () => {
+    setPlaylistEditCloseAction(null);
+    setPlaylistEditSnapshot({
+      playlistLists: clonePlaylistLists(playlistLists),
+      pinnedPlaylistIds: [...pinnedPlaylistIds],
+      hiddenPlaylistIds: ownedPlaylists
+        .map((playlist, index) => playlist.hidden_by_user ? playlistStableId(playlist, index) : "")
+        .filter(Boolean),
+    });
+    setDraftHiddenPlaylistIds(ownedPlaylists
+      .map((playlist, index) => playlist.hidden_by_user ? playlistStableId(playlist, index) : "")
+      .filter(Boolean));
+    setPlaylistEditMode(true);
+  };
+  const cancelPlaylistEditMode = () => {
+    if (playlistEditSnapshot) {
+      setPlaylistLists(clonePlaylistLists(playlistEditSnapshot.playlistLists));
+      setPinnedPlaylistIds([...playlistEditSnapshot.pinnedPlaylistIds]);
+      setDraftHiddenPlaylistIds([...playlistEditSnapshot.hiddenPlaylistIds]);
+    }
+    setPlaylistEditMode(false);
+    setPlaylistEditCloseAction("cancel");
+    setShowHiddenPlaylists(false);
+    setPlaylistEditSnapshot(null);
+    setPlaylistTypeMenuOpen(false);
+    setCollaborationOwnerMenuOpen(false);
+    setPlaylistListMenuOpen(false);
+    setPlaylistCategoryCreatorOpen(false);
+  };
+  const persistPlaylistListMembership = async (listId: string, playlistId: string, included: boolean) => {
+    const response = await fetch(`${apiBaseUrl}/playlists/categories/${encodeURIComponent(listId)}/playlists/${encodeURIComponent(playlistId)}`, {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ included }),
+    });
+    if (!response.ok) {
+      throw new Error(`Category membership could not be saved (${response.status}).`);
+    }
+  };
+  const savePlaylistEditMode = () => {
+    const snapshot = playlistEditSnapshot;
+    if (snapshot) {
+      const beforeListIds = new Set(snapshot.playlistLists.map((list) => list.id));
+      const afterListIds = new Set(playlistLists.map((list) => list.id));
+      const allListIds = Array.from(new Set([...beforeListIds, ...afterListIds]));
+      allListIds.forEach((listId) => {
+        const beforeList = snapshot.playlistLists.find((list) => list.id === listId);
+        const afterList = playlistLists.find((list) => list.id === listId);
+        const beforePlaylistIds = new Set(beforeList?.playlistIds ?? []);
+        const afterPlaylistIds = new Set(afterList?.playlistIds ?? []);
+        const allPlaylistIds = Array.from(new Set([...beforePlaylistIds, ...afterPlaylistIds]));
+        allPlaylistIds.forEach((playlistId) => {
+          const beforeIncluded = beforePlaylistIds.has(playlistId);
+          const afterIncluded = afterPlaylistIds.has(playlistId);
+          if (beforeIncluded !== afterIncluded) {
+            void persistPlaylistListMembership(listId, playlistId, afterIncluded).catch(console.error);
+          }
+        });
+      });
+      const beforeHiddenIds = new Set(snapshot.hiddenPlaylistIds);
+      const afterHiddenIds = new Set(draftHiddenPlaylistIds);
+      const playlistsById = new Map(ownedPlaylists.map((playlist, index) => [playlistStableId(playlist, index), playlist]));
+      Array.from(new Set([...beforeHiddenIds, ...afterHiddenIds])).forEach((playlistId) => {
+        const playlist = playlistsById.get(playlistId);
+        if (!playlist) {
+          return;
+        }
+        const wasHidden = beforeHiddenIds.has(playlistId);
+        const isHidden = afterHiddenIds.has(playlistId);
+        if (!wasHidden && isHidden) {
+          onHidePlaylist(playlist);
+        } else if (wasHidden && !isHidden) {
+          onUnhidePlaylist(playlist);
+        }
+      });
+    }
+    setPlaylistEditCloseAction("save");
+    setPlaylistEditMode(false);
+    setShowHiddenPlaylists(false);
+    setPlaylistEditSnapshot(null);
+    setPlaylistTypeMenuOpen(false);
+    setCollaborationOwnerMenuOpen(false);
+    setPlaylistListMenuOpen(false);
+    setPlaylistCategoryCreatorOpen(false);
+  };
+  const renderVisibilityToggle = (
+    label: string,
+    visibility: MinePlaylistVisibility[],
+    onChange: (nextVisibility: MinePlaylistVisibility[]) => void,
+  ) => {
+    const bothSelected = visibility.includes("public") && visibility.includes("private");
+    const options: Array<{ key: string; label: string; title: string; value: MinePlaylistVisibility[] }> = [
+      { key: "public", label: "🌐", title: "Public only", value: ["public"] },
+      { key: "both", label: "&", title: "Public and private", value: ["public", "private"] },
+      { key: "private", label: "🔒", title: "Private only", value: ["private"] },
+    ];
+    return (
+      <span className={`playlist-owner-visibility-toggle${bothSelected ? " playlist-owner-visibility-toggle-both-active" : ""}`} aria-label={label}>
+        {options.map((option) => {
+          const active = option.value.length === visibility.length && option.value.every((value) => visibility.includes(value));
+          return (
+            <span
+              aria-label={option.title}
+              aria-pressed={active}
+              className={`playlist-owner-visibility-button playlist-owner-visibility-button-${option.key}${active ? " playlist-owner-visibility-button-active" : ""}`}
+              key={option.key}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onChange(option.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onChange(option.value);
+                }
+              }}
+              role="button"
+              tabIndex={0}
+              title={option.title}
+            >
+              {option.label}
+            </span>
+          );
+        })}
+      </span>
+    );
   };
 
   return (
@@ -738,24 +973,34 @@ export function DashboardPlaylistsSection({
                         <span>All</span>
                         <span className="playlist-tab-count">{playlistSelectionSource.length}</span>
                       </button>
-                      <button
-                        aria-checked={playlistCategoryFilterMode === "none"}
-                        className={`playlist-type-dropdown-item${playlistCategoryFilterMode === "none" ? " playlist-type-dropdown-item-active" : ""}`}
-                        onClick={() => selectPlaylistCategoryMode("none")}
-                        role="menuitemcheckbox"
-                        type="button"
-                      >
-                        <span className="playlist-type-dropdown-check" aria-hidden="true">
-                          {playlistCategoryFilterMode === "none" ? "✓" : ""}
-                        </span>
-                        <span>None</span>
-                        <span className="playlist-tab-count">{noneCategoryCount}</span>
-                      </button>
                       <div className="playlist-type-dropdown-divider" />
                       {playlistLists.length > 0 ? playlistLists.map((list) => (
                         <button
                           aria-checked={activePlaylistListIds.includes(list.id)}
                           className={`playlist-type-dropdown-item${activePlaylistListIds.includes(list.id) ? " playlist-type-dropdown-item-active" : ""}`}
+                          draggable={playlistEditMode}
+                          onDragOver={(event) => {
+                            if (playlistEditMode) {
+                              event.preventDefault();
+                            }
+                          }}
+                          onDragStart={(event) => {
+                            if (!playlistEditMode) {
+                              return;
+                            }
+                            event.dataTransfer.setData("text/plain", `playlist-category:${list.id}`);
+                            event.dataTransfer.effectAllowed = "move";
+                          }}
+                          onDrop={(event) => {
+                            if (!playlistEditMode) {
+                              return;
+                            }
+                            const dragged = event.dataTransfer.getData("text/plain");
+                            if (dragged.startsWith("playlist-category:")) {
+                              event.preventDefault();
+                              reorderPlaylistCategory(dragged.replace("playlist-category:", ""), list.id);
+                            }
+                          }}
                           key={list.id}
                           onClick={() => togglePlaylistListFilter(list.id)}
                           role="menuitemcheckbox"
@@ -770,6 +1015,20 @@ export function DashboardPlaylistsSection({
                       )) : (
                         <span className="playlist-list-empty">No categories yet</span>
                       )}
+                      <div className="playlist-type-dropdown-divider" />
+                      <button
+                        aria-checked={playlistCategoryFilterMode === "all" || playlistCategoryFilterMode === "none"}
+                        className={`playlist-type-dropdown-item${playlistCategoryFilterMode === "all" || playlistCategoryFilterMode === "none" ? " playlist-type-dropdown-item-active" : ""}`}
+                        onClick={() => selectPlaylistCategoryMode("none")}
+                        role="menuitemcheckbox"
+                        type="button"
+                      >
+                        <span className="playlist-type-dropdown-check" aria-hidden="true">
+                          {playlistCategoryFilterMode === "all" || playlistCategoryFilterMode === "none" ? "✓" : ""}
+                        </span>
+                        <span>None</span>
+                        <span className="playlist-tab-count">{noneCategoryCount}</span>
+                      </button>
                       {playlistEditMode ? (
                         playlistCategoryCreatorOpen ? (
                           <div className="playlist-list-editor playlist-list-editor-dropdown playlist-category-create-divider">
@@ -828,7 +1087,33 @@ export function DashboardPlaylistsSection({
                         const tabChecked = selectedPlaylistTabs.includes("all") || selectedPlaylistTabs.includes(tab.key);
                         const tabHasVisibilityToggle = tabChecked && (tab.key === "created" || tab.key === "collaborations");
                         return (
-                        <div className={`playlist-type-dropdown-group${tab.key === "all" ? " playlist-type-dropdown-group-divider" : ""}`} key={tab.key}>
+                        <div
+                          className={`playlist-type-dropdown-group${tab.key === "all" ? " playlist-type-dropdown-group-divider" : ""}${playlistEditMode ? " playlist-type-dropdown-group-draggable" : ""}`}
+                          draggable={playlistEditMode}
+                          key={tab.key}
+                          onDragOver={(event) => {
+                            if (playlistEditMode) {
+                              event.preventDefault();
+                            }
+                          }}
+                          onDragStart={(event) => {
+                            if (!playlistEditMode) {
+                              return;
+                            }
+                            event.dataTransfer.setData("text/plain", `playlist-tab:${tab.key}`);
+                            event.dataTransfer.effectAllowed = "move";
+                          }}
+                          onDrop={(event) => {
+                            if (!playlistEditMode) {
+                              return;
+                            }
+                            const dragged = event.dataTransfer.getData("text/plain");
+                            if (dragged.startsWith("playlist-tab:")) {
+                              event.preventDefault();
+                              reorderPlaylistTab(dragged.replace("playlist-tab:", "") as PlaylistTabKey, tab.key);
+                            }
+                          }}
+                        >
                           <button
                             className={`playlist-type-dropdown-item${tabChecked ? " playlist-type-dropdown-item-active" : ""}${tabHasVisibilityToggle ? " playlist-type-dropdown-item-with-toggle" : ""}`}
                             onClick={() => togglePlaylistTab(tab.key)}
@@ -841,100 +1126,10 @@ export function DashboardPlaylistsSection({
                             </span>
                             <span>{tab.label}</span>
                             {tab.key === "created" && tabChecked ? (
-                              <span className="playlist-owner-visibility-toggle" aria-label="Yours playlist visibility">
-                                <span
-                                  aria-label="Public playlists"
-                                  aria-pressed={mineVisibility.includes("public")}
-                                  className={`playlist-owner-visibility-button${mineVisibility.includes("public") ? " playlist-owner-visibility-button-active" : ""}`}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    toggleMineVisibilityFromOwnerMenu("public");
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter" || event.key === " ") {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      toggleMineVisibilityFromOwnerMenu("public");
-                                    }
-                                  }}
-                                  role="button"
-                                  tabIndex={0}
-                                  title="Public"
-                                >
-                                  🌐
-                                </span>
-                                <span
-                                  aria-label="Private playlists"
-                                  aria-pressed={mineVisibility.includes("private")}
-                                  className={`playlist-owner-visibility-button${mineVisibility.includes("private") ? " playlist-owner-visibility-button-active" : ""}`}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    toggleMineVisibilityFromOwnerMenu("private");
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter" || event.key === " ") {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      toggleMineVisibilityFromOwnerMenu("private");
-                                    }
-                                  }}
-                                  role="button"
-                                  tabIndex={0}
-                                  title="Private"
-                                >
-                                  🔒
-                                </span>
-                              </span>
+                              renderVisibilityToggle("Yours playlist visibility", mineVisibility, setMineVisibilityFromOwnerMenu)
                             ) : null}
                             {tab.key === "collaborations" && tabChecked ? (
-                              <span className="playlist-owner-visibility-toggle" aria-label="Collabs playlist visibility">
-                                <span
-                                  aria-label="Public collaborative playlists"
-                                  aria-pressed={collaborationVisibility.includes("public")}
-                                  className={`playlist-owner-visibility-button${collaborationVisibility.includes("public") ? " playlist-owner-visibility-button-active" : ""}`}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    toggleCollaborationVisibilityFromOwnerMenu("public");
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter" || event.key === " ") {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      toggleCollaborationVisibilityFromOwnerMenu("public");
-                                    }
-                                  }}
-                                  role="button"
-                                  tabIndex={0}
-                                  title="Public"
-                                >
-                                  🌐
-                                </span>
-                                <span
-                                  aria-label="Private collaborative playlists"
-                                  aria-pressed={collaborationVisibility.includes("private")}
-                                  className={`playlist-owner-visibility-button${collaborationVisibility.includes("private") ? " playlist-owner-visibility-button-active" : ""}`}
-                                  onClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    toggleCollaborationVisibilityFromOwnerMenu("private");
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === "Enter" || event.key === " ") {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      toggleCollaborationVisibilityFromOwnerMenu("private");
-                                    }
-                                  }}
-                                  role="button"
-                                  tabIndex={0}
-                                  title="Private"
-                                >
-                                  🔒
-                                </span>
-                              </span>
+                              renderVisibilityToggle("Collabs playlist visibility", collaborationVisibility, setCollaborationVisibilityFromOwnerMenu)
                             ) : null}
                             <span className="playlist-tab-count">
                               {tab.key === "created"
@@ -991,33 +1186,58 @@ export function DashboardPlaylistsSection({
                     ) : null}
                   </div>
                 ) : null}
-                <span className="playlist-filter-result-count">{selectedPlaylists.length}</span>
-                <div className="playlist-edit-actions">
-                  {playlistEditMode && hiddenPlaylistCount > 0 ? (
+                <div className="playlist-filter-summary-actions">
+                  <span className="playlist-filter-result-count">
+                    {selectedPlaylists.length.toLocaleString()} selected
+                  </span>
+                  {!allVisiblePlaylistsAreShown ? (
                     <button
-                      className={`playlist-edit-toggle${showHiddenPlaylists ? " playlist-edit-toggle-active" : ""}`}
+                      className="playlist-filter-summary-button"
+                      onClick={showAllPlaylists}
+                      type="button"
+                    >
+                      Show all
+                      <span className="playlist-tab-count">{visibleOwnedPlaylists.length.toLocaleString()}</span>
+                    </button>
+                  ) : null}
+                  {playlistEditMode && hiddenPlaylistsMatchingFilterCount > 0 ? (
+                    <button
+                      className={`playlist-filter-summary-button${showHiddenPlaylists ? " playlist-filter-summary-button-active" : ""}`}
                       onClick={() => setShowHiddenPlaylists((current) => !current)}
                       type="button"
                     >
-                      {showHiddenPlaylists ? "Hide hidden" : "Show hidden"}
-                      <span className="playlist-tab-count">{hiddenPlaylistCount}</span>
+                      {showHiddenPlaylists ? "Hide hidden" : allVisiblePlaylistsAreShown ? "Show hidden" : "Hidden"}
+                      <span className="playlist-tab-count">{hiddenPlaylistsMatchingFilterCount}</span>
                     </button>
                   ) : null}
-                  <button
-                    className={`playlist-edit-toggle${playlistEditMode ? " playlist-edit-toggle-active" : ""}`}
-                    onClick={() => {
-                      setPlaylistEditMode((current) => {
-                        const next = !current;
-                        if (!next) {
-                          setShowHiddenPlaylists(false);
-                        }
-                        return next;
-                      });
-                    }}
-                    type="button"
-                  >
-                    {playlistEditMode ? "Save changes" : "Edit"}
-                  </button>
+                </div>
+                <div className="playlist-edit-actions">
+                  {playlistEditMode ? (
+                    <>
+                      <button
+                        className="playlist-edit-toggle playlist-edit-toggle-active"
+                        onClick={savePlaylistEditMode}
+                        type="button"
+                      >
+                        Save changes
+                      </button>
+                      <button
+                        className="playlist-edit-toggle"
+                        onClick={cancelPlaylistEditMode}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className="playlist-edit-toggle"
+                      onClick={beginPlaylistEditMode}
+                      type="button"
+                    >
+                      Edit
+                    </button>
+                  )}
                 </div>
               </div>
               {selectedPlaylists.length > 0 ? (
@@ -1031,10 +1251,11 @@ export function DashboardPlaylistsSection({
                     sectionPage={0}
                     moveSectionPage={() => undefined}
                     onSelectPreview={onSelectPreview}
-                    onHidePlaylist={playlistEditMode ? onHidePlaylist : undefined}
-                    onUnhidePlaylist={playlistEditMode ? onUnhidePlaylist : undefined}
+                    onHidePlaylist={playlistEditMode ? hidePlaylistInEditMode : undefined}
+                    onUnhidePlaylist={playlistEditMode ? unhidePlaylistInEditMode : undefined}
                     onDeletePlaylist={playlistEditMode ? onDeletePlaylist : undefined}
                     playlistEditMode={playlistEditMode}
+                    playlistEditCloseAction={playlistEditCloseAction}
                     playlistLists={playlistLists}
                     onTogglePlaylistList={togglePlaylistInList}
                     pinnedPlaylistIds={pinnedPlaylistIds}

@@ -36,6 +36,7 @@ export function DashboardListCard({
   previewKind,
   previewTrackUri,
   onSelectPreview,
+  imageOverlay,
   rowAction,
   muted = false,
   cardClassName,
@@ -91,6 +92,7 @@ export function DashboardListCard({
                 {fallbackLabel}
               </div>
             )}
+            {imageOverlay ? <div className="card-image-overlay">{imageOverlay}</div> : null}
             {rowAction ? <div className="card-row-action">{rowAction}</div> : null}
           </div>
           <div className="card-copy">
