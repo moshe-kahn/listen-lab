@@ -16,20 +16,19 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- pending commit: playlist/album/artist overlays, playback drawer queues/bookmarks, playlist indexing/categories, artist/album identity fixes, and play-count/cache semantics
+- pending commit: homepage Saved/Charts/Discover dashboard layout and docs
 
 Worktree at handoff:
-- current dirty scope is intentionally broad and is the commit candidate:
-  - backend playlist category/pagination, playlist-track indexing, persistent follow-state cache, and play-count cache changes
-  - frontend dashboard/playback extraction and playlist/home-album/player drawer/bookmark work
-  - Identity Audit UI cleanup, including artist duplicate workflow and promotion skip integration
-- untracked component files to include if committing this full scope:
-  - `docs/reference/drafts/library-personal-catalog-plan.md`
-  - `frontend/src/utils/recordingIdentity.ts`
-- do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in commits
+- current dirty scope is intentionally narrow and is the commit candidate:
+  - homepage playback/dashboard UI moves Saved out of the player into a standalone full-width box
+  - Saved uses a left navigation/filter/sort rail and a right item pane with four visible rows before scrolling
+  - Discover is a separate full-width box at the bottom
+  - former `Top` label is now `Charts`, grouping tracks/artists/albums
+  - dashboard and sticky top-bar order is Saved, Activity, Playlists, Charts, Discover
+  - docs updated for this UI batch
 
 Important local instruction:
-- `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. `frontend/src/App.tsx` is currently about 15,001 lines / 681 KB. Future UI work should extract focused components and local-storage helpers instead of growing `App.tsx` further.
+- `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. `frontend/src/App.tsx` is currently about 15,032 lines / 681,959 bytes. Future UI work should extract focused components and local-storage helpers instead of growing `App.tsx` further.
 
 ## Latest Completed: Playlist Tracklists And Album Overlay
 
@@ -182,27 +181,32 @@ Local data and checks:
 - frontend production build passed; existing large-chunk warning remains
 - `git diff --check` passed
 
-## Latest Completed: Homepage Playback Drawer And Bookmarks
+## Latest Completed: Homepage Saved, Charts, Discover Layout
 Frontend:
 - Homepage playback album art is now a horizontal album appearance strip. It shows release/album variants for the current track, overlays year/type tags on the art, truncates album names below, and opens the track/album overlay instead of expanding under the player.
 - Homepage queue is context-grouped under a `Queue` header. The dropdown lists queued contexts with images, a current dot, and an internal gear menu for organize/save/clear actions.
 - Long-press next/previous jumps between queued contexts; previous jumps back to the last known cursor in the prior context where possible.
 - `Save current queue` writes a grouped queue snapshot to local storage, including active cursor, played keys, group cursors, and current track.
-- The bottom player drawer includes working `Previous Queues` and `Bookmarks` tabs. `Playlists` and `Explore` remain placeholders by user choice.
-- `Previous Queues` can restore saved grouped ListenLab queues.
+- The old bottom player drawer is now a standalone full-width `Saved` dashboard box after the player.
+- `Saved` has a left rail for Queues, Bookmarks, Playlists, Likes plus placeholder Filter/Sort controls, and a right item pane with four visible rows before scrolling.
+- `Queues` can restore saved grouped ListenLab queues.
 - Track bookmarks are local and store the track plus source context (`track`, `album`, `artist`, `playlist`, `queue`, or `player`) when known. They support Play, Next, Open, and Remove.
-- Album, artist, and playlist bookmarks are stored separately in local storage and show in the same drawer. They support Open and Remove.
+- Album, artist, and playlist bookmarks are stored separately in local storage and show in Saved. They support Open and Remove.
 - Opening bookmark contexts reuses the existing detail overlay for track/album/artist/playlist previews. Playlist bookmarks preserve focused position/track id when available.
+- The dashboard has a `Charts` section grouping tracks, artists, and albums. Sticky-bar `Charts` only scrolls to the section and does not open Tracks.
+- `Discover` is a separate full-width bottom dashboard box linking to Library/Playlists, Explore/Catalog Backfill, and Search.
+- Dashboard and sticky top-bar order is Saved, Activity, Playlists, Charts, Discover.
 
 Implementation notes:
 - Local storage keys used by this batch are `listenlab.savedQueues`, `listenlab.trackBookmarks`, and `listenlab.entityBookmarks`.
 - Bookmark/queue persistence is browser-local only; no backend durability exists yet.
-- The drawer UI is componentized in `frontend/src/components/playback/PlayerBottomDrawer.tsx`, but much of the state orchestration still lives in `App.tsx` and should be extracted next.
+- The Saved UI remains in `frontend/src/components/playback/PlayerBottomDrawer.tsx` for continuity, despite the component no longer rendering as a drawer.
+- Much of the Saved/Discover state orchestration still lives in `App.tsx` and should be extracted next.
 
 Latest checks:
 - `cd frontend && npm run build` passed; existing large-chunk warning remains.
 - `./.venv/bin/python -m py_compile backend/app/merged_track_aggregate.py backend/app/playlist_index.py backend/app/recording_track_candidates.py backend/app/release_track_metadata.py backend/app/routes/audit_routes.py backend/app/routes/playback_routes.py` passed.
-- `git diff --check -- frontend/src/App.tsx frontend/src/components/playback/PlayerBottomDrawer.tsx frontend/src/components/dashboard/DetailPreviewModal.tsx frontend/src/styles.css` passed.
+- `git diff --check -- frontend/src/App.tsx frontend/src/components/dashboard/DashboardSections.tsx frontend/src/components/playback/PlayerBottomDrawer.tsx frontend/src/styles.css` passed.
 - final full `git diff --check` passed.
 
 ## Immediate Next Task
@@ -221,7 +225,8 @@ After this commit, restart backend, hard refresh, and manually QA:
   - collaborative playlists show `Added by` and `Added` columns when Spotify returns those fields
   - playlists by followed Spotify users show a filled star; non-followed/unknown owners show no empty star
 - Player dashboard:
-  - bottom drawer tabs and home album appearance strip render correctly after hard refresh
+  - Saved panel, Charts group, Discover box, and home album appearance strip render correctly after hard refresh
+  - sticky top bar order matches page order: Saved, Activity, Playlists, Charts, Discover
   - saved queue restore preserves grouped queue contexts and active cursor
   - track/entity bookmarks survive refresh, open the expected overlay, and remove cleanly
   - long-press next/previous jumps between queued contexts without breaking normal click skip behavior

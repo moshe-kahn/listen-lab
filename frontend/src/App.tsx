@@ -192,7 +192,7 @@ import {
 } from "./components/identityAudit/IssueFeed";
 import { FullAnalysisOverlay, LoadingScreen } from "./components/loading/LoadingScreens";
 import { HomeAlbumAppearanceStrip } from "./components/playback/HomeAlbumAppearanceStrip";
-import { PlayerBottomDrawer, type PlayerBottomDrawerTab, type SavedEntityBookmark, type SavedPlayerQueueSnapshot, type SavedTrackBookmark } from "./components/playback/PlayerBottomDrawer";
+import { PlayerSavedPanel, type PlayerSavedPanelTab, type SavedEntityBookmark, type SavedPlayerQueueSnapshot, type SavedTrackBookmark } from "./components/playback/PlayerBottomDrawer";
 import { PlaybackActionMenu, type PlaybackAction } from "./components/playback/PlaybackActionMenu";
 import { SpotifyCooldownPanel } from "./components/profile/SpotifyCooldownPanel";
 import { RecentDebugPage } from "./components/recentDebug/RecentDebugPage";
@@ -687,8 +687,7 @@ export function App() {
   const [homeAlbumTrackEntriesError, setHomeAlbumTrackEntriesError] = useState<string | null>(null);
   const [homeAlbumTrackLastSortMode, setHomeAlbumTrackLastSortMode] = useState<LastPlayedSortMode>(null);
   const [homeRecordingCandidate, setHomeRecordingCandidate] = useState<RecordingTrackCandidateItem | null>(null);
-  const [playerDrawerExpanded, setPlayerDrawerExpanded] = useState(false);
-  const [playerDrawerActiveTab, setPlayerDrawerActiveTab] = useState<PlayerBottomDrawerTab>("previousQueues");
+  const [playerSavedActiveTab, setPlayerSavedActiveTab] = useState<PlayerSavedPanelTab>("queues");
   const [savedPlayerQueues, setSavedPlayerQueues] = useState<SavedPlayerQueueSnapshot[]>([]);
   const [trackBookmarks, setTrackBookmarks] = useState<SavedTrackBookmark[]>([]);
   const [entityBookmarks, setEntityBookmarks] = useState<SavedEntityBookmark[]>([]);
@@ -6426,7 +6425,6 @@ export function App() {
         trackUri: null,
         url: bookmark.url ?? "",
       });
-      setPlayerDrawerExpanded(false);
       return;
     }
     if (bookmark.type === "album") {
@@ -6450,7 +6448,6 @@ export function App() {
         sourceAlbumUrl: bookmark.url ?? spotifyEntityUrl("album", bookmark.entityId),
         sourceAlbumYear: bookmark.detail ?? null,
       });
-      setPlayerDrawerExpanded(false);
       return;
     }
     const artistId = bookmark.entityId ?? spotifyEntityIdFromUrl("artist", bookmark.url);
@@ -6470,7 +6467,6 @@ export function App() {
       artists: [{ artist_id: artistId, id: artistId, name: bookmark.label, url: bookmark.url ?? spotifyEntityUrl("artist", artistId), image_url: bookmark.imageUrl ?? null }],
       targetArtists: [{ artist_id: artistId, id: artistId, name: bookmark.label, url: bookmark.url ?? spotifyEntityUrl("artist", artistId), image_url: bookmark.imageUrl ?? null }],
     });
-    setPlayerDrawerExpanded(false);
   }
 
   function bookmarkContextTypeFromUrl(url: string | null | undefined): TrackBookmarkContext["type"] | null {
@@ -6630,7 +6626,6 @@ export function App() {
         focusPlaylistPosition: context.position ?? null,
         focusSpotifyTrackId: trackId,
       });
-      setPlayerDrawerExpanded(false);
       return;
     }
     if (context?.type === "album") {
@@ -6655,7 +6650,6 @@ export function App() {
         sourceAlbumUrl: context.url ?? spotifyEntityUrl("album", albumId),
         sourceTrack,
       });
-      setPlayerDrawerExpanded(false);
       return;
     }
     if (context?.type === "artist") {
@@ -6680,11 +6674,9 @@ export function App() {
         sourceAlbumImage: bookmark.track.image ?? null,
         sourceTrack,
       });
-      setPlayerDrawerExpanded(false);
       return;
     }
     if (context?.type === "queue" || context?.type === "player") {
-      setPlayerDrawerExpanded(false);
       setStatusMessage(`Bookmark source is ${context.label}.`);
       return;
     }
@@ -6714,7 +6706,6 @@ export function App() {
       sourceAlbumImage: bookmark.track.image ?? null,
       sourceTrack,
     });
-    setPlayerDrawerExpanded(false);
   }
 
   function homeQueueGroupForCursor(cursor: number) {
@@ -8661,6 +8652,17 @@ export function App() {
       [section]: true,
     }));
 
+    window.setTimeout(() => {
+      const element = document.getElementById(anchorId);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 0);
+  }
+
+  function openAndScrollToAnchor(anchorId: string) {
+    setExperimentalMenuOpen(false);
+    setAppPage("dashboard");
     window.setTimeout(() => {
       const element = document.getElementById(anchorId);
       if (element) {
@@ -12573,22 +12575,49 @@ export function App() {
             </div>
           </aside>
         </div>
-        <PlayerBottomDrawer
-          activeTab={playerDrawerActiveTab}
-          expanded={playerDrawerExpanded}
-          savedQueues={savedPlayerQueues}
-          trackBookmarks={trackBookmarks}
-          entityBookmarks={entityBookmarks}
-          onDeleteSavedQueue={deleteSavedPlayerQueue}
-          onDeleteBookmark={removeTrackBookmark}
-          onDeleteEntityBookmark={removeEntityBookmark}
-          onOpenBookmark={openTrackBookmarkContext}
-          onOpenEntityBookmark={openEntityBookmark}
-          onPlayBookmark={(action, bookmark) => void playTrackBookmark(action, bookmark)}
-          onRestoreSavedQueue={restoreSavedPlayerQueue}
-          onTabChange={setPlayerDrawerActiveTab}
-          onToggle={() => setPlayerDrawerExpanded((current) => !current)}
-        />
+      </section>
+    );
+  }
+
+  function renderSavedPanel() {
+    return (
+      <PlayerSavedPanel
+        activeTab={playerSavedActiveTab}
+        savedQueues={savedPlayerQueues}
+        trackBookmarks={trackBookmarks}
+        entityBookmarks={entityBookmarks}
+        onDeleteSavedQueue={deleteSavedPlayerQueue}
+        onDeleteBookmark={removeTrackBookmark}
+        onDeleteEntityBookmark={removeEntityBookmark}
+        onOpenBookmark={openTrackBookmarkContext}
+        onOpenEntityBookmark={openEntityBookmark}
+        onPlayBookmark={(action, bookmark) => void playTrackBookmark(action, bookmark)}
+        onRestoreSavedQueue={restoreSavedPlayerQueue}
+        onTabChange={setPlayerSavedActiveTab}
+      />
+    );
+  }
+
+  function renderDiscoverPanel() {
+    return (
+      <section className="player-discovery-panel" id="discover" aria-labelledby="player-discovery-heading">
+        <div className="player-discovery-panel-header">
+          <h3 id="player-discovery-heading">Discover</h3>
+        </div>
+        <div className="player-discovery-actions">
+          <button onClick={() => openAndScrollToSection("playlists", "playlists")} type="button">
+            <span>Library</span>
+            <small>Playlists and owned collection views</small>
+          </button>
+          <button onClick={openCatalogBackfillPage} type="button">
+            <span>Explore</span>
+            <small>Catalog coverage and discovery workbench</small>
+          </button>
+          <button onClick={openSearchLookupPage} type="button">
+            <span>Search</span>
+            <small>Lookup tracks and albums</small>
+          </button>
+        </div>
       </section>
     );
   }
@@ -13926,17 +13955,11 @@ export function App() {
                     </section>
                   ) : null}
                 </div>
+                <button className="jump-link" onClick={() => openAndScrollToAnchor("saved")} type="button">
+                  Saved
+                </button>
                 <button className="jump-link" onClick={() => openAndScrollToSection("recent", "activity")} type="button">
                   Activity
-                </button>
-                <button className="jump-link" onClick={() => openAndScrollToSection("tracks", "tracks")} type="button">
-                  Tracks
-                </button>
-                <button className="jump-link" onClick={() => openAndScrollToSection("artists", "artists")} type="button">
-                  Artists
-                </button>
-                <button className="jump-link" onClick={() => openAndScrollToSection("albums", "albums")} type="button">
-                  Albums
                 </button>
                 <button
                   className="jump-link"
@@ -13944,6 +13967,12 @@ export function App() {
                   type="button"
                 >
                   Playlists
+                </button>
+                <button className="jump-link" onClick={() => openAndScrollToAnchor("top")} type="button">
+                  Charts
+                </button>
+                <button className="jump-link" onClick={() => openAndScrollToAnchor("discover")} type="button">
+                  Discover
                 </button>
               </div>
 
@@ -14766,6 +14795,8 @@ export function App() {
               refreshRecentSection={refreshRecentSection}
               reloadTrackRankings={reloadTrackRankings}
               renderHomePlayerPanel={renderHomePlayerPanel}
+              renderSavedPanel={renderSavedPanel}
+              renderDiscoverPanel={renderDiscoverPanel}
               renderIdentityAuditPage={renderIdentityAuditPage}
               renderMergedTrackSourceFilterToggle={renderMergedTrackSourceFilterToggle}
               renderRankMovementFilterToggle={renderRankMovementFilterToggle}

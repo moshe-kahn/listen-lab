@@ -1,6 +1,6 @@
 import type { PlayerQueueTrack, PlayerTrackSummary } from "../../types/appTypes";
 
-export type PlayerBottomDrawerTab = "previousQueues" | "bookmarks" | "playlists" | "explore";
+export type PlayerSavedPanelTab = "queues" | "bookmarks" | "playlists" | "likes";
 
 export type SavedPlayerQueueGroup = {
   id: string;
@@ -51,14 +51,12 @@ export type SavedEntityBookmark = {
   detail?: string | null;
 };
 
-type PlayerBottomDrawerProps = {
-  activeTab: PlayerBottomDrawerTab;
-  expanded: boolean;
+type PlayerSavedPanelProps = {
+  activeTab: PlayerSavedPanelTab;
   savedQueues: SavedPlayerQueueSnapshot[];
   trackBookmarks: SavedTrackBookmark[];
   entityBookmarks: SavedEntityBookmark[];
-  onTabChange: (tab: PlayerBottomDrawerTab) => void;
-  onToggle: () => void;
+  onTabChange: (tab: PlayerSavedPanelTab) => void;
   onRestoreSavedQueue: (snapshot: SavedPlayerQueueSnapshot) => void;
   onDeleteSavedQueue: (snapshotId: string) => void;
   onPlayBookmark: (action: "play_now" | "play_next", bookmark: SavedTrackBookmark) => void;
@@ -68,11 +66,11 @@ type PlayerBottomDrawerProps = {
   onDeleteEntityBookmark: (bookmarkId: string) => void;
 };
 
-const tabs: Array<{ value: PlayerBottomDrawerTab; label: string; empty: string }> = [
-  { value: "previousQueues", label: "Previous Queues", empty: "Saved queue history will appear here." },
-  { value: "bookmarks", label: "Bookmarks", empty: "Bookmarked tracks will appear here." },
+const tabs: Array<{ value: PlayerSavedPanelTab; label: string; empty: string }> = [
+  { value: "queues", label: "Queues", empty: "Saved queue history will appear here." },
+  { value: "bookmarks", label: "Bookmarks", empty: "Bookmarked tracks, albums, artists, and playlists will appear here." },
   { value: "playlists", label: "Playlists", empty: "Playlist shortcuts will appear here." },
-  { value: "explore", label: "Explore", empty: "Discovery tools will appear here." },
+  { value: "likes", label: "Likes", empty: "Liked tracks and albums will appear here." },
 ];
 
 function formatSavedAt(value: string) {
@@ -112,14 +110,22 @@ function bookmarkContextLabel(bookmark: SavedTrackBookmark) {
   return `${typeLabel}: ${bookmark.context.label}`;
 }
 
-export function PlayerBottomDrawer({
+function tabCount(tab: PlayerSavedPanelTab, savedQueues: SavedPlayerQueueSnapshot[], trackBookmarks: SavedTrackBookmark[], entityBookmarks: SavedEntityBookmark[]) {
+  if (tab === "queues") {
+    return savedQueues.length;
+  }
+  if (tab === "bookmarks") {
+    return trackBookmarks.length + entityBookmarks.length;
+  }
+  return 0;
+}
+
+export function PlayerSavedPanel({
   activeTab,
-  expanded,
   savedQueues,
   trackBookmarks,
   entityBookmarks,
   onTabChange,
-  onToggle,
   onRestoreSavedQueue,
   onDeleteSavedQueue,
   onPlayBookmark,
@@ -127,44 +133,49 @@ export function PlayerBottomDrawer({
   onDeleteBookmark,
   onOpenEntityBookmark,
   onDeleteEntityBookmark,
-}: PlayerBottomDrawerProps) {
+}: PlayerSavedPanelProps) {
   const active = tabs.find((tab) => tab.value === activeTab) ?? tabs[0];
 
   return (
-    <div className={`player-bottom-drawer${expanded ? " player-bottom-drawer-expanded" : ""}`}>
-      <div className="player-bottom-drawer-bar">
-        <button
-          aria-expanded={expanded}
-          aria-label={expanded ? "Collapse player drawer" : "Expand player drawer"}
-          className="player-bottom-drawer-toggle"
-          onClick={onToggle}
-          type="button"
-        >
-          <span aria-hidden="true">{expanded ? "⌄" : "⌃"}</span>
-        </button>
-        <div className="player-bottom-drawer-tabs" role="tablist" aria-label="Player drawer">
-          {tabs.map((tab) => (
-            <button
-              aria-selected={activeTab === tab.value}
-              className={activeTab === tab.value ? "player-bottom-drawer-tab player-bottom-drawer-tab-active" : "player-bottom-drawer-tab"}
-              key={tab.value}
-              onClick={() => {
-                onTabChange(tab.value);
-                if (!expanded) {
-                  onToggle();
-                }
-              }}
-              role="tab"
-              type="button"
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+    <section className="player-saved-panel" id="saved" aria-labelledby="player-saved-heading">
+      <div className="player-saved-panel-header">
+        <h3 id="player-saved-heading">Saved</h3>
       </div>
-      {expanded ? (
-        <div className="player-bottom-drawer-panel" role="tabpanel">
-          {activeTab === "previousQueues" ? (
+      <div className="player-saved-panel-layout">
+        <aside className="player-saved-panel-sidebar" aria-label="Saved navigation and filters">
+          <div className="player-saved-panel-tabs" role="tablist" aria-label="Saved">
+            {tabs.map((tab) => (
+              <button
+                aria-selected={activeTab === tab.value}
+                className={activeTab === tab.value ? "player-saved-panel-tab player-saved-panel-tab-active" : "player-saved-panel-tab"}
+                key={tab.value}
+                onClick={() => onTabChange(tab.value)}
+                role="tab"
+                type="button"
+              >
+                <span>{tab.label}</span>
+                <span className="player-saved-panel-tab-count">{tabCount(tab.value, savedQueues, trackBookmarks, entityBookmarks)}</span>
+              </button>
+            ))}
+          </div>
+          <div className="player-saved-panel-controls">
+            <label>
+              <span>Filter</span>
+              <select value="all" onChange={() => undefined}>
+                <option value="all">All</option>
+              </select>
+            </label>
+            <label>
+              <span>Sort</span>
+              <select value="recent" onChange={() => undefined}>
+                <option value="recent">Recently saved</option>
+                <option value="name">Name</option>
+              </select>
+            </label>
+          </div>
+        </aside>
+        <div className="player-saved-panel-body" role="tabpanel">
+          {activeTab === "queues" ? (
             savedQueues.length > 0 ? (
               <div className="player-saved-queue-list">
                 {savedQueues.map((snapshot) => {
@@ -267,7 +278,7 @@ export function PlayerBottomDrawer({
             <p>{active.empty}</p>
           )}
         </div>
-      ) : null}
-    </div>
+      </div>
+    </section>
   );
 }

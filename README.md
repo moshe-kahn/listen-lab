@@ -30,7 +30,7 @@ This repository now includes:
 - playback controls and session-aware player UI
 - recording-first track views with release-track escape hatches, release-source album cards, variation/family album cards, listen counts, and in-place album tracklists
 - a track-detail overlay with in-place same-album switching, clickable artist/album links, preview snippets, richer top-player controls (pause/resume, progress, and seek), full-width album overlay tracklists, playlist tracklists, and compact home-playback album/appearance rows
-- a homepage playback drawer with grouped queue contexts, saved queue snapshots, and local bookmarks for tracks, albums, artists, and playlists
+- a homepage Saved panel with grouped queue snapshots and local bookmarks for tracks, albums, artists, and playlists, plus separate Charts and Discover dashboard sections
 - a recent debug page for sessionized recent-play inspection plus DB archive paging
 - restricted local mode, full mode, and a test path for probing Spotify availability
 - local history-based artist and album ranking calibration using exported Spotify extended streaming history

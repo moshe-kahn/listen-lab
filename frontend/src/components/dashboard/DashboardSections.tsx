@@ -143,6 +143,8 @@ type DashboardSectionsProps = {
   refreshRecentSection: any;
   reloadTrackRankings: any;
   renderHomePlayerPanel: any;
+  renderSavedPanel: any;
+  renderDiscoverPanel: any;
   renderIdentityAuditPage: any;
   renderMergedTrackSourceFilterToggle: any;
   renderRankMovementFilterToggle: any;
@@ -319,6 +321,8 @@ export function DashboardSections(props: DashboardSectionsProps) {
     refreshRecentSection,
     reloadTrackRankings,
     renderHomePlayerPanel,
+    renderSavedPanel,
+    renderDiscoverPanel,
     renderIdentityAuditPage,
     renderMergedTrackSourceFilterToggle,
     renderRankMovementFilterToggle,
@@ -546,6 +550,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
             ) : appPage === "dashboard" ? (
             <div className="dashboard-grid">
               {renderHomePlayerPanel()}
+              {renderSavedPanel()}
               <DualSectionCard
                 title={renderSectionTitle("Activity", "recent_likes")}
                 section="recent"
@@ -730,6 +735,27 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 onSelectPreview={setSelectedPreview}
               />
 
+              {profile ? (
+                <DashboardPlaylistsSection
+                  ownedPlaylists={profile.owned_playlists}
+                  ownedPlaylistsAvailable={profile.owned_playlists_available}
+                  apiBaseUrl={apiBaseUrl}
+                  playlistsOpen={openSections.playlists}
+                  toggleSection={toggleSection}
+                  onSelectPreview={setSelectedPreview}
+                  activePlaylistPlayback={activePlaylistPlayback}
+                  onHidePlaylist={hidePlaylistFromListenLab}
+                  onUnhidePlaylist={unhidePlaylistInListenLab}
+                  onDeletePlaylist={deletePlaylistFromSpotify}
+                  renderSectionTitle={renderSectionTitle}
+                />
+              ) : null}
+
+              <section className="top-meta-section" id="top">
+                <div className="top-meta-header">
+                  <h2>Charts</h2>
+                </div>
+
               <DualSectionCard
                 title={renderSectionTitle("Tracks")}
                 section="tracks"
@@ -884,21 +910,9 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 onSelectPreview={setSelectedPreview}
               />
 
-              {profile ? (
-                <DashboardPlaylistsSection
-                  ownedPlaylists={profile.owned_playlists}
-                  ownedPlaylistsAvailable={profile.owned_playlists_available}
-                  apiBaseUrl={apiBaseUrl}
-                  playlistsOpen={openSections.playlists}
-                  toggleSection={toggleSection}
-                  onSelectPreview={setSelectedPreview}
-                  activePlaylistPlayback={activePlaylistPlayback}
-                  onHidePlaylist={hidePlaylistFromListenLab}
-                  onUnhidePlaylist={unhidePlaylistInListenLab}
-                  onDeletePlaylist={deletePlaylistFromSpotify}
-                  renderSectionTitle={renderSectionTitle}
-                />
-              ) : null}
+              </section>
+
+              {renderDiscoverPanel()}
             </div>
   ) : null;
 }
