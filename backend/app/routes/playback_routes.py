@@ -26,6 +26,7 @@ from backend.app.db import (
     sqlite_connection,
     update_listenlab_player_play_progress,
 )
+from backend.app.liked_tracks import cached_liked_track_statuses
 from backend.app.play_event_projector import reconcile_fact_play_events_for_ingest_run
 from backend.app.playlist_index import (
     cache_playlist_track_page,
@@ -34,7 +35,7 @@ from backend.app.playlist_index import (
     fetch_playlist_track_page_from_spotify,
 )
 from backend.app.release_track_detail import ReleaseTrackDetailNotFound, get_release_track_detail
-from backend.app.release_track_metadata import enrich_album_track_rows_with_release_metadata
+from backend.app.release_track_metadata import enrich_album_track_rows_with_release_metadata, enrich_track_rows_with_release_metadata
 from backend.app.spotify_catalog_backfill import (
     _upsert_album_track,
     _upsert_track_catalog,
@@ -54,6 +55,29 @@ from backend.app.spotify_token_store import get_spotify_tokens
 
 router = APIRouter(tags=["playback"])
 logger = logging.getLogger("listenlabs.playback")
+
+
+def _enrich_playlist_track_rows(user_id: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched = enrich_track_rows_with_release_metadata(
+        items,
+        track_id_key="track_id",
+        refresh_dirty_clusters=False,
+    )
+    membership_enriched = enrich_rows_with_playlist_membership_counts(user_id, enriched)
+    liked_statuses = cached_liked_track_statuses(
+        user_id,
+        [
+            str(item.get("track_id") or "").strip()
+            for item in membership_enriched
+            if str(item.get("track_id") or "").strip()
+        ],
+    )
+    if liked_statuses:
+        for item in membership_enriched:
+            track_id = str(item.get("track_id") or "").strip()
+            if track_id in liked_statuses:
+                item["is_liked"] = liked_statuses[track_id]
+    return membership_enriched
 
 
 def _scope_set(scope_text: str | None) -> set[str]:
@@ -459,9 +483,10 @@ async def auth_playback_playlist_tracks(
 
     cached = cached_playlist_tracks(str(user_id), normalized_playlist_id, limit=limit, offset=offset)
     if cached and (cached["items"] or cached.get("complete")):
+        enriched_cached_items = _enrich_playlist_track_rows(str(user_id), cached["items"])
         return {
             "playlist_id": normalized_playlist_id,
-            "items": cached["items"],
+            "items": enriched_cached_items,
             "total": cached["total"],
             "limit": limit,
             "offset": cached["offset"],
@@ -515,9 +540,10 @@ async def auth_playback_playlist_tracks(
                     offset=offset,
                     total=public_payload.get("total"),
                 )
+                enriched_public_items = _enrich_playlist_track_rows(str(user_id), public_payload["items"])
                 return {
                     "playlist_id": normalized_playlist_id,
-                    "items": public_payload["items"],
+                    "items": enriched_public_items,
                     "total": public_payload.get("total", len(public_payload["items"])),
                     "limit": limit,
                     "offset": offset,
@@ -573,10 +599,11 @@ async def auth_playback_playlist_tracks(
         offset=offset,
         total=payload.get("total"),
     )
+    enriched_items = _enrich_playlist_track_rows(str(user_id), payload["items"])
 
     return {
         "playlist_id": normalized_playlist_id,
-        "items": payload["items"],
+        "items": enriched_items,
         "total": payload.get("total", len(payload["items"])),
         "limit": limit,
         "offset": offset,
@@ -761,7 +788,7 @@ async def auth_playback_album_tracks(
     promote_identity: bool = False,
     include_family: bool = False,
 ) -> dict[str, Any]:
-    _require_user_id(request)
+    user_id = _require_user_id(request)
     track_id_candidate = track_id or _spotify_track_id_from_uri(track_uri)
     normalized_track_id = str(track_id_candidate or "").strip() or None
     normalized_album_id = str(album_id or "").strip() or None

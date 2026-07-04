@@ -12,6 +12,7 @@ This document is the implementation-oriented technical source of truth for the L
 - Recent Likes now has a read-only user-scoped SQLite cache/sync path for Spotify saved tracks, with the old direct Spotify latest-likes payload retained only as a clearly labeled transition fallback.
 - Spotify follow-state is cached in SQLite for followed artists and followed playlist owners, with a 24-hour freshness window before Spotify is queried again.
 - Playlist metadata, user hide state, user categories, follower totals, and track membership are cached in SQLite so track overlays can show local playlist membership and playlist overlays can open from cached rows before falling back to Spotify.
+- Homepage playback now has a grouped ListenLab queue model, saved queue snapshots, a bottom drawer, album-appearance rows, and local bookmarks for tracks plus album/artist/playlist contexts.
 - The auth layer now also supports a dedicated recent-ingest OAuth path with PKCE plus probe and poll-now endpoints for recent-play API debugging.
 - A local exported-history analyzer can calibrate artist and album rankings from Spotify extended streaming history when a history directory is configured.
 - The dashboard uses a dedicated post-login loading screen, then swaps into a sticky-navigation dashboard shell.
@@ -76,6 +77,7 @@ This document is the implementation-oriented technical source of truth for the L
 - frontend playback controls and player state presentation
 - frontend queue organizer, preview-resume handling, album play-all controls, and Recent Likes cache/sync UI
 - frontend playback-action menu for overlay and album play controls, with `Play now`, `Play next`, and `Add to queue` actions backed by the ListenLab queue
+- frontend homepage playback drawer for previous queues, context-aware bookmarks, and grouped queue navigation; saved queue and bookmark data are local browser state for now
 - frontend recording/release track views with collapsible same-recording album appearances, compact two-column `Song Family` relationship rows, source-version album cards in release view, exact-source vs aggregate listen/date semantics, liked-state fallback checks, playlist tracklist overlays, and in-place album tracklist scrolling/highlighting
 - frontend track overlays can show cached `In playlists` memberships and open the playlist overlay focused on the exact playlist occurrence
 - frontend homepage playback album expansion uses a compact tracklist while keeping the queue visible; repeated Spotify queue cycles are collapsed for display

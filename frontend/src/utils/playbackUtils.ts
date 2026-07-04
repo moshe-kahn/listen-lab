@@ -1,5 +1,6 @@
 import { PLAYER_RECENT_FETCH_LIMIT } from "../constants/appConstants";
 import type { PlayerQueueTrack, PlayerTrackSummary, RecentCompletionFilter, RecentTrack, SpotifyPlayerState } from "../types/appTypes";
+import { recordingIdentityMatchesAnyReleaseTrackId } from "./recordingIdentity";
 
 export const QUEUE_PLAYLIST_URI_LIMIT = 100;
 
@@ -131,8 +132,7 @@ export function filterAndDedupeRecentTracksForActivity(
       const isLiked = Boolean(
         track.is_liked === true
         || track.source_label === "liked_cache"
-        || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
-        || (track.recording_release_track_ids ?? []).some((releaseTrackId) => likedReleaseTrackIds?.has(releaseTrackId))
+        || recordingIdentityMatchesAnyReleaseTrackId(track, likedReleaseTrackIds)
         || (track.track_id && likedTrackIds?.has(track.track_id)),
       );
       if (options.likedOnly && !isLiked) {

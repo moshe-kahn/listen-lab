@@ -223,7 +223,7 @@ Current frontend extraction:
 - `frontend/src/components/playback/HomeAlbumAppearanceStrip.tsx`
   - focused homepage current-track album appearance/recording context strip
 - `frontend/src/components/playback/PlayerBottomDrawer.tsx`
-  - focused homepage player drawer with previous-queue/album-context tabs
+  - focused homepage player drawer with previous queues, local track/entity bookmarks, placeholder playlist/explore tabs, and restore/open/play/remove actions
 - `frontend/src/components/dashboard/DashboardPlaylistsSection.tsx`
   - focused homepage playlist section with persisted owner/category filters, public/private subfilters, SQL-backed category migration/editing, hidden-playlist controls, and closed-preview selection from the saved filter result
 - `frontend/src/components/dashboard/DashboardColumns.tsx`
@@ -262,7 +262,7 @@ Current modal artist behavior:
 - missing album artwork in artist album rows can still indicate metadata-only/internal evidence
 
 Current frontend size:
-- `frontend/src/App.tsx`: `11,223` lines / `508,612` bytes.
+- `frontend/src/App.tsx`: `15,001` lines / `681,099` bytes.
 - Original pre-extraction size in this branch was `13,387` lines / `566,339` bytes.
 
 Frontend behavior constraints:
@@ -292,6 +292,10 @@ Current playback UI behavior:
 - Album expansion must not stretch or hide the queue column.
 - Queue item text opens the track overlay; queue item art starts playback at that queue item.
 - The homepage player now has a bottom drawer for queue/album-context surfaces and a separate album appearance strip component to keep new playback UI out of `App.tsx` where practical.
+- The bottom drawer `Previous Queues` tab reads local saved queue snapshots, can restore grouped ListenLab queues with cursors, and preserves per-context queue grouping metadata.
+- The bottom drawer `Bookmarks` tab reads local track and entity bookmarks. Track bookmarks support `Play`, `Next`, `Open`, and `Remove`; album/artist/playlist bookmarks support `Open` and `Remove`.
+- Track bookmarks preserve best-effort source context (`track`, `album`, `artist`, `playlist`, `queue`, or `player`) with label/url/image/id/position when available. Entity bookmarks are stored separately for album, artist, and playlist overlays.
+- Bookmark and saved-queue persistence is currently browser-local (`localStorage`), not backend durable state.
 - Repeated Spotify queue cycles such as `A, B, A, B` are collapsed for display.
 - Back/Forward and track-end auto-advance use the ListenLab queue cursor and explicitly start the target track.
 - Delay menu behavior:
@@ -342,6 +346,8 @@ Current playback UI behavior:
   - homepage playlist edit mode can hide/unhide playlists, pin playlists, and assign multiple SQL-backed categories without opening the playlist card
   - playlist track identity is derived from source/release/generated-recording evidence and must stay separate from canonical merge decisions
   - album/playlist tracklist `Last` now represents latest observed play interaction, while adjacent listen count remains qualified listens; `Last` with count `0` indicates skip/preview-only history
+  - homepage queue display is grouped by current contexts. Clicking `Queue` opens a context list with images and a settings gear; long-press next/previous jumps between queued contexts.
+  - current track album art on the homepage is a horizontal appearance strip showing album/release variants with overlaid year/type tags and truncated album names below.
   - the unauthenticated landing hero only shows the mode toggle and primary login/open button; old recent-ingest/probe debug buttons were removed
 
 Manual QA still required with an active Spotify device/Web Playback SDK session.

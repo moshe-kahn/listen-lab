@@ -50,9 +50,11 @@ type DashboardSectionsProps = {
   albumCatalogLookupStatus: any;
   allTimeLikedMatchCount: any;
   allTimeTopTracks: any;
+  allTimeTopTracksAvailableForDisplay: boolean;
   allTimeTrackIdCount: any;
   analysisMode: AnalysisMode;
   appPage: AppPage;
+  activePlaylistPlayback: any;
   cachedLikedTracks: any;
   catalogBackfillAlbumTracklistPolicy: any;
   catalogBackfillCoverage: any;
@@ -222,9 +224,11 @@ export function DashboardSections(props: DashboardSectionsProps) {
     albumCatalogLookupStatus,
     allTimeLikedMatchCount,
     allTimeTopTracks,
+    allTimeTopTracksAvailableForDisplay,
     allTimeTrackIdCount,
     analysisMode,
     appPage,
+    activePlaylistPlayback,
     activityRecentTracks,
     activityPreviewTracks,
     cachedLikedTracks,
@@ -745,7 +749,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 leftContent={renderTrackColumn(
                   "tracksAllTime",
                   allTimeTopTracks,
-                  profile.top_tracks_available,
+                  allTimeTopTracksAvailableForDisplay,
                   "Spotify returned no top tracks for this account.",
                   quickUnavailableCopy("Top tracks are not available for this session yet. Log out and log back in to grant access."),
                 )}
@@ -772,7 +776,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 )}
                 previewItemsLeft={previewItems(allTimeTopTracks)}
                 previewItemsRight={previewItems(recentTopTracksForDisplay)}
-                collapsedPreviewItems={previewItems(allTimeTopTracks)}
+                collapsedPreviewItems={previewItems(collapseTrackPreviewAlbums(allTimeTopTracks))}
                 isOpen={openSections.tracks}
                 toggleSection={toggleSection}
                 onSelectPreview={setSelectedPreview}
@@ -888,6 +892,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
                   playlistsOpen={openSections.playlists}
                   toggleSection={toggleSection}
                   onSelectPreview={setSelectedPreview}
+                  activePlaylistPlayback={activePlaylistPlayback}
                   onHidePlaylist={hidePlaylistFromListenLab}
                   onUnhidePlaylist={unhidePlaylistInListenLab}
                   onDeletePlaylist={deletePlaylistFromSpotify}

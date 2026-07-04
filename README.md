@@ -29,7 +29,8 @@ This repository now includes:
 - live profile, playlists, recent listening, liked tracks, top tracks, top artists, and top albums views
 - playback controls and session-aware player UI
 - recording-first track views with release-track escape hatches, release-source album cards, variation/family album cards, listen counts, and in-place album tracklists
-- a track-detail overlay with in-place same-album switching, clickable artist/album links, preview snippets, richer top-player controls (pause/resume, progress, and seek), full-width album overlay tracklists, playlist tracklists, and compact home-playback album tracklists
+- a track-detail overlay with in-place same-album switching, clickable artist/album links, preview snippets, richer top-player controls (pause/resume, progress, and seek), full-width album overlay tracklists, playlist tracklists, and compact home-playback album/appearance rows
+- a homepage playback drawer with grouped queue contexts, saved queue snapshots, and local bookmarks for tracks, albums, artists, and playlists
 - a recent debug page for sessionized recent-play inspection plus DB archive paging
 - restricted local mode, full mode, and a test path for probing Spotify availability
 - local history-based artist and album ranking calibration using exported Spotify extended streaming history
@@ -38,6 +39,7 @@ This repository now includes:
 - SQLite-backed raw play-event ingestion with schema migrations
 - Spotify recent-play ingest with replay overlap, conservative early-stop paging, chronology-based `ms_played` estimation, and a dedicated connect-and-ingest OAuth path
 - Spotify history-dump ingest with cross-source upgrade support into the same raw-play table
+- playlist metadata, categories, hide state, follower totals, cached playlist pages, and playlist-track identity navigation are persisted locally for track-overlay membership and playlist overlays
 - duplicate-member tracking for canonical raw events, ingest-run hygiene helpers, and a unified top-track query over the raw SQLite store
 - observational live playback snapshot capture into a separate SQLite evidence table (`live_playback_event`)
 - encrypted Spotify token persistence, token-backed session restore, and backend helpers for current-playback capture plus recent-play polling

@@ -2,10 +2,11 @@ import type { PreviewItem } from "../../types/appTypes";
 
 type PreviewCardProps = {
   item: PreviewItem;
+  activePlayback?: { isPlaying: boolean } | null;
   onSelectPreview: (item: PreviewItem) => void;
 };
 
-export function PreviewCard({ item, onSelectPreview }: PreviewCardProps) {
+export function PreviewCard({ item, activePlayback = null, onSelectPreview }: PreviewCardProps) {
   return (
     <button
       className="preview-card"
@@ -19,6 +20,13 @@ export function PreviewCard({ item, onSelectPreview }: PreviewCardProps) {
           {item.fallbackLabel ?? item.label.slice(0, 1).toUpperCase()}
         </div>
       )}
+      {activePlayback ? (
+        <span className={`preview-now-playing${activePlayback.isPlaying ? " preview-now-playing-active" : ""}`} aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+      ) : null}
       <span className="preview-overlay">
         <span className="preview-label">{item.label}</span>
         {item.meta ? <span className="preview-meta">{item.meta}</span> : null}

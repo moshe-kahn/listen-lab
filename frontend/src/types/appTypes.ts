@@ -1770,6 +1770,7 @@ export type DashboardListCardProps = {
   rowAction?: ReactNode;
   muted?: boolean;
   cardClassName?: string;
+  previewOverrides?: Partial<PreviewItem>;
 };
 
 export type PreviewItem = {
@@ -2023,6 +2024,8 @@ export type PopupTrackPlaybackOptions = {
   queueContext?: {
     label: string;
     url?: string | null;
+    playlistId?: string | null;
+    playlistName?: string | null;
   } | null;
   queuePlaylistUris?: string[] | null;
   queueTracks?: PlayerQueueTrack[] | null;

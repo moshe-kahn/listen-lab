@@ -4,7 +4,7 @@ import { previewItems } from "../../utils/dashboardUtils";
 import { DashboardPlaylistColumn } from "./DashboardColumns";
 import { PreviewCard } from "./PreviewCard";
 
-type PlaylistTabKey = "all" | "created" | "collaborations" | "spotify" | "others";
+type PlaylistTabKey = "all" | "created" | "collaborations" | "others";
 
 type MinePlaylistVisibility = "public" | "private";
 type CollaborationPlaylistOwner = "yours" | "others";
@@ -29,7 +29,6 @@ const PLAYLIST_TABS: Array<{ key: PlaylistTabKey; label: string }> = [
   { key: "all", label: "All" },
   { key: "created", label: "Yours" },
   { key: "collaborations", label: "Collabs" },
-  { key: "spotify", label: "Spotify" },
   { key: "others", label: "Others" },
 ];
 
@@ -43,13 +42,6 @@ function isMinePrivatePlaylist(playlist: OwnedPlaylist) {
 
 function isExclusiveMinePlaylist(playlist: OwnedPlaylist) {
   return Boolean(playlist.is_owned && !playlist.is_collaborative);
-}
-
-function isSpotifyPlaylist(playlist: OwnedPlaylist) {
-  return !playlist.is_owned && (
-    playlist.owner_id?.trim().toLocaleLowerCase() === "spotify"
-    || playlist.owner_name?.trim().toLocaleLowerCase() === "spotify"
-  );
 }
 
 function playlistsForTab(
@@ -69,7 +61,7 @@ function playlistsForTab(
         )
       ));
     case "others":
-      return playlists.filter((playlist) => !playlist.is_owned && !isSpotifyPlaylist(playlist));
+      return playlists.filter((playlist) => !playlist.is_owned);
     case "collaborations":
       return playlists.filter((playlist) => (
         playlist.is_collaborative
@@ -82,8 +74,6 @@ function playlistsForTab(
           || (collaborationVisibility.includes("private") && playlist.is_public === false)
         )
       ));
-    case "spotify":
-      return playlists.filter(isSpotifyPlaylist);
     case "all":
     default:
       return playlists;
@@ -155,7 +145,6 @@ function readStoredPlaylistTabOrder(): PlaylistTabKey[] {
       value === "all"
       || value === "created"
       || value === "collaborations"
-      || value === "spotify"
       || value === "others"
     ));
     return [...stored, ...fallback.filter((key) => !stored.includes(key))];
@@ -194,7 +183,6 @@ function readStoredPlaylistFilters(): {
         value === "all"
         || value === "created"
         || value === "collaborations"
-        || value === "spotify"
         || value === "others"
       ))
       : fallback.selectedTabs;
@@ -243,6 +231,14 @@ type DashboardPlaylistsSectionProps = {
   ownedPlaylists: OwnedPlaylist[];
   ownedPlaylistsAvailable: boolean;
   apiBaseUrl: string;
+  activePlaylistPlayback?: {
+    playlistId: string | null;
+    playlistName?: string | null;
+    trackId?: string | null;
+    trackUri?: string | null;
+    position?: number | null;
+    isPlaying: boolean;
+  } | null;
   playlistsOpen: boolean;
   toggleSection: (section: SectionKey, anchorId?: string) => void;
   onSelectPreview: (preview: PreviewItem) => void;
@@ -256,6 +252,7 @@ export function DashboardPlaylistsSection({
   ownedPlaylists,
   ownedPlaylistsAvailable,
   apiBaseUrl,
+  activePlaylistPlayback,
   playlistsOpen,
   toggleSection,
   onSelectPreview,
@@ -532,7 +529,6 @@ export function DashboardPlaylistsSection({
     all: 0,
     created: 0,
     collaborations: 0,
-    spotify: 0,
     others: 0,
   });
   const mineVisibilityOptions: Array<{ key: MinePlaylistVisibility; label: string; count: number }> = [
@@ -728,7 +724,7 @@ export function DashboardPlaylistsSection({
   };
   const selectedSpecificTabs = selectedPlaylistTabs.filter((tab) => tab !== "all");
   const playlistTypeLabel = selectedPlaylistTabs.includes("all")
-    ? "All Owners"
+    ? "All Editors"
     : selectedSpecificTabs.includes("created")
       ? selectedSpecificTabs.length === 1 ? "Yours" : "Yours + Others"
       : selectedSpecificTabs.length === 1
@@ -1251,6 +1247,7 @@ export function DashboardPlaylistsSection({
                     sectionPage={0}
                     moveSectionPage={() => undefined}
                     onSelectPreview={onSelectPreview}
+                    activePlaylistPlayback={activePlaylistPlayback}
                     onHidePlaylist={playlistEditMode ? hidePlaylistInEditMode : undefined}
                     onUnhidePlaylist={playlistEditMode ? unhidePlaylistInEditMode : undefined}
                     onDeletePlaylist={playlistEditMode ? onDeletePlaylist : undefined}
@@ -1277,13 +1274,25 @@ export function DashboardPlaylistsSection({
         )
       ) : (
         <div className="preview-strip">
-          {previewItems(collapsedPreviewPlaylists).map((item, index) =>
-            <PreviewCard
-              item={item}
-              key={`playlists-${item.image}-${index}`}
-              onSelectPreview={onSelectPreview}
-            />,
-          )}
+          {previewItems(collapsedPreviewPlaylists).map((item, index) => {
+            const isActivePlaylist = Boolean(item.entityId && activePlaylistPlayback?.playlistId === item.entityId);
+            const previewItem = isActivePlaylist
+              ? {
+                ...item,
+                focusPlaylistPosition: activePlaylistPlayback?.position ?? null,
+                focusSpotifyTrackId: activePlaylistPlayback?.trackId ?? null,
+                trackUri: activePlaylistPlayback?.trackUri ?? item.trackUri,
+              }
+              : item;
+            return (
+              <PreviewCard
+                activePlayback={isActivePlaylist ? { isPlaying: Boolean(activePlaylistPlayback?.isPlaying) } : null}
+                item={previewItem}
+                key={`playlists-${item.image}-${index}`}
+                onSelectPreview={onSelectPreview}
+              />
+            );
+          })}
         </div>
       )}
       <button className="section-toggle section-toggle-footer" onClick={() => toggleSection("playlists", "playlists")} type="button">

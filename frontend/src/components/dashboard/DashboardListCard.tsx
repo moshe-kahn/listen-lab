@@ -40,6 +40,7 @@ export function DashboardListCard({
   rowAction,
   muted = false,
   cardClassName,
+  previewOverrides,
 }: DashboardListCardComponentProps) {
   const secondaryValue = secondaryText && secondaryText.trim().length > 0 ? secondaryText : "\u00A0";
   const tertiaryValue = tertiaryText && tertiaryText.trim().length > 0 ? tertiaryText : "\u00A0";
@@ -79,6 +80,7 @@ export function DashboardListCard({
           artistName: previewTrack?.artist_name ?? null,
           sourceTrack: previewTrack ?? null,
           playlistOwnerFollowedByYou: playlistOwnerFollowedByYou ?? null,
+          ...previewOverrides,
         })}
       type="button"
     >

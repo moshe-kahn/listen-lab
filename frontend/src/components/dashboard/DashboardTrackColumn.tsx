@@ -10,6 +10,7 @@ import {
   sortedTracksForView,
 } from "../../utils/dashboardUtils";
 import { recentTrackCompletionRatio } from "../../utils/playbackUtils";
+import { recordingIdentityMatchesAnyReleaseTrackId } from "../../utils/recordingIdentity";
 import { DashboardPaging } from "./DashboardPaging";
 
 type DashboardTrackColumnProps = {
@@ -92,8 +93,7 @@ export function DashboardTrackColumn({
     Boolean(
       track.is_liked === true
       || track.source_label === "liked_cache"
-      || (typeof track.release_track_id === "number" && likedReleaseTrackIds?.has(track.release_track_id))
-      || (track.recording_release_track_ids ?? []).some((releaseTrackId) => likedReleaseTrackIds?.has(releaseTrackId))
+      || recordingIdentityMatchesAnyReleaseTrackId(track, likedReleaseTrackIds)
       || (track.track_id && likedTrackIds?.has(track.track_id)),
     );
   const releaseSiblingSourceCount = (track: RecentTrack) => {

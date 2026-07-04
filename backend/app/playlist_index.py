@@ -738,7 +738,7 @@ def enrich_rows_with_playlist_membership_counts(user_id: str, rows: list[dict[st
         return rows
     with sqlite_connection(row_factory=sqlite3.Row) as connection:
         for row in rows:
-            track_id = str(row.get("id") or row.get("spotify_track_id") or "").strip()
+            track_id = str(row.get("id") or row.get("track_id") or row.get("spotify_track_id") or "").strip()
             release_track_id = row.get("release_track_id")
             exact_release_ids = [int(release_track_id)] if isinstance(release_track_id, int) and release_track_id > 0 else []
             recording_release_ids = [

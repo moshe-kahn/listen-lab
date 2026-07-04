@@ -16,21 +16,20 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- pending commit: dashboard/playback UI extraction, playlist pagination/indexing/categories, persistent follow-state cache, Identity Audit UI cleanup, and play-count cache semantics
+- pending commit: playlist/album/artist overlays, playback drawer queues/bookmarks, playlist indexing/categories, artist/album identity fixes, and play-count/cache semantics
 
 Worktree at handoff:
 - current dirty scope is intentionally broad and is the commit candidate:
   - backend playlist category/pagination, playlist-track indexing, persistent follow-state cache, and play-count cache changes
-  - frontend dashboard/playback extraction and playlist/home-album/player drawer work
+  - frontend dashboard/playback extraction and playlist/home-album/player drawer/bookmark work
   - Identity Audit UI cleanup, including artist duplicate workflow and promotion skip integration
-  - deleted `frontend/src/components/identityAudit/ArtistPromotionSkipsTab.tsx`
 - untracked component files to include if committing this full scope:
-  - `frontend/src/components/playback/HomeAlbumAppearanceStrip.tsx`
-  - `frontend/src/components/playback/PlayerBottomDrawer.tsx`
+  - `docs/reference/drafts/library-personal-catalog-plan.md`
+  - `frontend/src/utils/recordingIdentity.ts`
 - do not include `backend/tests/_tmp_entity_backfill.sqlite3-shm` or `backend/tests/_tmp_entity_backfill.sqlite3-wal` in commits
 
 Important local instruction:
-- `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. Future UI work should extract focused components instead of growing `App.tsx` further.
+- `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. `frontend/src/App.tsx` is currently about 15,001 lines / 681 KB. Future UI work should extract focused components and local-storage helpers instead of growing `App.tsx` further.
 
 ## Latest Completed: Playlist Tracklists And Album Overlay
 
@@ -183,6 +182,29 @@ Local data and checks:
 - frontend production build passed; existing large-chunk warning remains
 - `git diff --check` passed
 
+## Latest Completed: Homepage Playback Drawer And Bookmarks
+Frontend:
+- Homepage playback album art is now a horizontal album appearance strip. It shows release/album variants for the current track, overlays year/type tags on the art, truncates album names below, and opens the track/album overlay instead of expanding under the player.
+- Homepage queue is context-grouped under a `Queue` header. The dropdown lists queued contexts with images, a current dot, and an internal gear menu for organize/save/clear actions.
+- Long-press next/previous jumps between queued contexts; previous jumps back to the last known cursor in the prior context where possible.
+- `Save current queue` writes a grouped queue snapshot to local storage, including active cursor, played keys, group cursors, and current track.
+- The bottom player drawer includes working `Previous Queues` and `Bookmarks` tabs. `Playlists` and `Explore` remain placeholders by user choice.
+- `Previous Queues` can restore saved grouped ListenLab queues.
+- Track bookmarks are local and store the track plus source context (`track`, `album`, `artist`, `playlist`, `queue`, or `player`) when known. They support Play, Next, Open, and Remove.
+- Album, artist, and playlist bookmarks are stored separately in local storage and show in the same drawer. They support Open and Remove.
+- Opening bookmark contexts reuses the existing detail overlay for track/album/artist/playlist previews. Playlist bookmarks preserve focused position/track id when available.
+
+Implementation notes:
+- Local storage keys used by this batch are `listenlab.savedQueues`, `listenlab.trackBookmarks`, and `listenlab.entityBookmarks`.
+- Bookmark/queue persistence is browser-local only; no backend durability exists yet.
+- The drawer UI is componentized in `frontend/src/components/playback/PlayerBottomDrawer.tsx`, but much of the state orchestration still lives in `App.tsx` and should be extracted next.
+
+Latest checks:
+- `cd frontend && npm run build` passed; existing large-chunk warning remains.
+- `./.venv/bin/python -m py_compile backend/app/merged_track_aggregate.py backend/app/playlist_index.py backend/app/recording_track_candidates.py backend/app/release_track_metadata.py backend/app/routes/audit_routes.py backend/app/routes/playback_routes.py` passed.
+- `git diff --check -- frontend/src/App.tsx frontend/src/components/playback/PlayerBottomDrawer.tsx frontend/src/components/dashboard/DetailPreviewModal.tsx frontend/src/styles.css` passed.
+- final full `git diff --check` passed.
+
 ## Immediate Next Task
 After this commit, restart backend, hard refresh, and manually QA:
 - Drive soundtrack album overlay:
@@ -200,6 +222,9 @@ After this commit, restart backend, hard refresh, and manually QA:
   - playlists by followed Spotify users show a filled star; non-followed/unknown owners show no empty star
 - Player dashboard:
   - bottom drawer tabs and home album appearance strip render correctly after hard refresh
+  - saved queue restore preserves grouped queue contexts and active cursor
+  - track/entity bookmarks survive refresh, open the expected overlay, and remove cleanly
+  - long-press next/previous jumps between queued contexts without breaking normal click skip behavior
 - Activity updates immediately after recent sync inserts rows.
 - KID A / Amnesiac / KID A MNESIA edition switching:
   - Kid A shows Kid A + Extended Edition only.
@@ -568,6 +593,8 @@ Outstanding QA:
 - Generated recording/track-family clusters are caches only; no durable `recording_track` promotion exists.
 - `source_track_play_count_cache` is a derived cache; if old local data looks stale, run a projection/refresh path before debugging frontend counts.
 - Frontend still lacks focused tests for overlay/tracklist workflows.
+- Spotify's `/me/playlists` can omit Spotify-made or personalized playlists that appear in the Spotify app, so ListenLab may not discover followed Spotify/editorial/generated playlists unless Spotify exposes them through the Web API.
+- Spotify can expose third-party playlist metadata while denying `/playlists/{id}/items` with `403 Forbidden`; ListenLab cannot copy, cache, or display those tracks and should show only a `View playlist on Spotify` link.
 - Artist group/member modeling remains intentionally out of scope. Future musician/member graph work is tracked as low-priority future work in `docs/overview/roadmap.md`.
 
 ## Recommended Next Task
@@ -586,6 +613,11 @@ Recommended project-level next steps:
    - track -> album -> artist -> album
    - recording variation A -> variation B -> A
    - album heading year/name formatting
+8. History and Listening Log accuracy todo:
+   - verify ListenLab player events, Spotify recent API events, and exported history events merge into one `fact_play_event` when they describe the same listen
+   - specifically test a completed ListenLab playback followed by recent-play sync so the player link and recent link attach to one canonical event instead of double-counting
+   - expose/inspect `ListenLab`, `API`, `History`, and multi-source provenance clearly in Listening Log diagnostics
+   - review timing windows and track-version fallback rules for ListenLab-vs-recent matching when Spotify reports a different release version of the same recording
 
 ## Guardrails
 - Do not delete old branches or stashes unless explicitly requested.

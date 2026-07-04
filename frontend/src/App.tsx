@@ -192,7 +192,7 @@ import {
 } from "./components/identityAudit/IssueFeed";
 import { FullAnalysisOverlay, LoadingScreen } from "./components/loading/LoadingScreens";
 import { HomeAlbumAppearanceStrip } from "./components/playback/HomeAlbumAppearanceStrip";
-import { PlayerBottomDrawer, type PlayerBottomDrawerTab } from "./components/playback/PlayerBottomDrawer";
+import { PlayerBottomDrawer, type PlayerBottomDrawerTab, type SavedEntityBookmark, type SavedPlayerQueueSnapshot, type SavedTrackBookmark } from "./components/playback/PlayerBottomDrawer";
 import { PlaybackActionMenu, type PlaybackAction } from "./components/playback/PlaybackActionMenu";
 import { SpotifyCooldownPanel } from "./components/profile/SpotifyCooldownPanel";
 import { RecentDebugPage } from "./components/recentDebug/RecentDebugPage";
@@ -219,6 +219,7 @@ import {
   spotifyTrackUrl,
   trackUriWithFallback,
 } from "./utils/playbackUtils";
+import { recordingIdentityMatchesAnyReleaseTrackId } from "./utils/recordingIdentity";
 import {
   albumLookupRowCanBulkPrioritize,
   clampProgress,
@@ -380,6 +381,180 @@ function albumContextTagLabel(albumType: string | null | undefined, albumName: s
   return null;
 }
 
+type PlayerQueueContext = {
+  label: string;
+  url?: string | null;
+  playlistId?: string | null;
+  playlistName?: string | null;
+};
+
+type PlayerQueueGroup = {
+  id: string;
+  label: string;
+  url?: string | null;
+  imageUrl?: string | null;
+  tracks: PlayerQueueTrack[];
+};
+
+const SAVED_PLAYER_QUEUES_STORAGE_KEY = "listenlab.savedQueues";
+const TRACK_BOOKMARKS_STORAGE_KEY = "listenlab.trackBookmarks";
+const ENTITY_BOOKMARKS_STORAGE_KEY = "listenlab.entityBookmarks";
+type TrackBookmarkContext = NonNullable<SavedTrackBookmark["context"]>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeSavedPlayerQueueSnapshot(value: unknown): SavedPlayerQueueSnapshot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const groupsValue = value.groups;
+  if (!Array.isArray(groupsValue)) {
+    return null;
+  }
+  const groups = groupsValue.flatMap((groupValue) => {
+    if (!isRecord(groupValue) || !Array.isArray(groupValue.tracks)) {
+      return [];
+    }
+    const tracks = groupValue.tracks.filter((track): track is PlayerQueueTrack => isRecord(track) && typeof track.name === "string");
+    if (tracks.length === 0) {
+      return [];
+    }
+    return [{
+      id: typeof groupValue.id === "string" && groupValue.id ? groupValue.id : `saved-group-${Math.random().toString(36).slice(2)}`,
+      label: typeof groupValue.label === "string" && groupValue.label ? groupValue.label : "Saved context",
+      url: typeof groupValue.url === "string" ? groupValue.url : null,
+      imageUrl: typeof groupValue.imageUrl === "string" ? groupValue.imageUrl : null,
+      cursor: typeof groupValue.cursor === "number" && Number.isFinite(groupValue.cursor) ? groupValue.cursor : null,
+      tracks,
+    }];
+  });
+  if (groups.length === 0) {
+    return null;
+  }
+  const contextValue = value.context;
+  const sourceValue = value.source;
+  return {
+    id: typeof value.id === "string" && value.id ? value.id : `saved-queue-${Math.random().toString(36).slice(2)}`,
+    savedAt: typeof value.savedAt === "string" ? value.savedAt : new Date().toISOString(),
+    context: isRecord(contextValue)
+      ? {
+        label: typeof contextValue.label === "string" ? contextValue.label : null,
+        url: typeof contextValue.url === "string" ? contextValue.url : null,
+      }
+      : null,
+    source: sourceValue === "spotify" || sourceValue === "listenlab" ? sourceValue : null,
+    activeCursor: typeof value.activeCursor === "number" && Number.isFinite(value.activeCursor) ? value.activeCursor : null,
+    playedKeys: Array.isArray(value.playedKeys) ? value.playedKeys.filter((key): key is string => typeof key === "string") : [],
+    groups,
+    currentTrack: isRecord(value.currentTrack) && typeof value.currentTrack.name === "string"
+      ? value.currentTrack as PlayerTrackSummary
+      : null,
+  };
+}
+
+function playerTrackToQueueTrack(track: PlayerTrackSummary | PlayerQueueTrack): PlayerQueueTrack {
+  const queueTrack = track as Partial<PlayerQueueTrack>;
+  return {
+    name: track.name,
+    artists: track.artists,
+    album: track.album,
+    image: track.image,
+    uri: track.uri,
+    durationMs: track.durationMs,
+    trackId: queueTrack.trackId ?? spotifyTrackIdFromUri(track.uri) ?? null,
+    albumId: queueTrack.albumId ?? null,
+    releaseTrackId: queueTrack.releaseTrackId ?? null,
+    releaseTrackName: queueTrack.releaseTrackName ?? null,
+    releaseTrackSourceCount: queueTrack.releaseTrackSourceCount ?? null,
+    releaseTrackDuplicateSourceCount: queueTrack.releaseTrackDuplicateSourceCount ?? null,
+    hasReleaseTrackSiblings: queueTrack.hasReleaseTrackSiblings ?? null,
+    releaseTrackClusterCandidateType: queueTrack.releaseTrackClusterCandidateType ?? null,
+    releaseTrackClusterRelationshipKind: queueTrack.releaseTrackClusterRelationshipKind ?? null,
+    isLiked: queueTrack.isLiked ?? null,
+    likedAt: queueTrack.likedAt ?? null,
+    artistItems: queueTrack.artistItems,
+  };
+}
+
+function bookmarkIdentityForTrack(track: PlayerTrackSummary | PlayerQueueTrack | null | undefined) {
+  if (!track) {
+    return null;
+  }
+  const queueTrack = track as Partial<PlayerQueueTrack>;
+  return track.uri
+    ?? queueTrack.trackId
+    ?? [track.name, track.artists, track.album].map((value) => value.trim().toLocaleLowerCase()).join("|");
+}
+
+function normalizeTrackBookmark(value: unknown): SavedTrackBookmark | null {
+  if (!isRecord(value) || !isRecord(value.track) || typeof value.track.name !== "string") {
+    return null;
+  }
+  const track = playerTrackToQueueTrack(value.track as PlayerTrackSummary | PlayerQueueTrack);
+  const fallbackId = bookmarkIdentityForTrack(track);
+  if (!fallbackId) {
+    return null;
+  }
+  const contextValue = value.context;
+  const contextType = isRecord(contextValue) && (
+    contextValue.type === "playlist"
+    || contextValue.type === "album"
+    || contextValue.type === "artist"
+    || contextValue.type === "track"
+    || contextValue.type === "queue"
+    || contextValue.type === "player"
+  )
+    ? contextValue.type
+    : null;
+  return {
+    id: typeof value.id === "string" && value.id ? value.id : fallbackId,
+    bookmarkedAt: typeof value.bookmarkedAt === "string" ? value.bookmarkedAt : new Date().toISOString(),
+    track,
+    context: contextType && isRecord(contextValue)
+      ? {
+        type: contextType,
+        label: typeof contextValue.label === "string" && contextValue.label ? contextValue.label : "Unknown context",
+        url: typeof contextValue.url === "string" ? contextValue.url : null,
+        imageUrl: typeof contextValue.imageUrl === "string" ? contextValue.imageUrl : null,
+        entityId: typeof contextValue.entityId === "string" ? contextValue.entityId : null,
+        position: typeof contextValue.position === "number" && Number.isFinite(contextValue.position) ? contextValue.position : null,
+      }
+      : null,
+  };
+}
+
+function entityBookmarkIdentity(bookmark: Pick<SavedEntityBookmark, "type" | "label" | "entityId" | "url"> | null | undefined) {
+  if (!bookmark) {
+    return null;
+  }
+  const stableKey = bookmark.entityId ?? bookmark.url ?? bookmark.label;
+  return `${bookmark.type}:${String(stableKey).trim().toLocaleLowerCase()}`;
+}
+
+function normalizeEntityBookmark(value: unknown): SavedEntityBookmark | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const type = value.type === "playlist" || value.type === "album" || value.type === "artist" ? value.type : null;
+  if (!type || typeof value.label !== "string" || !value.label.trim()) {
+    return null;
+  }
+  const bookmark: SavedEntityBookmark = {
+    id: typeof value.id === "string" && value.id ? value.id : `${type}:${value.label.trim().toLocaleLowerCase()}`,
+    bookmarkedAt: typeof value.bookmarkedAt === "string" ? value.bookmarkedAt : new Date().toISOString(),
+    type,
+    label: value.label,
+    url: typeof value.url === "string" ? value.url : null,
+    imageUrl: typeof value.imageUrl === "string" ? value.imageUrl : null,
+    entityId: typeof value.entityId === "string" ? value.entityId : null,
+    meta: typeof value.meta === "string" ? value.meta : null,
+    detail: typeof value.detail === "string" ? value.detail : null,
+  };
+  return { ...bookmark, id: entityBookmarkIdentity(bookmark) ?? bookmark.id };
+}
+
 function editionAlbumCoreName(name: string | null | undefined) {
   return String(name ?? "")
     .replace(/\s*[\[(]\s*(?:expanded\s+deluxe(?:\s+edition)?|deluxe(?:\s+edition)?|expanded(?:\s+edition)?|(?:\d+(?:st|nd|rd|th)\s+)?anniversary(?:\s+remaster(?:ed)?)?(?:\s+edition)?|remaster(?:ed)?(?:\s+edition)?|mono|stereo|rework)\s*[\])]\s*$/i, "")
@@ -514,6 +689,9 @@ export function App() {
   const [homeRecordingCandidate, setHomeRecordingCandidate] = useState<RecordingTrackCandidateItem | null>(null);
   const [playerDrawerExpanded, setPlayerDrawerExpanded] = useState(false);
   const [playerDrawerActiveTab, setPlayerDrawerActiveTab] = useState<PlayerBottomDrawerTab>("previousQueues");
+  const [savedPlayerQueues, setSavedPlayerQueues] = useState<SavedPlayerQueueSnapshot[]>([]);
+  const [trackBookmarks, setTrackBookmarks] = useState<SavedTrackBookmark[]>([]);
+  const [entityBookmarks, setEntityBookmarks] = useState<SavedEntityBookmark[]>([]);
   const [playerReady, setPlayerReady] = useState(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [playerRecentTracks, setPlayerRecentTracks] = useState<RecentTrack[]>([]);
@@ -521,19 +699,23 @@ export function App() {
   const [playerRecentTracksError, setPlayerRecentTracksError] = useState<string | null>(null);
   const [playerRecentTracksLoadAttempted, setPlayerRecentTracksLoadAttempted] = useState(false);
   const [playerQueueTracks, setPlayerQueueTracks] = useState<PlayerQueueTrack[]>([]);
+  const [playerQueueGroups, setPlayerQueueGroups] = useState<PlayerQueueGroup[]>([]);
+  const [playerQueueGroupCursors, setPlayerQueueGroupCursors] = useState<Record<string, number>>({});
   const [playerQueueCursor, setPlayerQueueCursor] = useState<number | null>(null);
   const [playerQueueSource, setPlayerQueueSource] = useState<"listenlab" | "spotify" | null>(null);
   const [playerQueueShuffleEnabled, setPlayerQueueShuffleEnabled] = useState(false);
   const [playerQueueShuffleBaseTracks, setPlayerQueueShuffleBaseTracks] = useState<PlayerQueueTrack[] | null>(null);
   const [playerQueueSettingsOpen, setPlayerQueueSettingsOpen] = useState(false);
   const [playerQueueOrganizeMode, setPlayerQueueOrganizeMode] = useState(false);
+  const [homeQueueOpenGroupIds, setHomeQueueOpenGroupIds] = useState<Set<string>>(() => new Set());
+  const [homeQueueHeaderMenuOpen, setHomeQueueHeaderMenuOpen] = useState(false);
   const [playerQueueSortMode, setPlayerQueueSortMode] = useState<"custom" | "length" | "az" | "recent">("custom");
   const [playerQueueGroupMode, setPlayerQueueGroupMode] = useState<"custom" | "artist" | "album">("custom");
   const [playerQueueDragIndex, setPlayerQueueDragIndex] = useState<number | null>(null);
   const [playerQueueCleared, setPlayerQueueCleared] = useState(false);
   const [playerQueueLoopEnabled, setPlayerQueueLoopEnabled] = useState(false);
   const [playerTrackLoopEnabled, setPlayerTrackLoopEnabled] = useState(false);
-  const [playerQueueContext, setPlayerQueueContext] = useState<{ label: string; url?: string | null } | null>(null);
+  const [playerQueueContext, setPlayerQueueContext] = useState<PlayerQueueContext | null>(null);
   const [playerQueuePlayedKeys, setPlayerQueuePlayedKeys] = useState<Set<string>>(() => new Set());
   const [playerQueuePauseMenuOpen, setPlayerQueuePauseMenuOpen] = useState(false);
   const [queuePauseAfterCurrentEnabled, setQueuePauseAfterCurrentEnabled] = useState(false);
@@ -776,6 +958,9 @@ export function App() {
   const trackMappingLineageRequestIdRef = useRef(0);
   const playbackPositionMsRef = useRef(0);
   const autoAdvanceTrackUriRef = useRef<string | null>(null);
+  const queueSkipHoldTimerRef = useRef<number | null>(null);
+  const queueSkipHoldHandledRef = useRef(false);
+  const optimisticQualifiedListenEventIdsRef = useRef<Set<number>>(new Set());
   const liveProgressAnchorRef = useRef<{ baseProgressMs: number; receivedAtMs: number; durationMs: number } | null>(null);
   const liveEndRefreshRequestedRef = useRef(false);
   const liveListenQualificationRef = useRef<{
@@ -836,6 +1021,60 @@ export function App() {
       setStartupDashboardReleased(true);
     }
   }, [startupDashboardReleased, startupReadyForDashboard]);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(SAVED_PLAYER_QUEUES_STORAGE_KEY);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      const snapshots = Array.isArray(parsed)
+        ? parsed.flatMap((item) => {
+          const snapshot = normalizeSavedPlayerQueueSnapshot(item);
+          return snapshot ? [snapshot] : [];
+        }).slice(0, 25)
+        : [];
+      setSavedPlayerQueues(snapshots);
+      if (raw) {
+        window.localStorage.setItem(SAVED_PLAYER_QUEUES_STORAGE_KEY, JSON.stringify(snapshots));
+      }
+    } catch {
+      setSavedPlayerQueues([]);
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(TRACK_BOOKMARKS_STORAGE_KEY);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      const bookmarks = Array.isArray(parsed)
+        ? parsed.flatMap((item) => {
+          const bookmark = normalizeTrackBookmark(item);
+          return bookmark ? [bookmark] : [];
+        }).slice(0, 100)
+        : [];
+      setTrackBookmarks(bookmarks);
+      if (raw) {
+        window.localStorage.setItem(TRACK_BOOKMARKS_STORAGE_KEY, JSON.stringify(bookmarks));
+      }
+    } catch {
+      setTrackBookmarks([]);
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(ENTITY_BOOKMARKS_STORAGE_KEY);
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      const bookmarks = Array.isArray(parsed)
+        ? parsed.flatMap((item) => {
+          const bookmark = normalizeEntityBookmark(item);
+          return bookmark ? [bookmark] : [];
+        }).slice(0, 100)
+        : [];
+      setEntityBookmarks(bookmarks);
+      if (raw) {
+        window.localStorage.setItem(ENTITY_BOOKMARKS_STORAGE_KEY, JSON.stringify(bookmarks));
+      }
+    } catch {
+      setEntityBookmarks([]);
+    }
+  }, []);
   const liveSnapshotTrackUri = livePlaybackTrackSummary?.uri ?? null;
   const currentTrackUri = currentTrack?.uri ?? null;
   const liveSnapshotIsDifferentTrack = Boolean(
@@ -939,16 +1178,19 @@ export function App() {
     if (track?.source_label === "liked_cache") {
       return true;
     }
+    const fallbackSpotifyTrackId = fallbackTrackId?.startsWith("spotify:track:")
+      ? spotifyTrackIdFromUri(fallbackTrackId)
+      : fallbackTrackId;
     const releaseTrackId = typeof track?.release_track_id === "number"
       ? track.release_track_id
-      : releaseTrackIdForSpotifyTrackId(track?.track_id ?? fallbackTrackId);
+      : releaseTrackIdForSpotifyTrackId(track?.track_id ?? fallbackSpotifyTrackId);
     if (typeof releaseTrackId === "number" && likedReleaseTrackIdsForDisplay.has(releaseTrackId)) {
       return true;
     }
-    if ((track?.recording_release_track_ids ?? []).some((recordingReleaseTrackId) => likedReleaseTrackIdsForDisplay.has(recordingReleaseTrackId))) {
+    if (track && recordingIdentityMatchesAnyReleaseTrackId(track, likedReleaseTrackIdsForDisplay)) {
       return true;
     }
-    const spotifyTrackId = track?.track_id ?? fallbackTrackId;
+    const spotifyTrackId = track?.track_id ?? fallbackSpotifyTrackId;
     return Boolean(spotifyTrackId && (likedTrackIdsForDisplay.has(spotifyTrackId) || targetedLikedTrackById[spotifyTrackId]));
   };
   const albumTrackIsKnownLiked = (track: AlbumTrackEntry) => {
@@ -1320,9 +1562,15 @@ export function App() {
       ?? null
     )
     : null;
+  const selectedPreviewBookmarkIdentity = selectedPreview?.kind === "track"
+    ? selectedPreviewPlaybackTrackUri ?? selectedPreviewStarTrackId ?? selectedPreview.trackId ?? selectedPreview.label
+    : null;
   const selectedPreviewIsBookmarked = Boolean(
-    selectedPreviewStarTrackId && localBookmarkedTrackById[selectedPreviewStarTrackId],
+    (selectedPreviewStarTrackId && localBookmarkedTrackById[selectedPreviewStarTrackId])
+    || (selectedPreviewBookmarkIdentity && trackBookmarks.some((bookmark) => bookmarkIdentityForTrack(bookmark.track) === selectedPreviewBookmarkIdentity)),
   );
+  const selectedPreviewEntityBookmarkValue = selectedPreviewEntityBookmark();
+  const selectedPreviewIsEntityBookmarked = entityIsBookmarked(selectedPreviewEntityBookmarkValue);
   const selectedPreviewTrackDurationLabel = selectedPreviewTrackTotalDisplayMs > 0
     ? formatPlaybackClock(selectedPreviewTrackTotalDisplayMs)
     : selectedPreviewCachedSummary?.durationLabel ?? null;
@@ -1821,6 +2069,28 @@ export function App() {
   const queueHasUnplayedTracks = playerQueueTracks.length > (hasActiveQueueCursor ? activeQueueCursor + 1 : 0);
   const queueHasLoopShuffleTracks = playerQueueLoopEnabled && playerQueueTracks.length > 1 && hasActiveQueueCursor;
   const queueShuffleAvailable = queueHasUnplayedTracks || queueHasLoopShuffleTracks;
+  const livePlaylistContextId = livePlaybackSnapshot?.context_uri?.startsWith("spotify:playlist:")
+    ? livePlaybackSnapshot.context_uri.split(":")[2] ?? null
+    : null;
+  const activePlaylistPlayback = playerQueueSource === "listenlab" && playerQueueContext?.playlistId
+    ? {
+      playlistId: playerQueueContext.playlistId,
+      playlistName: playerQueueContext.playlistName ?? playerQueueContext.label,
+      trackId: playerDisplayTrack?.uri ? spotifyTrackIdFromUri(playerDisplayTrack.uri) : null,
+      trackUri: playerDisplayTrack?.uri ?? null,
+      position: hasActiveQueueCursor ? activeQueueCursor : null,
+      isPlaying: Boolean(playerDisplayTrack && !playerDisplayPaused && !previewingTrackUri),
+    }
+    : livePlaylistContextId
+      ? {
+        playlistId: livePlaylistContextId,
+        playlistName: null,
+        trackId: playerDisplayTrack?.uri ? spotifyTrackIdFromUri(playerDisplayTrack.uri) : null,
+        trackUri: playerDisplayTrack?.uri ?? null,
+        position: null,
+        isPlaying: Boolean(playerDisplayTrack && !playerDisplayPaused && !previewingTrackUri),
+      }
+    : null;
   const playerUpNextTrack = hasActiveQueueCursor
     ? (
         playerQueueTracks[activeQueueCursor + 1]
@@ -1850,6 +2120,10 @@ export function App() {
   const playerPanelVisible = Boolean(profile && (playerMenuOpen || appPage === "dashboard" || !startupReadyForDashboard));
   const queueSleepTimerActive = queueSleepTimerUntilMs != null && queueSleepTimerUntilMs > Date.now();
   const queueDelayActive = queuePauseAfterCurrentEnabled || queueSleepTimerActive;
+
+  useEffect(() => {
+    setHomeQueueOpenGroupIds(new Set(playerQueueGroups.map((group) => group.id)));
+  }, [playerQueueContext?.label, playerQueueContext?.url, playerQueueContext?.playlistId, playerQueueGroups]);
 
   useEffect(() => {
     saveIdentityAuditPersistedPrefs({
@@ -1964,7 +2238,7 @@ export function App() {
   }, [appPage, listeningLogLoaded, listeningLogLoading, profile, recentDebugSourceFilter]);
 
   useEffect(() => {
-    if (appPage !== "formulaLab" || !profile || !startupDashboardReleased) {
+    if (!["dashboard", "formulaLab"].includes(appPage) || !profile || !startupDashboardReleased) {
       return;
     }
     if (!mergedTracksLoaded && !mergedTracksLoading) {
@@ -2425,6 +2699,9 @@ export function App() {
       }
       if (previewVolumeRampTimerRef.current != null) {
         window.clearInterval(previewVolumeRampTimerRef.current);
+      }
+      if (queueSkipHoldTimerRef.current != null) {
+        window.clearTimeout(queueSkipHoldTimerRef.current);
       }
     };
   }, []);
@@ -3792,7 +4069,9 @@ export function App() {
       });
       if (response.ok) {
         const payload = (await response.json()) as { listen_qualified?: boolean };
-        if (payload.listen_qualified && currentTrack) {
+        const shouldRefreshListenState = Boolean(payload.listen_qualified || confidence === "complete");
+        if (shouldRefreshListenState && currentTrack && !optimisticQualifiedListenEventIdsRef.current.has(activePlayerListenEventId)) {
+          optimisticQualifiedListenEventIdsRef.current.add(activePlayerListenEventId);
           const trackId = spotifyTrackIdFromUri(currentTrack.uri);
           if (trackId) {
             await refreshQualifiedListenState(
@@ -3837,6 +4116,35 @@ export function App() {
     });
     setAlbumTrackEntries(patchRows);
     setHomeAlbumTrackEntries(patchRows);
+    const incrementCount = (value: number | null | undefined) => Math.max(0, Number(value ?? 0) || 0) + 1;
+    const patchPlaylistRows = (rows: RecentTrack[]) => rows.map((row) => {
+      const rowTrackId = row.track_id ?? spotifyTrackIdFromUri(row.uri ?? null);
+      const releaseMatches = releaseTrackId != null && row.release_track_id === releaseTrackId;
+      if (rowTrackId !== trackId && !releaseMatches) {
+        return row;
+      }
+      return {
+        ...row,
+        track_id: row.track_id ?? trackId,
+        release_track_id: row.release_track_id ?? releaseTrackId ?? null,
+        spotify_played_at: playedAt,
+        last_played_at: playedAt,
+        source_last_played_at: playedAt,
+        recording_last_played_at: playedAt,
+        play_count: incrementCount(row.play_count),
+        source_play_count: incrementCount(row.source_play_count ?? row.play_count),
+        recording_play_count: incrementCount(row.recording_play_count ?? row.play_count ?? row.source_play_count),
+        estimated_played_ms: progressMs,
+        estimated_completion_ratio: durationMs > 0 ? Math.min(1, progressMs / durationMs) : 0.65,
+      };
+    });
+    setPlaylistTrackEntries(patchPlaylistRows);
+    for (const [cacheKey, cachedRows] of Object.entries(playlistTrackEntriesCacheRef.current)) {
+      playlistTrackEntriesCacheRef.current[cacheKey] = {
+        ...cachedRows,
+        items: patchPlaylistRows(cachedRows.items),
+      };
+    }
     setProfile((current) => {
       if (!current) {
         return current;
@@ -4244,6 +4552,69 @@ export function App() {
     });
   }
 
+  function openRecentTrackAlbumPreview(track: RecentTrack) {
+    const albumName = track.album_name?.trim() || "Unknown album";
+    const albumId = track.album_id ?? null;
+    const albumUrl = track.album_url ?? spotifyEntityUrl("album", albumId);
+    const albumArtistEntries = uniqueArtistEntries(track.artists, artistEntriesFromText(track.artist_name));
+    const albumArtistName = nonYearArtistText(track.artist_name)
+      ?? albumArtistEntries.map((artist) => artist.name?.trim()).filter(Boolean).join(", ")
+      ?? null;
+    setSelectedPreview({
+      image: track.image_url ?? null,
+      fallbackLabel: "L",
+      label: albumName,
+      meta: albumArtistName,
+      detail: track.album_release_year ?? null,
+      kind: "album",
+      entityId: albumId,
+      trackUri: null,
+      url: albumUrl,
+      trackId: null,
+      albumId,
+      artistName: albumArtistName,
+      artists: albumArtistEntries,
+      targetArtists: null,
+      sourceAlbumId: albumId,
+      sourceAlbumName: albumName,
+      sourceAlbumImage: track.image_url ?? null,
+      sourceAlbumUrl: albumUrl,
+      sourceAlbumYear: track.album_release_year ?? null,
+      sourceTrack: track,
+    });
+  }
+
+  function openRecentTrackArtistPreview(track: RecentTrack) {
+    const artists = uniqueArtistEntries(track.artists, artistEntriesFromText(track.artist_name));
+    const artistName = artists.map((artist) => artist.name?.trim()).filter(Boolean).join(", ")
+      || nonYearArtistText(track.artist_name)
+      || "Unknown artist";
+    const firstArtist = artists[0] ?? null;
+    const firstArtistId = firstArtist?.artist_id ?? firstArtist?.id ?? null;
+    setSelectedPreview({
+      image: firstArtist?.image_url ?? findArtistImageUrl(artistName) ?? null,
+      fallbackLabel: "A",
+      label: artistName,
+      meta: null,
+      detail: null,
+      kind: "artist",
+      entityId: firstArtistId,
+      trackUri: null,
+      url: firstArtist?.url ?? spotifyEntityUrl("artist", firstArtistId),
+      trackId: null,
+      albumId: null,
+      artistName,
+      artists,
+      targetArtists: artists,
+      sourceAlbumId: track.album_id ?? null,
+      sourceAlbumName: track.album_name ?? null,
+      sourceAlbumImage: track.image_url ?? null,
+      sourceAlbumUrl: track.album_url ?? spotifyEntityUrl("album", track.album_id),
+      sourceAlbumYear: track.album_release_year ?? null,
+      sourceTrack: track,
+    });
+  }
+
   function openRecordingCandidateReleaseTrack(member: RecordingTrackCandidateMember, detailView: "recording" | "release" = "release") {
     preserveRecordingAlbumTracklistOpenRef.current = detailView === "recording" && recordingAlbumTracklistOpen;
     const sourceTrackIds = member.source_track_ids ?? [];
@@ -4558,11 +4929,16 @@ export function App() {
   useEffect(() => {
     if (
       !currentTrack?.uri
-      || playbackPaused
       || previewingTrackUri
       || playerQueueSource !== "listenlab"
       || playerQueueCursor == null
     ) {
+      autoAdvanceTrackUriRef.current = null;
+      return;
+    }
+    const durationMs = playbackDurationMs || currentTrack.durationMs || 0;
+    const trackAtEnd = durationMs > 0 && playbackPositionMs >= durationMs - 500;
+    if (playbackPaused && !trackAtEnd) {
       autoAdvanceTrackUriRef.current = null;
       return;
     }
@@ -4572,8 +4948,7 @@ export function App() {
       return;
     }
 
-    const durationMs = playbackDurationMs || currentTrack.durationMs || 0;
-    if (durationMs <= 0 || playbackPositionMs < durationMs - 500) {
+    if (!trackAtEnd) {
       autoAdvanceTrackUriRef.current = null;
       return;
     }
@@ -4641,7 +5016,7 @@ export function App() {
     if (usingRecentLikedStartupFallback) {
       resetQueueControls();
       setPlayerQueueCleared(false);
-      setPlayerQueueTracks(recentTracksToPlayerQueueTracks(profile.recent_likes_tracks));
+      replacePlayerQueueTracks(recentTracksToPlayerQueueTracks(profile.recent_likes_tracks), { label: "Recent Likes" });
       setPlayerQueueCursor(0);
       setPlayerQueueSource("listenlab");
       setPlayerQueueContext({ label: "Recent Likes" });
@@ -5032,7 +5407,7 @@ export function App() {
       if (options?.queueTracks) {
         resetQueueControls();
         setPlayerQueueCleared(false);
-        setPlayerQueueTracks(options.queueTracks);
+        replacePlayerQueueTracks(options.queueTracks, options.queueContext ?? null);
         setPlayerQueueCursor(options.queueCursor ?? 0);
         setPlayerQueueSource("listenlab");
         setPlayerQueueContext(options.queueContext ?? null);
@@ -5139,6 +5514,98 @@ export function App() {
     };
   }
 
+  function playerQueueGroupFromTracks(
+    tracks: PlayerQueueTrack[],
+    context: PlayerQueueContext | null | undefined,
+    fallbackLabel: string = "Current queue",
+  ): PlayerQueueGroup | null {
+    if (tracks.length === 0) {
+      return null;
+    }
+    const label = context?.playlistName ?? context?.label ?? fallbackLabel;
+    const idBase = context?.playlistId ?? context?.url ?? label;
+    return {
+      id: `${idBase}:${tracks.map((track) => queueTrackIdentity(track) ?? track.name).join("|")}`,
+      label,
+      url: context?.url ?? null,
+      imageUrl: tracks.find((track) => Boolean(track.image))?.image ?? null,
+      tracks,
+    };
+  }
+
+  function setSinglePlayerQueueGroup(
+    tracks: PlayerQueueTrack[],
+    context: PlayerQueueContext | null | undefined,
+    fallbackLabel?: string,
+  ) {
+    const group = playerQueueGroupFromTracks(tracks, context, fallbackLabel);
+    setPlayerQueueGroups(group ? [group] : []);
+    setHomeQueueOpenGroupIds(group ? new Set([group.id]) : new Set());
+    setPlayerQueueGroupCursors(group ? { [group.id]: 0 } : {});
+  }
+
+  function replacePlayerQueueTracks(
+    tracks: PlayerQueueTrack[],
+    context: PlayerQueueContext | null | undefined = playerQueueContext,
+    fallbackLabel?: string,
+  ) {
+    setPlayerQueueTracks(tracks);
+    setSinglePlayerQueueGroup(tracks, context, fallbackLabel);
+  }
+
+  function playerQueueGroupsForNavigation() {
+    const fallbackGroup = playerQueueGroupFromTracks(playerQueueTracks, playerQueueContext, playerQueueSource === "spotify" ? "Spotify queue" : "Current queue");
+    return playerQueueGroups.length > 0
+      ? playerQueueGroups
+      : [fallbackGroup].filter((group): group is PlayerQueueGroup => Boolean(group));
+  }
+
+  function queueGroupBounds(groups: PlayerQueueGroup[]) {
+    let start = 0;
+    return groups.map((group) => {
+      const bounds = {
+        group,
+        start,
+        end: start + group.tracks.length - 1,
+      };
+      start += group.tracks.length;
+      return bounds;
+    });
+  }
+
+  function queueGroupBoundsForIndex(index: number) {
+    return queueGroupBounds(playerQueueGroupsForNavigation()).find((bounds) => index >= bounds.start && index <= bounds.end) ?? null;
+  }
+
+  async function jumpToAdjacentQueueGroup(direction: "previous" | "next") {
+    if (playerQueueSource !== "listenlab") {
+      await movePlaybackQueue(direction);
+      return;
+    }
+    const currentIndex = playerQueueCursor ?? activeQueueCursor;
+    if (currentIndex == null || currentIndex < 0) {
+      setPlayerError("ListenLab queue position could not be found.");
+      return;
+    }
+    const bounds = queueGroupBounds(playerQueueGroupsForNavigation());
+    const currentGroupIndex = bounds.findIndex((item) => currentIndex >= item.start && currentIndex <= item.end);
+    const targetGroup = bounds[direction === "next" ? currentGroupIndex + 1 : currentGroupIndex - 1] ?? null;
+    if (!targetGroup) {
+      setPlayerError(direction === "next" ? "No next queue context is available." : "No previous queue context is available.");
+      return;
+    }
+    const savedGroupCursor = playerQueueGroupCursors[targetGroup.group.id];
+    const targetRelativeIndex = direction === "next"
+      ? 0
+      : Math.min(Math.max(0, savedGroupCursor ?? targetGroup.group.tracks.length - 1), targetGroup.group.tracks.length - 1);
+    setHomeQueueOpenGroupIds((current) => {
+      const next = new Set(current);
+      next.add(targetGroup.group.id);
+      return next;
+    });
+    await playQueueTrackAtIndex(targetGroup.start + targetRelativeIndex, { markPreviousComplete: true });
+  }
+
   function insertPlaybackActionTracks(request: PlaybackActionRequest, placement: "next" | "end") {
     const requestedTracks = request.insertTracks?.length
       ? request.insertTracks
@@ -5168,6 +5635,57 @@ export function App() {
       ...baseTracks.slice(insertAt),
     ];
     setPlayerQueueTracks(nextTracks);
+    const insertedGroup = playerQueueGroupFromTracks(
+      requestedTracks,
+      request.queueContext,
+      request.optimisticTrack?.album ?? request.optimisticTrack?.name ?? "Queued list",
+    );
+    const baseGroups = playerQueueGroups.length > 0
+      ? playerQueueGroups
+      : [playerQueueGroupFromTracks(baseTracks, playerQueueContext)].filter((group): group is PlayerQueueGroup => Boolean(group));
+    const nextGroups = insertedGroup
+      ? (() => {
+        const groups: PlayerQueueGroup[] = [];
+        let seen = 0;
+        let inserted = false;
+        for (const group of baseGroups) {
+          const groupStart = seen;
+          const groupEnd = groupStart + group.tracks.length;
+          if (!inserted && insertAt <= groupEnd) {
+            const splitAt = Math.max(0, Math.min(group.tracks.length, insertAt - groupStart));
+            const beforeTracks = group.tracks.slice(0, splitAt);
+            const afterTracks = group.tracks.slice(splitAt);
+            if (beforeTracks.length > 0) {
+              groups.push({ ...group, id: `${group.id}:before:${insertAt}`, tracks: beforeTracks });
+            }
+            groups.push(insertedGroup);
+            if (afterTracks.length > 0) {
+              groups.push({ ...group, id: `${group.id}:after:${insertAt}`, tracks: afterTracks });
+            }
+            inserted = true;
+          } else {
+            groups.push(group);
+          }
+          seen = groupEnd;
+        }
+        if (!inserted) {
+          groups.push(insertedGroup);
+        }
+        return groups;
+      })()
+      : baseGroups;
+    setPlayerQueueGroups(nextGroups);
+    setPlayerQueueGroupCursors((current) => ({
+      ...current,
+      ...(insertedGroup ? { [insertedGroup.id]: 0 } : {}),
+    }));
+    setHomeQueueOpenGroupIds((current) => {
+      const next = new Set(current);
+      if (insertedGroup) {
+        next.add(insertedGroup.id);
+      }
+      return next;
+    });
     setPlayerQueueCursor(baseCursor);
     setPlayerQueueSource("listenlab");
     setPlayerQueueCleared(false);
@@ -5316,6 +5834,31 @@ export function App() {
     }
   }
 
+  function startQueueSkipHold(direction: "previous" | "next") {
+    queueSkipHoldHandledRef.current = false;
+    if (queueSkipHoldTimerRef.current != null) {
+      window.clearTimeout(queueSkipHoldTimerRef.current);
+    }
+    queueSkipHoldTimerRef.current = window.setTimeout(() => {
+      queueSkipHoldHandledRef.current = true;
+      queueSkipHoldTimerRef.current = null;
+      void jumpToAdjacentQueueGroup(direction);
+    }, 520);
+  }
+
+  function cancelQueueSkipHold() {
+    if (queueSkipHoldTimerRef.current != null) {
+      window.clearTimeout(queueSkipHoldTimerRef.current);
+      queueSkipHoldTimerRef.current = null;
+    }
+  }
+
+  function consumeQueueSkipHold() {
+    const handled = queueSkipHoldHandledRef.current;
+    queueSkipHoldHandledRef.current = false;
+    return handled;
+  }
+
   async function moveListenLabQueue(direction: "previous" | "next", options?: { markPreviousComplete?: boolean; startPaused?: boolean }) {
     if (playerQueueSource !== "listenlab") {
       return;
@@ -5348,6 +5891,17 @@ export function App() {
     const currentIndex = playerQueueCursor ?? playerQueueTracks.findIndex((track) => (
       Boolean(track.uri && currentTrack?.uri && track.uri === currentTrack.uri)
     ));
+    const previousProgressMs = playbackPositionMsRef.current;
+    const previousDurationMs = Math.max(
+      0,
+      playbackDurationMs
+        || currentTrack?.durationMs
+        || (currentIndex >= 0 ? playerQueueTracks[currentIndex]?.durationMs : 0)
+        || 0,
+    );
+    const previousCompletionProgressMs = options?.markPreviousComplete
+      ? Math.max(previousProgressMs, previousDurationMs)
+      : previousProgressMs;
     const upcomingTracks = playerQueueTracks.slice(targetIndex + 1);
     const playbackStarted = await playTrackUri(targetTrack.uri, 0, {
       queuePlaylistUris: queuePlaylistTrackUris(targetTrack.uri, upcomingTracks),
@@ -5359,7 +5913,7 @@ export function App() {
     }
     if (currentIndex !== targetIndex) {
       const previousStatus: "complete" | "in_progress" = options?.markPreviousComplete ? "complete" : "in_progress";
-      void updateListenLabPlayerEventProgress(playbackPositionMsRef.current, previousStatus);
+      void updateListenLabPlayerEventProgress(previousCompletionProgressMs, previousStatus);
       if (options?.markPreviousComplete) {
         markQueueTrackPlayed(playerQueueTracks[currentIndex] ?? currentTrack);
       }
@@ -5376,6 +5930,13 @@ export function App() {
     setPlaybackPositionMs(0);
     setPlaybackDurationMs(Math.max(0, targetTrack.durationMs ?? 0));
     setPlayerQueueCursor(targetIndex);
+    const targetGroupBounds = queueGroupBoundsForIndex(targetIndex);
+    if (targetGroupBounds) {
+      setPlayerQueueGroupCursors((current) => ({
+        ...current,
+        [targetGroupBounds.group.id]: targetIndex - targetGroupBounds.start,
+      }));
+    }
     setPlayerQueueSource("listenlab");
     setPlayerQueueCleared(false);
     markQueueTrackPlayed(targetTrack);
@@ -5497,6 +6058,7 @@ export function App() {
       ? nextTracks.findIndex((track) => queueTrackIdentity(track) === currentIdentity)
       : -1;
     setPlayerQueueTracks(nextTracks);
+    setSinglePlayerQueueGroup(nextTracks, playerQueueContext);
     if (playerQueueSource === "listenlab") {
       setPlayerQueueCursor(nextCursor >= 0 ? nextCursor : null);
     }
@@ -5509,6 +6071,27 @@ export function App() {
     const removedIsCurrent = playerQueueSource === "listenlab" && index === playerQueueCursor;
     const nextTracks = playerQueueTracks.filter((_track, trackIndex) => trackIndex !== index);
     setPlayerQueueTracks(nextTracks);
+    setPlayerQueueGroups((currentGroups) => {
+      let seen = 0;
+      const nextGroups = currentGroups.flatMap((group) => {
+        const groupStart = seen;
+        seen += group.tracks.length;
+        if (index < groupStart || index >= groupStart + group.tracks.length) {
+          return [group];
+        }
+        const nextGroupTracks = group.tracks.filter((_track, trackIndex) => groupStart + trackIndex !== index);
+        return nextGroupTracks.length > 0 ? [{ ...group, tracks: nextGroupTracks }] : [];
+      });
+      setPlayerQueueGroupCursors((currentCursors) => {
+        const nextCursors: Record<string, number> = {};
+        for (const group of nextGroups) {
+          const previousCursor = currentCursors[group.id] ?? 0;
+          nextCursors[group.id] = Math.min(Math.max(0, previousCursor), group.tracks.length - 1);
+        }
+        return nextCursors;
+      });
+      return nextGroups;
+    });
     if (playerQueueSource === "listenlab") {
       if (removedIsCurrent) {
         setPlayerQueueCursor(null);
@@ -5610,6 +6193,7 @@ export function App() {
       return;
     }
     setPlayerQueueTracks(baseTracks);
+    setSinglePlayerQueueGroup(baseTracks, playerQueueContext);
     if (playerQueueSource === "listenlab") {
       const currentIdentity = queueTrackIdentity(currentTrack);
       const restoredCursor = currentIdentity
@@ -5632,6 +6216,7 @@ export function App() {
     setPlayerQueueShuffleBaseTracks(playerQueueTracks);
     const nextTracks = shuffleQueueTail(playerQueueTracks, hasActiveQueueCursor ? activeQueueCursor : null);
     setPlayerQueueTracks(nextTracks);
+    setSinglePlayerQueueGroup(nextTracks, playerQueueContext);
     if (playerQueueLoopEnabled && hasActiveQueueCursor && playerQueueSource === "listenlab") {
       setPlayerQueueCursor(0);
     }
@@ -5650,6 +6235,9 @@ export function App() {
 
   function clearPlayerQueue() {
     setPlayerQueueTracks([]);
+    setPlayerQueueGroups([]);
+    setPlayerQueueGroupCursors({});
+    setHomeQueueOpenGroupIds(new Set());
     setPlayerQueueCursor(null);
     setPlayerQueueSource(null);
     clearQueueContext();
@@ -5718,6 +6306,606 @@ export function App() {
   async function handleClearPlayerQueueClick() {
     await prepareQueueControlAction();
     clearPlayerQueue();
+  }
+
+  async function jumpToQueueGroup(groupStartIndex: number, groupId: string) {
+    setHomeQueueHeaderMenuOpen(false);
+    setHomeQueueOpenGroupIds((current) => {
+      const next = new Set(current);
+      next.add(groupId);
+      return next;
+    });
+    await playQueueTrackAtIndex(groupStartIndex, { markPreviousComplete: true });
+  }
+
+  function persistSavedPlayerQueues(snapshots: SavedPlayerQueueSnapshot[]) {
+    const next = snapshots.slice(0, 25);
+    setSavedPlayerQueues(next);
+    window.localStorage.setItem(SAVED_PLAYER_QUEUES_STORAGE_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  function persistTrackBookmarks(bookmarks: SavedTrackBookmark[]) {
+    const seen = new Set<string>();
+    const next = bookmarks.flatMap((bookmark) => {
+      const identity = bookmarkIdentityForTrack(bookmark.track);
+      if (!identity || seen.has(identity)) {
+        return [];
+      }
+      seen.add(identity);
+      return [bookmark];
+    }).slice(0, 100);
+    setTrackBookmarks(next);
+    window.localStorage.setItem(TRACK_BOOKMARKS_STORAGE_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  function persistEntityBookmarks(bookmarks: SavedEntityBookmark[]) {
+    const seen = new Set<string>();
+    const next = bookmarks.flatMap((bookmark) => {
+      const identity = entityBookmarkIdentity(bookmark);
+      if (!identity || seen.has(identity)) {
+        return [];
+      }
+      seen.add(identity);
+      return [{ ...bookmark, id: identity }];
+    }).slice(0, 100);
+    setEntityBookmarks(next);
+    window.localStorage.setItem(ENTITY_BOOKMARKS_STORAGE_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  function selectedPreviewEntityBookmark(): SavedEntityBookmark | null {
+    if (!selectedPreview || selectedPreview.kind === "track") {
+      return null;
+    }
+    const entityId = selectedPreview.kind === "playlist"
+      ? selectedPreview.entityId ?? spotifyPlaylistIdFromUrl(selectedPreview.url)
+      : selectedPreview.kind === "album"
+        ? selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? selectedPreview.entityId
+        : selectedPreview.entityId;
+    const bookmark: SavedEntityBookmark = {
+      id: "",
+      bookmarkedAt: new Date().toISOString(),
+      type: selectedPreview.kind,
+      label: selectedPreview.label,
+      url: selectedPreview.url || (
+        selectedPreview.kind === "playlist"
+          ? (entityId ? `https://open.spotify.com/playlist/${entityId}` : null)
+          : spotifyEntityUrl(selectedPreview.kind, entityId)
+      ),
+      imageUrl: selectedPreview.kind === "artist"
+        ? selectedPreview.image ?? selectedPreviewArtistImageUrl ?? null
+        : selectedPreview.image ?? selectedPreview.sourceAlbumImage ?? null,
+      entityId,
+      meta: selectedPreview.kind === "playlist"
+        ? selectedPreview.meta ?? "Playlist"
+        : selectedPreview.kind === "album"
+          ? selectedPreview.meta ?? selectedPreview.artistName ?? null
+          : null,
+      detail: selectedPreview.kind === "album" ? selectedPreview.detail : selectedPreview.kind === "playlist" ? selectedPreview.detail : null,
+    };
+    return { ...bookmark, id: entityBookmarkIdentity(bookmark) ?? `${bookmark.type}:${bookmark.label}` };
+  }
+
+  function entityIsBookmarked(bookmark: SavedEntityBookmark | null | undefined) {
+    const identity = entityBookmarkIdentity(bookmark);
+    return Boolean(identity && entityBookmarks.some((item) => entityBookmarkIdentity(item) === identity));
+  }
+
+  function removeEntityBookmark(bookmarkId: string) {
+    persistEntityBookmarks(entityBookmarks.filter((bookmark) => bookmark.id !== bookmarkId));
+    setStatusMessage("Removed bookmark.");
+  }
+
+  function toggleSelectedPreviewEntityBookmark() {
+    const bookmark = selectedPreviewEntityBookmark();
+    const identity = entityBookmarkIdentity(bookmark);
+    if (!bookmark || !identity) {
+      return;
+    }
+    if (entityIsBookmarked(bookmark)) {
+      persistEntityBookmarks(entityBookmarks.filter((item) => entityBookmarkIdentity(item) !== identity));
+      setStatusMessage(`Removed bookmark "${bookmark.label}".`);
+      return;
+    }
+    persistEntityBookmarks([bookmark, ...entityBookmarks]);
+    setStatusMessage(`Bookmarked "${bookmark.label}".`);
+  }
+
+  function openEntityBookmark(bookmark: SavedEntityBookmark) {
+    if (bookmark.type === "playlist") {
+      setSelectedPreview({
+        image: bookmark.imageUrl ?? null,
+        fallbackLabel: "P",
+        label: bookmark.label,
+        meta: bookmark.meta ?? "Playlist",
+        detail: bookmark.detail ?? null,
+        kind: "playlist",
+        entityId: bookmark.entityId ?? spotifyPlaylistIdFromUrl(bookmark.url),
+        trackUri: null,
+        url: bookmark.url ?? "",
+      });
+      setPlayerDrawerExpanded(false);
+      return;
+    }
+    if (bookmark.type === "album") {
+      setSelectedPreview({
+        image: bookmark.imageUrl ?? null,
+        fallbackLabel: "L",
+        label: bookmark.label,
+        meta: bookmark.meta ?? null,
+        detail: bookmark.detail ?? null,
+        kind: "album",
+        entityId: bookmark.entityId ?? spotifyEntityIdFromUrl("album", bookmark.url),
+        trackUri: null,
+        url: bookmark.url ?? spotifyEntityUrl("album", bookmark.entityId),
+        trackId: null,
+        albumId: bookmark.entityId ?? spotifyEntityIdFromUrl("album", bookmark.url),
+        artistName: bookmark.meta ?? null,
+        artists: artistEntriesFromText(bookmark.meta),
+        sourceAlbumId: bookmark.entityId ?? spotifyEntityIdFromUrl("album", bookmark.url),
+        sourceAlbumName: bookmark.label,
+        sourceAlbumImage: bookmark.imageUrl ?? null,
+        sourceAlbumUrl: bookmark.url ?? spotifyEntityUrl("album", bookmark.entityId),
+        sourceAlbumYear: bookmark.detail ?? null,
+      });
+      setPlayerDrawerExpanded(false);
+      return;
+    }
+    const artistId = bookmark.entityId ?? spotifyEntityIdFromUrl("artist", bookmark.url);
+    setSelectedPreview({
+      image: bookmark.imageUrl ?? null,
+      fallbackLabel: "A",
+      label: bookmark.label,
+      meta: null,
+      detail: bookmark.detail ?? null,
+      kind: "artist",
+      entityId: artistId,
+      trackUri: null,
+      url: bookmark.url ?? spotifyEntityUrl("artist", artistId),
+      trackId: null,
+      albumId: null,
+      artistName: bookmark.label,
+      artists: [{ artist_id: artistId, id: artistId, name: bookmark.label, url: bookmark.url ?? spotifyEntityUrl("artist", artistId), image_url: bookmark.imageUrl ?? null }],
+      targetArtists: [{ artist_id: artistId, id: artistId, name: bookmark.label, url: bookmark.url ?? spotifyEntityUrl("artist", artistId), image_url: bookmark.imageUrl ?? null }],
+    });
+    setPlayerDrawerExpanded(false);
+  }
+
+  function bookmarkContextTypeFromUrl(url: string | null | undefined): TrackBookmarkContext["type"] | null {
+    if (!url) {
+      return null;
+    }
+    if (url.includes("/playlist/")) {
+      return "playlist";
+    }
+    if (url.includes("/album/")) {
+      return "album";
+    }
+    if (url.includes("/artist/")) {
+      return "artist";
+    }
+    if (url.includes("/track/")) {
+      return "track";
+    }
+    return null;
+  }
+
+  function bookmarkContextFromQueueGroup(group: PlayerQueueGroup | null | undefined, position: number | null = null): TrackBookmarkContext | null {
+    if (!group) {
+      return null;
+    }
+    return {
+      type: bookmarkContextTypeFromUrl(group.url) ?? "queue",
+      label: group.label,
+      url: group.url ?? null,
+      imageUrl: group.imageUrl ?? null,
+      entityId: null,
+      position,
+    };
+  }
+
+  function activePlayerBookmarkContext(): TrackBookmarkContext {
+    const activeGroupMatch = hasActiveQueueCursor
+      ? homeQueueGroupForCursor(activeQueueCursor)
+      : null;
+    const activeGroupContext = bookmarkContextFromQueueGroup(
+      activeGroupMatch?.group,
+      activeGroupMatch && hasActiveQueueCursor ? activeQueueCursor - activeGroupMatch.startIndex : null,
+    );
+    if (activeGroupContext) {
+      return activeGroupContext;
+    }
+    return {
+      type: playerQueueContext?.playlistId ? "playlist" : "player",
+      label: playerQueueContext?.label ?? "Homepage player",
+      url: playerQueueContext?.url ?? null,
+      imageUrl: playerDisplayTrack?.image ?? null,
+      entityId: playerQueueContext?.playlistId ?? null,
+      position: hasActiveQueueCursor ? activeQueueCursor : null,
+    };
+  }
+
+  function selectedPreviewBookmarkContext(): TrackBookmarkContext {
+    if (selectedPreview?.kind === "track") {
+      return {
+        type: "track",
+        label: selectedPreview.label,
+        url: selectedPreview.url ?? spotifyTrackUrl(selectedPreviewPlaybackTrackUri) ?? null,
+        imageUrl: selectedPreview.image ?? selectedPreview.sourceAlbumImage ?? null,
+        entityId: selectedPreview.trackId ?? spotifyTrackIdFromUri(selectedPreviewPlaybackTrackUri) ?? null,
+        position: null,
+      };
+    }
+    if (selectedPreview?.kind === "playlist") {
+      return {
+        type: "playlist",
+        label: selectedPreview.label,
+        url: selectedPreview.url ?? null,
+        imageUrl: selectedPreview.image ?? null,
+        entityId: selectedPreview.entityId ?? spotifyPlaylistIdFromUrl(selectedPreview.url),
+        position: null,
+      };
+    }
+    if (selectedPreview?.kind === "album") {
+      return {
+        type: "album",
+        label: selectedPreview.label,
+        url: selectedPreview.url ?? selectedPreview.sourceAlbumUrl ?? null,
+        imageUrl: selectedPreview.image ?? selectedPreview.sourceAlbumImage ?? null,
+        entityId: selectedPreview.albumId ?? selectedPreview.sourceAlbumId ?? selectedPreview.entityId,
+        position: null,
+      };
+    }
+    if (selectedPreview?.kind === "artist") {
+      return {
+        type: "artist",
+        label: selectedPreview.label,
+        url: selectedPreview.url ?? null,
+        imageUrl: selectedPreview.image ?? selectedPreviewArtistImageUrl ?? null,
+        entityId: selectedPreview.entityId ?? null,
+        position: null,
+      };
+    }
+    return {
+      type: "player",
+      label: "ListenLab",
+      url: null,
+      imageUrl: null,
+      entityId: null,
+      position: null,
+    };
+  }
+
+  function spotifyEntityIdFromUrl(kind: "track" | "artist" | "album" | "playlist", url: string | null | undefined) {
+    if (!url) {
+      return null;
+    }
+    const match = url.match(new RegExp(`/(${kind})/([^/?#]+)`));
+    return match?.[2] ? decodeURIComponent(match[2]) : null;
+  }
+
+  function recentTrackFromBookmark(bookmark: SavedTrackBookmark): RecentTrack {
+    return {
+      track_id: bookmark.track.trackId ?? spotifyTrackIdFromUri(bookmark.track.uri),
+      release_track_id: bookmark.track.releaseTrackId ?? null,
+      release_track_name: bookmark.track.releaseTrackName ?? null,
+      release_track_source_count: bookmark.track.releaseTrackSourceCount ?? null,
+      release_track_duplicate_source_count: bookmark.track.releaseTrackDuplicateSourceCount ?? null,
+      has_release_track_siblings: bookmark.track.hasReleaseTrackSiblings ?? null,
+      release_track_cluster_candidate_type: bookmark.track.releaseTrackClusterCandidateType ?? null,
+      release_track_cluster_relationship_kind: bookmark.track.releaseTrackClusterRelationshipKind ?? null,
+      track_name: bookmark.track.name,
+      artist_name: bookmark.track.artists,
+      album_name: bookmark.track.album,
+      artists: bookmark.track.artistItems ?? artistEntriesFromText(bookmark.track.artists),
+      duration_ms: bookmark.track.durationMs,
+      uri: bookmark.track.uri,
+      url: spotifyTrackUrl(bookmark.track.uri) ?? (bookmark.track.trackId ? spotifyEntityUrl("track", bookmark.track.trackId) : null),
+      image_url: bookmark.track.image,
+      album_id: bookmark.track.albumId ?? null,
+      is_liked: bookmark.track.isLiked ?? null,
+      liked_at: bookmark.track.likedAt ?? null,
+    };
+  }
+
+  function openTrackBookmarkContext(bookmark: SavedTrackBookmark) {
+    const context = bookmark.context ?? null;
+    const trackId = bookmark.track.trackId ?? spotifyTrackIdFromUri(bookmark.track.uri) ?? spotifyEntityIdFromUrl("track", context?.url);
+    const trackUrl = spotifyTrackUrl(bookmark.track.uri) ?? context?.url ?? spotifyEntityUrl("track", trackId);
+    const sourceTrack = recentTrackFromBookmark(bookmark);
+    if (context?.type === "playlist") {
+      const playlistId = context.entityId ?? spotifyPlaylistIdFromUrl(context.url);
+      setSelectedPreview({
+        image: context.imageUrl ?? bookmark.track.image ?? null,
+        fallbackLabel: "P",
+        label: context.label,
+        meta: "Playlist",
+        detail: context.position != null ? `${context.position + 1}` : null,
+        kind: "playlist",
+        entityId: playlistId,
+        trackUri: null,
+        url: context.url ?? (playlistId ? `https://open.spotify.com/playlist/${playlistId}` : ""),
+        focusPlaylistPosition: context.position ?? null,
+        focusSpotifyTrackId: trackId,
+      });
+      setPlayerDrawerExpanded(false);
+      return;
+    }
+    if (context?.type === "album") {
+      const albumId = context.entityId ?? bookmark.track.albumId ?? spotifyEntityIdFromUrl("album", context.url);
+      setSelectedPreview({
+        image: context.imageUrl ?? bookmark.track.image ?? null,
+        fallbackLabel: "L",
+        label: context.label,
+        meta: bookmark.track.artists || null,
+        detail: null,
+        kind: "album",
+        entityId: albumId,
+        trackUri: null,
+        url: context.url ?? spotifyEntityUrl("album", albumId),
+        trackId: null,
+        albumId,
+        artistName: bookmark.track.artists || null,
+        artists: bookmark.track.artistItems ?? artistEntriesFromText(bookmark.track.artists),
+        sourceAlbumId: albumId,
+        sourceAlbumName: context.label,
+        sourceAlbumImage: context.imageUrl ?? bookmark.track.image ?? null,
+        sourceAlbumUrl: context.url ?? spotifyEntityUrl("album", albumId),
+        sourceTrack,
+      });
+      setPlayerDrawerExpanded(false);
+      return;
+    }
+    if (context?.type === "artist") {
+      const artistId = context.entityId ?? spotifyEntityIdFromUrl("artist", context.url);
+      setSelectedPreview({
+        image: context.imageUrl ?? null,
+        fallbackLabel: "A",
+        label: context.label,
+        meta: null,
+        detail: null,
+        kind: "artist",
+        entityId: artistId,
+        trackUri: null,
+        url: context.url ?? spotifyEntityUrl("artist", artistId),
+        trackId: null,
+        albumId: bookmark.track.albumId ?? null,
+        artistName: context.label,
+        artists: [{ artist_id: artistId, id: artistId, name: context.label, url: context.url ?? spotifyEntityUrl("artist", artistId), image_url: context.imageUrl ?? null }],
+        targetArtists: [{ artist_id: artistId, id: artistId, name: context.label, url: context.url ?? spotifyEntityUrl("artist", artistId), image_url: context.imageUrl ?? null }],
+        sourceAlbumId: bookmark.track.albumId ?? null,
+        sourceAlbumName: bookmark.track.album,
+        sourceAlbumImage: bookmark.track.image ?? null,
+        sourceTrack,
+      });
+      setPlayerDrawerExpanded(false);
+      return;
+    }
+    if (context?.type === "queue" || context?.type === "player") {
+      setPlayerDrawerExpanded(false);
+      setStatusMessage(`Bookmark source is ${context.label}.`);
+      return;
+    }
+    setSelectedPreview({
+      image: bookmark.track.image ?? null,
+      fallbackLabel: "T",
+      label: bookmark.track.name,
+      meta: bookmark.track.artists || null,
+      detail: bookmark.track.album || context?.label || null,
+      kind: "track",
+      entityId: trackId,
+      trackUri: bookmark.track.uri,
+      url: trackUrl,
+      trackId,
+      releaseTrackId: bookmark.track.releaseTrackId ?? releaseTrackIdForSpotifyTrackId(trackId),
+      releaseTrackName: bookmark.track.releaseTrackName ?? null,
+      releaseTrackSourceCount: bookmark.track.releaseTrackSourceCount ?? null,
+      releaseTrackDuplicateSourceCount: bookmark.track.releaseTrackDuplicateSourceCount ?? null,
+      hasReleaseTrackSiblings: bookmark.track.hasReleaseTrackSiblings ?? null,
+      releaseTrackClusterCandidateType: bookmark.track.releaseTrackClusterCandidateType ?? null,
+      releaseTrackClusterRelationshipKind: bookmark.track.releaseTrackClusterRelationshipKind ?? null,
+      albumId: bookmark.track.albumId ?? null,
+      artistName: bookmark.track.artists || null,
+      artists: bookmark.track.artistItems ?? artistEntriesFromText(bookmark.track.artists),
+      sourceAlbumId: bookmark.track.albumId ?? null,
+      sourceAlbumName: bookmark.track.album,
+      sourceAlbumImage: bookmark.track.image ?? null,
+      sourceTrack,
+    });
+    setPlayerDrawerExpanded(false);
+  }
+
+  function homeQueueGroupForCursor(cursor: number) {
+    const groups = playerQueueGroups.length > 0
+      ? playerQueueGroups
+      : [playerQueueGroupFromTracks(playerQueueTracks, playerQueueContext, playerQueueSource === "spotify" ? "Spotify queue" : "Current queue")]
+        .filter((group): group is PlayerQueueGroup => Boolean(group));
+    let seen = 0;
+    for (const group of groups) {
+      const end = seen + group.tracks.length;
+      if (cursor >= seen && cursor < end) {
+        return { group, startIndex: seen };
+      }
+      seen = end;
+    }
+    return null;
+  }
+
+  function addTrackBookmark(track: PlayerTrackSummary | PlayerQueueTrack | null | undefined, context: TrackBookmarkContext | null = null) {
+    const identity = bookmarkIdentityForTrack(track);
+    if (!track || !identity) {
+      setStatusMessage("No playable track to bookmark.");
+      return;
+    }
+    const bookmark: SavedTrackBookmark = {
+      id: identity,
+      bookmarkedAt: new Date().toISOString(),
+      track: playerTrackToQueueTrack(track),
+      context,
+    };
+    persistTrackBookmarks([bookmark, ...trackBookmarks.filter((item) => bookmarkIdentityForTrack(item.track) !== identity)]);
+    setStatusMessage(`Bookmarked "${track.name}".`);
+  }
+
+  function removeTrackBookmark(bookmarkId: string) {
+    const removed = trackBookmarks.find((bookmark) => bookmark.id === bookmarkId);
+    persistTrackBookmarks(trackBookmarks.filter((bookmark) => bookmark.id !== bookmarkId));
+    const removedTrackId = removed?.track.trackId ?? spotifyTrackIdFromUri(removed?.track.uri ?? null);
+    if (removedTrackId) {
+      setLocalBookmarkedTrackById((current) => ({
+        ...current,
+        [removedTrackId]: false,
+      }));
+    }
+    setStatusMessage("Removed bookmark.");
+  }
+
+  function removeTrackBookmarkByIdentity(identity: string) {
+    const removed = trackBookmarks.find((bookmark) => bookmarkIdentityForTrack(bookmark.track) === identity);
+    persistTrackBookmarks(trackBookmarks.filter((bookmark) => bookmarkIdentityForTrack(bookmark.track) !== identity));
+    if (removed) {
+      const removedTrackId = removed.track.trackId ?? spotifyTrackIdFromUri(removed.track.uri);
+      if (removedTrackId) {
+        setLocalBookmarkedTrackById((current) => ({
+          ...current,
+          [removedTrackId]: false,
+        }));
+      }
+      setStatusMessage(`Removed bookmark "${removed.track.name}".`);
+    }
+  }
+
+  function trackIsBookmarked(track: PlayerTrackSummary | PlayerQueueTrack | null | undefined) {
+    const identity = bookmarkIdentityForTrack(track);
+    return Boolean(identity && trackBookmarks.some((bookmark) => bookmarkIdentityForTrack(bookmark.track) === identity));
+  }
+
+  function toggleTrackBookmark(track: PlayerTrackSummary | PlayerQueueTrack | null | undefined, context: TrackBookmarkContext | null = null) {
+    const identity = bookmarkIdentityForTrack(track);
+    if (identity && trackIsBookmarked(track)) {
+      removeTrackBookmarkByIdentity(identity);
+      return;
+    }
+    addTrackBookmark(track, context);
+  }
+
+  function toggleSelectedPreviewTrackBookmark() {
+    if (!selectedPreviewStarTrackId || !selectedPreviewTrackOptimisticSummary) {
+      return;
+    }
+    const nextBookmarked = !selectedPreviewIsBookmarked;
+    setLocalBookmarkedTrackById((current) => ({
+      ...current,
+      [selectedPreviewStarTrackId]: nextBookmarked,
+    }));
+    if (nextBookmarked) {
+      addTrackBookmark(selectedPreviewTrackOptimisticSummary, selectedPreviewBookmarkContext());
+      return;
+    }
+    const identity = bookmarkIdentityForTrack(selectedPreviewTrackOptimisticSummary);
+    if (identity) {
+      removeTrackBookmarkByIdentity(identity);
+    }
+  }
+
+  async function playTrackBookmark(action: "play_now" | "play_next", bookmark: SavedTrackBookmark) {
+    await handlePlaybackAction(action, {
+      trackUri: bookmark.track.uri,
+      optimisticTrack: bookmark.track,
+      queueContext: {
+        label: bookmark.context?.label ? `Bookmark: ${bookmark.context.label}` : "Bookmarks",
+        url: bookmark.context?.url ?? null,
+        playlistId: bookmark.context?.type === "playlist" ? bookmark.context.entityId ?? null : null,
+        playlistName: bookmark.context?.type === "playlist" ? bookmark.context.label : null,
+      },
+      queueCursor: 0,
+      queueTracks: [bookmark.track],
+    });
+  }
+
+  function saveCurrentQueueSnapshot() {
+    const snapshot: SavedPlayerQueueSnapshot = {
+      id: crypto.randomUUID(),
+      savedAt: new Date().toISOString(),
+      context: playerQueueContext,
+      source: playerQueueSource,
+      activeCursor: hasActiveQueueCursor ? activeQueueCursor : null,
+      playedKeys: Array.from(playerQueuePlayedKeys),
+      groups: (playerQueueGroups.length > 0 ? playerQueueGroups : [playerQueueGroupFromTracks(playerQueueTracks, playerQueueContext)])
+        .filter((group): group is PlayerQueueGroup => Boolean(group))
+        .map((group) => ({
+          id: group.id,
+          label: group.label,
+          url: group.url ?? null,
+          imageUrl: group.imageUrl ?? null,
+          cursor: playerQueueGroupCursors[group.id] ?? null,
+          tracks: group.tracks,
+        })),
+      currentTrack: playerDisplayTrack,
+    };
+    let existing: SavedPlayerQueueSnapshot[] = [];
+    try {
+      const existingRaw = window.localStorage.getItem(SAVED_PLAYER_QUEUES_STORAGE_KEY);
+      const parsed: unknown = existingRaw ? JSON.parse(existingRaw) : [];
+      existing = Array.isArray(parsed)
+        ? parsed.flatMap((item) => {
+          const savedSnapshot = normalizeSavedPlayerQueueSnapshot(item);
+          return savedSnapshot ? [savedSnapshot] : [];
+        })
+        : [];
+    } catch {
+      existing = [];
+    }
+    persistSavedPlayerQueues([snapshot, ...existing]);
+    setHomeQueueHeaderMenuOpen(false);
+    setStatusMessage(`Saved queue "${snapshot.groups[0]?.label ?? "Current queue"}".`);
+  }
+
+  function deleteSavedPlayerQueue(snapshotId: string) {
+    persistSavedPlayerQueues(savedPlayerQueues.filter((snapshot) => snapshot.id !== snapshotId));
+    setStatusMessage("Deleted saved queue.");
+  }
+
+  function restoreSavedPlayerQueue(snapshot: SavedPlayerQueueSnapshot) {
+    const groups: PlayerQueueGroup[] = snapshot.groups
+      .map((group) => ({
+        id: group.id,
+        label: group.label,
+        url: group.url ?? null,
+        imageUrl: group.imageUrl ?? null,
+        tracks: group.tracks,
+      }))
+      .filter((group) => group.tracks.length > 0);
+    const tracks = groups.flatMap((group) => group.tracks);
+    if (tracks.length === 0) {
+      setStatusMessage("That saved queue has no tracks to restore.");
+      return;
+    }
+    const savedCursor = snapshot.activeCursor != null && snapshot.activeCursor >= 0 ? snapshot.activeCursor : 0;
+    const nextCursor = Math.min(savedCursor, tracks.length - 1);
+    const restoredTrack = snapshot.currentTrack ?? tracks[nextCursor] ?? null;
+    setPlayerQueueTracks(tracks);
+    setPlayerQueueGroups(groups);
+    setPlayerQueueGroupCursors(Object.fromEntries(snapshot.groups.map((group) => [group.id, group.cursor ?? 0])));
+    setHomeQueueOpenGroupIds(new Set(groups.map((group) => group.id)));
+    setPlayerQueueCursor(nextCursor);
+    setPlayerQueueSource("listenlab");
+    setPlayerQueueContext({
+      label: snapshot.context?.label || groups[0]?.label || "Restored queue",
+      url: snapshot.context?.url ?? groups[0]?.url ?? null,
+    });
+    setPlayerQueuePlayedKeys(new Set(snapshot.playedKeys ?? []));
+    setPlayerQueueCleared(false);
+    setPlayerQueueError(null);
+    resetQueueControls();
+    setQueuePausedCursor(nextCursor);
+    setCurrentTrack(restoredTrack);
+    setPlaybackPaused(true);
+    setPlaybackPositionMs(0);
+    setHomeQueueHeaderMenuOpen(false);
+    setStatusMessage(`Restored queue "${snapshot.context?.label || groups[0]?.label || "Saved queue"}".`);
   }
 
   function openAlbumTrackPreview(
@@ -6481,6 +7669,8 @@ export function App() {
       queueContext: {
         label: selectedPreview?.label ?? "Playlist",
         url: selectedPreview?.url ?? null,
+        playlistId: selectedPreview?.kind === "playlist" ? selectedPreview.entityId ?? spotifyPlaylistIdFromUrl(selectedPreview.url) : null,
+        playlistName: selectedPreview?.kind === "playlist" ? selectedPreview.label : null,
       },
     };
   }
@@ -6829,6 +8019,9 @@ export function App() {
     setOpenSections(INITIAL_OPEN_SECTIONS);
     setSectionPages(INITIAL_SECTION_PAGES);
     setPlayerQueueTracks([]);
+    setPlayerQueueGroups([]);
+    setPlayerQueueGroupCursors({});
+    setHomeQueueOpenGroupIds(new Set());
     setPlayerQueueCursor(null);
     setPlayerQueueSource(null);
     resetQueueControls();
@@ -7013,6 +8206,9 @@ export function App() {
         setLiveControlOverrideUntilMs(null);
         setCurrentTrack(null);
         setPlayerQueueTracks([]);
+        setPlayerQueueGroups([]);
+        setPlayerQueueGroupCursors({});
+        setHomeQueueOpenGroupIds(new Set());
         setPlayerQueueCursor(null);
         setPlayerQueueSource(null);
         clearQueueContext();
@@ -7908,6 +9104,9 @@ export function App() {
     setPlayerMenuOpen(false);
     setCurrentTrack(null);
     setPlayerQueueTracks([]);
+    setPlayerQueueGroups([]);
+    setPlayerQueueGroupCursors({});
+    setHomeQueueOpenGroupIds(new Set());
     setPlayerQueueCursor(null);
     setPlayerQueueSource(null);
     clearQueueContext();
@@ -9786,6 +10985,9 @@ export function App() {
   async function loadPlayerQueueTracks() {
     if (experienceMode === "local") {
       setPlayerQueueTracks([]);
+      setPlayerQueueGroups([]);
+      setPlayerQueueGroupCursors({});
+      setHomeQueueOpenGroupIds(new Set());
       setPlayerQueueCursor(null);
       setPlayerQueueSource(null);
       clearQueueContext();
@@ -9924,7 +11126,7 @@ export function App() {
           // Spotify's explicit queue remains usable when album expansion is unavailable.
         }
       }
-      setPlayerQueueTracks(liveQueueTracks);
+      replacePlayerQueueTracks(liveQueueTracks, expandedAlbumContext ?? null, expandedAlbumContext ? undefined : "Spotify queue");
       setPlayerQueueCursor(currentQueueTrack ? 0 : null);
       setPlayerQueueSource("spotify");
       if (expandedAlbumContext) {
@@ -9936,6 +11138,9 @@ export function App() {
       resetQueueControls();
     } catch (error) {
       setPlayerQueueTracks([]);
+      setPlayerQueueGroups([]);
+      setPlayerQueueGroupCursors({});
+      setHomeQueueOpenGroupIds(new Set());
       setPlayerQueueCursor(null);
       setPlayerQueueSource(null);
       clearQueueContext();
@@ -10720,6 +11925,142 @@ export function App() {
       return null;
     }
 
+    const fallbackHomeQueueGroup = playerQueueGroupFromTracks(
+      playerQueueTracks,
+      playerQueueContext,
+      playerQueueSource === "spotify" ? "Spotify queue" : "Current queue",
+    );
+    const homeQueueGroups = playerQueueGroups.length > 0
+      ? playerQueueGroups
+      : [fallbackHomeQueueGroup].filter((group): group is PlayerQueueGroup => Boolean(group));
+    const homeQueueGroupMeta = (group: PlayerQueueGroup, groupStartIndex: number) => {
+      const groupEndIndex = groupStartIndex + group.tracks.length - 1;
+      const activeInGroup = hasActiveQueueCursor && activeQueueCursor >= groupStartIndex && activeQueueCursor <= groupEndIndex;
+      return [
+        group.url ? "Context" : playerQueueSource === "spotify" ? "Spotify" : "ListenLab",
+        `${group.tracks.length} ${group.tracks.length === 1 ? "track" : "tracks"}`,
+        activeInGroup ? `track ${activeQueueCursor - groupStartIndex + 1}` : null,
+      ].filter(Boolean).join(" · ");
+    };
+    const renderHomeQueueTrackRow = (track: PlayerQueueTrack, index: number, bookmarkContext: TrackBookmarkContext | null = null) => {
+      const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
+      const isLoopedQueueTrack = playerTrackLoopEnabled && isCurrentQueueTrack;
+      const isPausedQueueTrack = queuePausedCursor === index && isCurrentQueueTrack && playerDisplayPaused;
+      const isUpNextQueueTrack = !playerTrackLoopEnabled && hasActiveQueueCursor && index === activeQueueCursor + 1;
+      const isQueueDimmedByTrackLoop = playerTrackLoopEnabled && !isCurrentQueueTrack;
+      const isPlayedQueueTrack = playerQueueSource === "listenlab" && playerQueuePlayedKeys.has(queueTrackIdentity(track) ?? "");
+      const isBookmarkedQueueTrack = trackIsBookmarked(track);
+      return (
+        <div
+          className={`player-recent-row player-queue-row${playerQueueOrganizeMode ? " player-queue-row-organizing" : ""}${playerQueueDragIndex === index ? " player-queue-row-dragging" : ""}${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack || isPausedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
+          data-player-queue-role={isUpNextQueueTrack ? "up-next" : (isCurrentQueueTrack ? "current" : undefined)}
+          draggable={playerQueueOrganizeMode}
+          key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
+          onDragEnd={() => setPlayerQueueDragIndex(null)}
+          onDragOver={(event) => {
+            if (playerQueueOrganizeMode) {
+              event.preventDefault();
+            }
+          }}
+          onDragStart={() => setPlayerQueueDragIndex(index)}
+          onDrop={(event) => {
+            event.preventDefault();
+            if (playerQueueDragIndex != null) {
+              moveQueueTrack(playerQueueDragIndex, index);
+              setPlayerQueueDragIndex(null);
+            }
+          }}
+        >
+          {playerQueueOrganizeMode ? (
+            <button aria-label={`Remove ${track.name} from queue`} className="player-queue-remove-button" onClick={() => removeQueueTrackAtIndex(index)} type="button">X</button>
+          ) : null}
+          {playerQueueOrganizeMode ? (
+            <span className="player-queue-cover-button player-queue-cover-static" aria-hidden="true">
+              {track.image ? (
+                <img alt="" className="player-recent-cover" src={track.image} />
+              ) : (
+                <span className="player-recent-cover player-recent-cover-fallback">{track.name.slice(0, 1).toUpperCase()}</span>
+              )}
+            </span>
+          ) : (
+            <button aria-label={`Play ${track.name}`} className="player-queue-cover-button" disabled={!track.uri} onClick={() => void playQueueTrackAtIndex(index)} type="button">
+              {track.image ? (
+                <img alt="" className="player-recent-cover" src={track.image} />
+              ) : (
+                <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">{track.name.slice(0, 1).toUpperCase()}</span>
+              )}
+              <span className="player-queue-cover-play" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M8 5.5v13l10-6.5-10-6.5Z" />
+                </svg>
+              </span>
+            </button>
+          )}
+          {playerQueueOrganizeMode ? (
+            <div className="player-recent-copy player-queue-drag-copy">
+              <span className="player-recent-track single-line-ellipsis">
+                {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
+                {queueTrackHasRelationTags(track) ? (
+                  <ReleaseSiblingBadge
+                    className="player-release-sibling-badge"
+                    sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
+                    duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
+                    clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
+                    clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
+                  />
+                ) : null}
+                {track.name}
+              </span>
+              <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
+            </div>
+          ) : (
+            <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
+              <span className="player-recent-track single-line-ellipsis">
+                {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
+                {queueTrackHasRelationTags(track) ? (
+                  <ReleaseSiblingBadge
+                    className="player-release-sibling-badge"
+                    sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
+                    duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
+                    clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
+                    clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
+                  />
+                ) : null}
+                {track.name}
+              </span>
+              <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
+            </button>
+          )}
+          <span className="player-queue-row-actions">
+            {!playerQueueOrganizeMode ? (
+              <button
+                aria-label={isBookmarkedQueueTrack ? `Bookmarked ${track.name}` : `Bookmark ${track.name}`}
+                aria-pressed={isBookmarkedQueueTrack}
+                className={`player-queue-bookmark-button${isBookmarkedQueueTrack ? " player-queue-bookmark-button-active" : ""}`}
+                onClick={() => toggleTrackBookmark(track, bookmarkContext)}
+                title={isBookmarkedQueueTrack ? "Bookmarked" : "Bookmark"}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20">
+                  <path d="M5 3.5h10v13l-5-3.2-5 3.2v-13Z" />
+                </svg>
+              </button>
+            ) : null}
+            {isPausedQueueTrack ? <span className="player-queue-status player-queue-status-next">Paused</span> : null}
+            {isCurrentQueueTrack && !isLoopedQueueTrack && !isPausedQueueTrack ? <span className="player-queue-status">Current</span> : null}
+            {isLoopedQueueTrack ? (
+              <button aria-label="Unloop current song" className="player-queue-status player-queue-status-next player-queue-loop-status" onClick={unloopCurrentTrack} title="Unloop" type="button">
+                <span className="player-queue-loop-status-default">Looped</span>
+                <span className="player-queue-loop-status-hover">Unloop</span>
+              </button>
+            ) : null}
+            {isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-next">{queuePauseAfterCurrentEnabled ? "Paused" : "Up next"}</span> : null}
+            {isPlayedQueueTrack && !isCurrentQueueTrack && !isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-played">Played</span> : null}
+          </span>
+        </div>
+      );
+    };
+
     return (
       <section className="info-card info-card-wide player-home-panel" aria-label="Playback controls">
         <div className="player-home-layout">
@@ -10823,10 +12164,32 @@ export function App() {
                 <span aria-hidden="true">{playerDisplayKnownLiked ? "★" : "☆"}</span>
               </button>
               <button
+                aria-label={trackIsBookmarked(playerDisplayTrack) ? "Bookmarked track" : "Bookmark track"}
+                aria-pressed={trackIsBookmarked(playerDisplayTrack)}
+                className={`secondary-button player-icon-button player-bookmark-control-button${trackIsBookmarked(playerDisplayTrack) ? " player-bookmark-control-button-active" : ""}`}
+                disabled={!playerDisplayTrack}
+                onClick={() => toggleTrackBookmark(playerDisplayTrack, activePlayerBookmarkContext())}
+                title={trackIsBookmarked(playerDisplayTrack) ? "Bookmarked" : "Bookmark"}
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20">
+                  <path d="M5 3.5h10v13l-5-3.2-5 3.2v-13Z" />
+                </svg>
+              </button>
+              <button
                 aria-label="Previous track"
                 className={`secondary-button player-icon-button${playerTransportReadOnly ? " player-control-readonly" : ""}`}
                 disabled={playerPreviousDisabled}
-                onClick={() => void movePlaybackQueue("previous")}
+                onClick={() => {
+                  if (consumeQueueSkipHold()) {
+                    return;
+                  }
+                  void movePlaybackQueue("previous");
+                }}
+                onPointerCancel={cancelQueueSkipHold}
+                onPointerDown={() => startQueueSkipHold("previous")}
+                onPointerLeave={cancelQueueSkipHold}
+                onPointerUp={cancelQueueSkipHold}
                 title={playerTransportTooltip ?? "Previous track"}
                 type="button"
               >
@@ -10848,7 +12211,16 @@ export function App() {
                 aria-label="Next track"
                 className={`secondary-button player-icon-button${playerTransportReadOnly ? " player-control-readonly" : ""}`}
                 disabled={playerNextDisabled}
-                onClick={() => void movePlaybackQueue("next")}
+                onClick={() => {
+                  if (consumeQueueSkipHold()) {
+                    return;
+                  }
+                  void movePlaybackQueue("next");
+                }}
+                onPointerCancel={cancelQueueSkipHold}
+                onPointerDown={() => startQueueSkipHold("next")}
+                onPointerLeave={cancelQueueSkipHold}
+                onPointerUp={cancelQueueSkipHold}
                 title={playerTransportTooltip ?? "Next track"}
                 type="button"
               >
@@ -11029,15 +12401,84 @@ export function App() {
 
           <aside className="player-recent-column player-queue-column player-home-queue-column" aria-label={playerQueueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
             <div className="player-recent-header">
-              {playerQueueContext?.url ? (
-                <h3>
-                  <a className="player-queue-title-link" href={playerQueueContext.url} rel="noreferrer" target="_blank">
-                    {playerQueueContext.label}
-                  </a>
-                </h3>
-              ) : (
-                <h3>{playerQueueContext?.label ?? "Queue"}</h3>
-              )}
+              <div className="player-queue-heading-menu">
+                <button
+                  aria-expanded={homeQueueHeaderMenuOpen}
+                  className="player-queue-heading-button"
+                  onClick={() => {
+                    setHomeQueueHeaderMenuOpen((current) => !current);
+                    setPlayerQueueSettingsOpen(false);
+                    setPlayerQueuePauseMenuOpen(false);
+                  }}
+                  type="button"
+                >
+                  Queue
+                </button>
+                {homeQueueHeaderMenuOpen ? (
+                  <div className="player-queue-settings-menu player-queue-context-menu">
+                    <div className="player-queue-context-actions" aria-label="Queue controls">
+                      <div className="player-queue-settings">
+                        <button
+                          aria-expanded={playerQueueSettingsOpen}
+                          aria-label="Queue settings"
+                          className={`player-queue-header-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                          onClick={() => {
+                            setPlayerQueueSettingsOpen((current) => !current);
+                            setPlayerQueuePauseMenuOpen(false);
+                          }}
+                          title="Queue settings"
+                          type="button"
+                        >
+                          <svg aria-hidden="true" viewBox="0 0 24 24">
+                            <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-2.6-1.5L14 2h-4l-.4 3a7.8 7.8 0 0 0-2.6 1.5l-2.4-1-2 3.5 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 2.6 1.5l.4 3h4l.4-3a7.8 7.8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" />
+                          </svg>
+                        </button>
+                        {playerQueueSettingsOpen ? (
+                          <div className="player-queue-settings-menu player-queue-context-settings-menu">
+                            <button onClick={() => {
+                              setPlayerQueueOrganizeMode((current) => !current);
+                              setPlayerQueueSettingsOpen(false);
+                            }} type="button">
+                              {playerQueueOrganizeMode ? "Done organizing" : "Organize"}
+                            </button>
+                            <button disabled={playerQueueTracks.length === 0} onClick={saveCurrentQueueSnapshot} type="button">
+                              Save current queue
+                            </button>
+                            <button className={liveReadOnlyMode ? "player-control-readonly" : undefined} disabled={playerQueueTracks.length === 0} onClick={() => void handleClearPlayerQueueClick()} type="button">
+                              Clear queue
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                    {homeQueueGroups.length > 0 ? homeQueueGroups.map((group, groupIndex) => {
+                      const groupStartIndex = homeQueueGroups.slice(0, groupIndex).reduce((total, item) => total + item.tracks.length, 0);
+                      const activeInGroup = hasActiveQueueCursor && activeQueueCursor >= groupStartIndex && activeQueueCursor < groupStartIndex + group.tracks.length;
+                      return (
+                        <button
+                          className={`player-queue-context-item${activeInGroup ? " player-queue-context-item-active" : ""}`}
+                          key={group.id}
+                          onClick={() => void jumpToQueueGroup(groupStartIndex, group.id)}
+                          type="button"
+                        >
+                          {group.imageUrl ? (
+                            <img alt="" className="player-queue-context-image" src={group.imageUrl} />
+                          ) : (
+                            <span className="player-queue-context-image player-queue-context-image-fallback" aria-hidden="true">{group.label.slice(0, 1).toUpperCase()}</span>
+                          )}
+                          <span className="player-queue-context-copy">
+                            <span className="single-line-ellipsis">{group.label}</span>
+                            <span className="single-line-ellipsis">{homeQueueGroupMeta(group, groupStartIndex)}</span>
+                          </span>
+                          {activeInGroup ? <span className="player-queue-current-dot" aria-label="Current queue context" /> : null}
+                        </button>
+                      );
+                    }) : (
+                      <span className="player-queue-context-empty">No queue contexts</span>
+                    )}
+                  </div>
+                ) : null}
+              </div>
               <div className="player-queue-header-actions">
                 {playerQueueLoading ? <span>Loading</span> : null}
                 <button
@@ -11067,36 +12508,6 @@ export function App() {
                     <path d="M16.8 3.9 21 8.1l-4.2 4.2-1.4-1.4 1.8-1.8h-1.6c-2 0-3.4.8-4.5 2.4l-1.2 1.8c-1.4 2.1-3.4 3.2-5.9 3.2H3v-2h1c1.9 0 3.3-.8 4.3-2.4l1.2-1.8c1.5-2.1 3.5-3.2 6.1-3.2h1.6l-1.8-1.8 1.4-1.4ZM3 7.5h1c2.1 0 3.7.8 5 2.5l-1.2 1.8C6.8 10.3 5.6 9.5 4 9.5H3v-2Zm9.7 5.9c.8 1 1.8 1.6 3.1 1.6h1.4l-1.8-1.8 1.4-1.4L21 16l-4.2 4.2-1.4-1.4 1.8-1.8h-1.4c-2 0-3.6-.8-4.8-2.3l1.1-1.7.6.4Z" />
                   </svg>
                 </button>
-                <div className="player-queue-settings">
-                  <button
-                    aria-expanded={playerQueueSettingsOpen}
-                    aria-label="Queue settings"
-                    className={`player-queue-header-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
-                    onClick={() => {
-                      setPlayerQueueSettingsOpen((current) => !current);
-                      setPlayerQueuePauseMenuOpen(false);
-                    }}
-                    title="Queue settings"
-                    type="button"
-                  >
-                    <svg aria-hidden="true" viewBox="0 0 24 24">
-                      <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-2.6-1.5L14 2h-4l-.4 3a7.8 7.8 0 0 0-2.6 1.5l-2.4-1-2 3.5 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 2.6 1.5l.4 3h4l.4-3a7.8 7.8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" />
-                    </svg>
-                  </button>
-                  {playerQueueSettingsOpen ? (
-                    <div className="player-queue-settings-menu">
-                      <button onClick={() => {
-                        setPlayerQueueOrganizeMode((current) => !current);
-                        setPlayerQueueSettingsOpen(false);
-                      }} type="button">
-                        {playerQueueOrganizeMode ? "Done organizing" : "Organize"}
-                      </button>
-                      <button className={liveReadOnlyMode ? "player-control-readonly" : undefined} disabled={playerQueueTracks.length === 0} onClick={() => void handleClearPlayerQueueClick()} type="button">
-                        Clear queue
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
               </div>
             </div>
             {playerQueueOrganizeMode ? (
@@ -11121,104 +12532,39 @@ export function App() {
               </div>
             ) : null}
             <div className="player-recent-list" ref={homeQueueListRef}>
-              {playerQueueTracks.map((track, index) => {
-                const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
-                const isLoopedQueueTrack = playerTrackLoopEnabled && isCurrentQueueTrack;
-                const isPausedQueueTrack = queuePausedCursor === index && isCurrentQueueTrack && playerDisplayPaused;
-                const isUpNextQueueTrack = !playerTrackLoopEnabled && hasActiveQueueCursor && index === activeQueueCursor + 1;
-                const isQueueDimmedByTrackLoop = playerTrackLoopEnabled && !isCurrentQueueTrack;
-                const isPlayedQueueTrack = playerQueueSource === "listenlab" && playerQueuePlayedKeys.has(queueTrackIdentity(track) ?? "");
+              {homeQueueGroups.map((group, groupIndex) => {
+                const groupStartIndex = homeQueueGroups.slice(0, groupIndex).reduce((total, item) => total + item.tracks.length, 0);
+                const groupEndIndex = groupStartIndex + group.tracks.length - 1;
+                const groupIsOpen = homeQueueOpenGroupIds.has(group.id);
+                const activeInGroup = hasActiveQueueCursor && activeQueueCursor >= groupStartIndex && activeQueueCursor <= groupEndIndex;
                 return (
-                  <div
-                    className={`player-recent-row player-queue-row${playerQueueOrganizeMode ? " player-queue-row-organizing" : ""}${playerQueueDragIndex === index ? " player-queue-row-dragging" : ""}${isCurrentQueueTrack ? " player-queue-row-current" : ""}${isUpNextQueueTrack || isLoopedQueueTrack || isPausedQueueTrack ? " player-queue-row-up-next" : ""}${isQueueDimmedByTrackLoop ? " player-queue-row-muted" : ""}`}
-                    data-player-queue-role={isUpNextQueueTrack ? "up-next" : (isCurrentQueueTrack ? "current" : undefined)}
-                    draggable={playerQueueOrganizeMode}
-                    key={`${track.uri ?? track.trackId ?? track.name}-${index}`}
-                    onDragEnd={() => setPlayerQueueDragIndex(null)}
-                    onDragOver={(event) => {
-                      if (playerQueueOrganizeMode) {
-                        event.preventDefault();
-                      }
-                    }}
-                    onDragStart={() => setPlayerQueueDragIndex(index)}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      if (playerQueueDragIndex != null) {
-                        moveQueueTrack(playerQueueDragIndex, index);
-                        setPlayerQueueDragIndex(null);
-                      }
-                    }}
-                  >
-                    {playerQueueOrganizeMode ? (
-                      <button aria-label={`Remove ${track.name} from queue`} className="player-queue-remove-button" onClick={() => removeQueueTrackAtIndex(index)} type="button">X</button>
-                    ) : null}
-                    {playerQueueOrganizeMode ? (
-                      <span className="player-queue-cover-button player-queue-cover-static" aria-hidden="true">
-                        {track.image ? (
-                          <img alt="" className="player-recent-cover" src={track.image} />
-                        ) : (
-                          <span className="player-recent-cover player-recent-cover-fallback">{track.name.slice(0, 1).toUpperCase()}</span>
-                        )}
-                      </span>
-                    ) : (
-                      <button aria-label={`Play ${track.name}`} className="player-queue-cover-button" disabled={!track.uri} onClick={() => void playQueueTrackAtIndex(index)} type="button">
-                        {track.image ? (
-                          <img alt="" className="player-recent-cover" src={track.image} />
-                        ) : (
-                          <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">{track.name.slice(0, 1).toUpperCase()}</span>
-                        )}
-                        <span className="player-queue-cover-play" aria-hidden="true">
-                          <svg viewBox="0 0 24 24">
-                            <path d="M8 5.5v13l10-6.5-10-6.5Z" />
-                          </svg>
+                  <div className="player-queue-group-wrap" key={group.id}>
+                    <div className="player-queue-group">
+                      <button
+                        aria-expanded={groupIsOpen}
+                        className="player-queue-group-header"
+                        onClick={() => setHomeQueueOpenGroupIds((current) => {
+                          const next = new Set(current);
+                          if (next.has(group.id)) {
+                            next.delete(group.id);
+                          } else {
+                            next.add(group.id);
+                          }
+                          return next;
+                        })}
+                        type="button"
+                      >
+                        <span className="player-queue-group-toggle" aria-hidden="true">{groupIsOpen ? "⌄" : "›"}</span>
+                        <span className="player-queue-group-copy">
+                          <span className="single-line-ellipsis">{group.label}</span>
+                          <span className="player-queue-group-meta single-line-ellipsis">{homeQueueGroupMeta(group, groupStartIndex)}</span>
                         </span>
+                        {activeInGroup ? <span className="player-queue-current-dot" aria-label="Current queue context" /> : null}
                       </button>
-                    )}
-                    {playerQueueOrganizeMode ? (
-                      <div className="player-recent-copy player-queue-drag-copy">
-                        <span className="player-recent-track single-line-ellipsis">
-                          {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                          {queueTrackHasRelationTags(track) ? (
-                            <ReleaseSiblingBadge
-                              className="player-release-sibling-badge"
-                              sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
-                              duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
-                              clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
-                              clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
-                            />
-                          ) : null}
-                          {track.name}
-                        </span>
-                        <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
-                      </div>
-                    ) : (
-                      <button className="player-recent-copy player-queue-copy-button" onClick={() => openQueuePlayerTrackDetails(track)} type="button">
-                        <span className="player-recent-track single-line-ellipsis">
-                          {queueTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
-                          {queueTrackHasRelationTags(track) ? (
-                            <ReleaseSiblingBadge
-                              className="player-release-sibling-badge"
-                              sourceCount={track.releaseTrackSourceCount ?? releaseSiblingSourceCountForTrackId(track.trackId)}
-                              duplicateSourceCount={track.releaseTrackDuplicateSourceCount ?? null}
-                              clusterCandidateType={track.releaseTrackClusterCandidateType ?? null}
-                              clusterRelationshipKind={track.releaseTrackClusterRelationshipKind ?? null}
-                            />
-                          ) : null}
-                          {track.name}
-                        </span>
-                        <span className="player-recent-artist single-line-ellipsis">{track.artists}</span>
-                      </button>
-                    )}
-                    {isPausedQueueTrack ? <span className="player-queue-status player-queue-status-next">Paused</span> : null}
-                    {isCurrentQueueTrack && !isLoopedQueueTrack && !isPausedQueueTrack ? <span className="player-queue-status">Current</span> : null}
-                    {isLoopedQueueTrack ? (
-                      <button aria-label="Unloop current song" className="player-queue-status player-queue-status-next player-queue-loop-status" onClick={unloopCurrentTrack} title="Unloop" type="button">
-                        <span className="player-queue-loop-status-default">Looped</span>
-                        <span className="player-queue-loop-status-hover">Unloop</span>
-                      </button>
-                    ) : null}
-                    {isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-next">{queuePauseAfterCurrentEnabled ? "Paused" : "Up next"}</span> : null}
-                    {isPlayedQueueTrack && !isCurrentQueueTrack && !isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-played">Played</span> : null}
+                    </div>
+                    {groupIsOpen ? group.tracks.map((track, groupTrackIndex) => (
+                      renderHomeQueueTrackRow(track, groupStartIndex + groupTrackIndex, bookmarkContextFromQueueGroup(group, groupTrackIndex))
+                    )) : null}
                   </div>
                 );
               })}
@@ -11230,6 +12576,16 @@ export function App() {
         <PlayerBottomDrawer
           activeTab={playerDrawerActiveTab}
           expanded={playerDrawerExpanded}
+          savedQueues={savedPlayerQueues}
+          trackBookmarks={trackBookmarks}
+          entityBookmarks={entityBookmarks}
+          onDeleteSavedQueue={deleteSavedPlayerQueue}
+          onDeleteBookmark={removeTrackBookmark}
+          onDeleteEntityBookmark={removeEntityBookmark}
+          onOpenBookmark={openTrackBookmarkContext}
+          onOpenEntityBookmark={openEntityBookmark}
+          onPlayBookmark={(action, bookmark) => void playTrackBookmark(action, bookmark)}
+          onRestoreSavedQueue={restoreSavedPlayerQueue}
           onTabChange={setPlayerDrawerActiveTab}
           onToggle={() => setPlayerDrawerExpanded((current) => !current)}
         />
@@ -11399,13 +12755,17 @@ export function App() {
       recording_release_track_ids: track.recording_release_track_ids ?? metadata.recording_release_track_ids,
     };
   };
+  const allTimeTopTrackSource = mergedTracksLoaded && mergedTracks.length > 0
+    ? mergedTracks
+    : (profile?.top_tracks ?? []);
   const allTimeTopTracks = useMemo(() => (
     sortedTracksForView(
       "tracksAllTime",
-      (profile?.top_tracks ?? []).map(mergeReleaseMetadataIntoTrack),
+      allTimeTopTrackSource.map(mergeReleaseMetadataIntoTrack),
       trackRankingMode,
     )
-  ), [profile?.top_tracks, releaseTrackMetadataById, trackRankingMode]);
+  ), [allTimeTopTrackSource, releaseTrackMetadataById, trackRankingMode]);
+  const allTimeTopTracksAvailableForDisplay = allTimeTopTracks.length > 0 || mergedTracksLoading || Boolean(profile?.top_tracks_available);
   const recentTopTracksAreSpotify = (tracks: RecentTrack[]) => {
     if (tracks.length === 0) {
       return false;
@@ -11997,7 +13357,20 @@ export function App() {
   const recordingMemberAlbumImageUrl = (member: RecordingTrackCandidateMember) => (
     recordingMemberPreferredAlbumVersion(member)?.image_url ?? member.album_image_urls?.find(Boolean) ?? null
   );
-  const variationSubtitleFromTitle = (title: string | null | undefined) => {
+  const variationSubtitleIsDisplayWorthy = (subtitle: string, options: { allowRemasterOnly?: boolean } = {}) => {
+    const normalized = subtitle.trim().replace(/\s+/g, " ");
+    return Boolean(
+      normalized
+      && (
+        options.allowRemasterOnly
+        || !/^(?:(?:\d{4}\s+)?remaster(?:ed)?|remaster(?:ed)?\s+\d{4})$/i.test(normalized)
+      ),
+    );
+  };
+  const variationSubtitleFromTitle = (
+    title: string | null | undefined,
+    options: { allowRemasterOnly?: boolean } = {},
+  ) => {
     const rawTitle = title?.trim();
     if (!rawTitle) {
       return null;
@@ -12010,7 +13383,7 @@ export function App() {
     for (const baseTitle of baseTitles) {
       if (rawTitle.toLocaleLowerCase() !== baseTitle.toLocaleLowerCase() && rawTitle.toLocaleLowerCase().startsWith(baseTitle.toLocaleLowerCase())) {
         const subtitle = rawTitle.slice(baseTitle.length).replace(/^[\s:–—-]+/, "").replace(/^\((.*)\)$/, "$1").trim();
-        if (subtitle) {
+        if (subtitle && variationSubtitleIsDisplayWorthy(subtitle, options)) {
           return subtitle;
         }
       }
@@ -13300,9 +14673,11 @@ export function App() {
               albumCatalogLookupStatus={albumCatalogLookupStatus}
               allTimeLikedMatchCount={allTimeLikedMatchCount}
               allTimeTopTracks={allTimeTopTracks}
+              allTimeTopTracksAvailableForDisplay={allTimeTopTracksAvailableForDisplay}
               allTimeTrackIdCount={allTimeTrackIdCount}
               analysisMode={analysisMode}
               appPage={appPage}
+              activePlaylistPlayback={activePlaylistPlayback}
               cachedLikedTracks={cachedLikedTracks}
               catalogBackfillAlbumTracklistPolicy={catalogBackfillAlbumTracklistPolicy}
               catalogBackfillCoverage={catalogBackfillCoverage}
@@ -13512,6 +14887,8 @@ export function App() {
             openAlbumWithArtistPreview={openAlbumWithArtistPreview}
             openArtistAlbumPreview={openArtistAlbumPreview}
             openRecordingCandidateReleaseTrack={openRecordingCandidateReleaseTrack}
+            openRecentTrackAlbumPreview={openRecentTrackAlbumPreview}
+            openRecentTrackArtistPreview={openRecentTrackArtistPreview}
             openRecentPlayerTrackDetails={openRecentPlayerTrackDetails}
             openReleaseSourceVersion={openReleaseSourceVersion}
             openSelectedAlbumArtistPreview={openSelectedAlbumArtistPreview}
@@ -13575,6 +14952,7 @@ export function App() {
             selectedPreviewHasReleaseSibling={selectedPreviewHasReleaseSibling}
             selectedPreviewListenedBreakdown={selectedPreviewListenedBreakdown}
             selectedPreviewListenedRangeLabel={selectedPreviewListenedRangeLabel}
+            selectedPreviewIsEntityBookmarked={selectedPreviewIsEntityBookmarked}
             selectedPreviewIsBookmarked={selectedPreviewIsBookmarked}
             selectedPreviewIsKnownLiked={selectedPreviewIsKnownLiked}
             selectedPreviewIsSharedArtistPage={selectedPreviewIsSharedArtistPage}
@@ -13602,9 +14980,10 @@ export function App() {
             selectedPreviewTrackGuestArtists={selectedPreviewTrackGuestArtists}
             selectedPreviewTrackMainArtists={selectedPreviewTrackMainArtists}
             selectedPreviewTrackOptimisticSummary={selectedPreviewTrackOptimisticSummary}
+            toggleSelectedPreviewEntityBookmark={toggleSelectedPreviewEntityBookmark}
+            toggleSelectedPreviewTrackBookmark={toggleSelectedPreviewTrackBookmark}
             setAlbumTrackLastSortMode={setAlbumTrackLastSortMode}
             setDetailOptionsOpen={setDetailOptionsOpen}
-            setLocalBookmarkedTrackById={setLocalBookmarkedTrackById}
             setLocalStarredAlbumById={setLocalStarredAlbumById}
             setLocalStarredTrackById={setLocalStarredTrackById}
             setSelectedPreview={setSelectedPreview}

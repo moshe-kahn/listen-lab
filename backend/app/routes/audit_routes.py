@@ -98,12 +98,13 @@ async def tracks_merged_aggregate(
     source_filter: str = "all",
     rank_by: str = "all_time",
 ) -> dict[str, Any]:
-    _require_local_data_session(request)
+    user_id = _require_local_data_session(request)
     return _merged_track_aggregate_payload(
         limit=limit,
         recent_window_days=recent_window_days,
         source_filter=source_filter,
         rank_by=rank_by,
+        user_id=user_id,
     )
 
 
@@ -115,12 +116,13 @@ async def debug_tracks_merged_aggregate(
     source_filter: str = "all",
     rank_by: str = "all_time",
 ) -> dict[str, Any]:
-    _require_local_data_session(request)
+    user_id = _require_local_data_session(request)
     return _merged_track_aggregate_payload(
         limit=limit,
         recent_window_days=recent_window_days,
         source_filter=source_filter,
         rank_by=rank_by,
+        user_id=user_id,
     )
 
 

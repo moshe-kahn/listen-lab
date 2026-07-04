@@ -263,10 +263,17 @@ The MVP succeeds when:
 - Improve local-mode image persistence and hydration so artist and album artwork survives mode switches more reliably.
 - Improve recent album ranking so 4-week and 6-month windows do not collapse to overly sparse results.
 - Later, group Activity `Liked` by `release_track_id` with clear wording because Spotify liked-track count and internal liked-release-track count can differ.
-- Later, inspect sibling/Track Family album appearances for current playback and consider a small related-album-art strip beside the home playback album art.
+- Continue extracting homepage playback state and local drawer persistence out of `App.tsx`; the current drawer/bookmark work is functional but still has too much orchestration in the top-level app component.
 - Use the Tracks page as the track-level formula comparison surface: canonical track rows/cards, side-by-side ranking formulas, and aggregate play metrics rather than event/session inspection.
 - Decide how canonical Spotify-backed winner selection should work when multiple `source_track` rows are merged into one `release_track`.
 - Review the ambiguous track-variant queue and tighten policy family-by-family instead of adding more hardcoded title rules.
 - Keep Listening Log event-oriented: timestamps, source provenance, sessions, merge details, and recent play inspection.
 - Continue improving the merged-event `Listening Log` page now that it reads from `v_fact_play_event_with_sources` and supports `All`, `API`, `History`, and `Both`.
 - Continue source Spotify catalog metadata enrichment for identity-critical track gaps, but respect worker cooldowns and keep backfill evidence-only.
+
+### History And Listening Log Accuracy TODO
+- Audit same-listen dedupe between `raw_listenlab_player_play`, Spotify recent API rows, and exported history rows so a ListenLab-finished play that later appears in Spotify recently played links to one `fact_play_event` instead of double-counting.
+- Add focused diagnostics in Listening Log for source provenance combinations, including `ListenLab`, `API`, `History`, and merged multi-source events.
+- Add a regression query/test around a just-finished ListenLab playback followed by a recent-play sync: expected result is one canonical fact with both player and recent links when track identity and timing match.
+- Review timestamp windows and track-id/version fallback rules for ListenLab-vs-Spotify recent matching, especially when Spotify reports a different release version of the same recording.
+- Keep play count semantics explicit: meaningful listens remain threshold-qualified, while `Last` can reflect the latest observed interaction when that is the intended UI surface.

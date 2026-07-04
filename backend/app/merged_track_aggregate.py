@@ -24,6 +24,10 @@ class MergedTrackAggregateItem(TypedDict, total=False):
     track_name: str | None
     artist_name: str | None
     album_name: str | None
+    image_url: str | None
+    url: str | None
+    is_liked: bool
+    liked_at: str | None
     play_count: int
     all_time_play_count: int
     recent_play_count: int
@@ -54,6 +58,7 @@ def _merged_track_aggregate_payload(
     recent_window_days: int,
     source_filter: str,
     rank_by: str = "all_time",
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     normalized_source_filter = source_filter if source_filter in {"all", "recent", "history", "both"} else "all"
     normalized_rank_by = rank_by if rank_by in {"all_time", "recent"} else "all_time"
@@ -64,6 +69,7 @@ def _merged_track_aggregate_payload(
         recent_window_days=bounded_recent_window_days,
         source_filter=normalized_source_filter,
         rank_by=normalized_rank_by,
+        user_id=user_id,
     )
     return {
         "limit": bounded_limit,
@@ -102,6 +108,7 @@ def get_merged_track_aggregate(
     source_filter: MergedTrackSourceFilter = "all",
     rank_by: MergedTrackRankBy = "all_time",
     as_of_iso: str | None = None,
+    user_id: str | None = None,
 ) -> MergedTrackAggregateResult:
     bounded_limit = max(1, int(limit))
     bounded_window_days = max(0, int(recent_window_days))
@@ -249,6 +256,66 @@ def get_merged_track_aggregate(
             (recent_cutoff_iso, bounded_limit),
         ).fetchall()
 
+        spotify_track_ids = sorted({
+            str(row[2] or "").strip()
+            for row in rows
+            if str(row[2] or "").strip()
+        })
+        liked_by_track_id: dict[str, dict[str, Any]] = {}
+        catalog_by_track_id: dict[str, dict[str, Any]] = {}
+        if spotify_track_ids:
+            placeholders = ",".join("?" for _ in spotify_track_ids)
+            catalog_rows = connection.execute(
+                f"""
+                SELECT
+                  spotify_track_id,
+                  album_id,
+                  json_extract(raw_json, '$.album.name') AS album_name,
+                  json_extract(raw_json, '$.album.images[0].url') AS image_url,
+                  json_extract(raw_json, '$.external_urls.spotify') AS url
+                FROM spotify_track_catalog
+                WHERE spotify_track_id IN ({placeholders})
+                """,
+                spotify_track_ids,
+            ).fetchall()
+            catalog_by_track_id = {
+                str(row[0]): {
+                    "album_id": row[1],
+                    "album_name": row[2],
+                    "image_url": row[3],
+                    "url": row[4],
+                }
+                for row in catalog_rows
+            }
+            if user_id:
+                liked_rows = connection.execute(
+                    f"""
+                    SELECT
+                      spotify_track_id,
+                      uri,
+                      album_spotify_id,
+                      album_name,
+                      album_image_url,
+                      liked_at,
+                      is_liked
+                    FROM spotify_liked_track_cache
+                    WHERE user_id = ?
+                      AND spotify_track_id IN ({placeholders})
+                    """,
+                    [str(user_id), *spotify_track_ids],
+                ).fetchall()
+                liked_by_track_id = {
+                    str(row[0]): {
+                        "uri": row[1],
+                        "album_id": row[2],
+                        "album_name": row[3],
+                        "image_url": row[4],
+                        "liked_at": row[5],
+                        "is_liked": bool(row[6]),
+                    }
+                    for row in liked_rows
+                }
+
     items: list[MergedTrackAggregateItem] = []
     for row in rows:
         (
@@ -289,16 +356,29 @@ def get_merged_track_aggregate(
             source_label = "recent"
         else:
             source_label = "history"
+        track_id = str(spotify_track_id or track_identity)
+        liked_metadata = liked_by_track_id.get(str(spotify_track_id or ""))
+        catalog_metadata = catalog_by_track_id.get(str(spotify_track_id or ""))
+        image_url = (
+            liked_metadata.get("image_url") if liked_metadata else None
+        ) or (
+            catalog_metadata.get("image_url") if catalog_metadata else None
+        )
+        url = catalog_metadata.get("url") if catalog_metadata else None
 
         items.append(
             {
                 "track_identity": str(track_identity),
-                "track_id": spotify_track_id or str(track_identity),
-                "uri": spotify_track_uri,
-                "album_id": spotify_album_id,
+                "track_id": track_id,
+                "uri": spotify_track_uri or (liked_metadata.get("uri") if liked_metadata else None),
+                "album_id": spotify_album_id or (liked_metadata.get("album_id") if liked_metadata else None) or (catalog_metadata.get("album_id") if catalog_metadata else None),
                 "track_name": track_name_raw,
                 "artist_name": artist_name_raw,
-                "album_name": album_name_raw,
+                "album_name": album_name_raw or (liked_metadata.get("album_name") if liked_metadata else None) or (catalog_metadata.get("album_name") if catalog_metadata else None),
+                "image_url": image_url,
+                "url": url,
+                "is_liked": bool(liked_metadata and liked_metadata.get("is_liked")),
+                "liked_at": liked_metadata.get("liked_at") if liked_metadata else None,
                 "play_count": play_count,
                 "all_time_play_count": play_count,
                 "recent_play_count": int(recent_play_count or 0),
@@ -340,6 +420,7 @@ def list_merged_track_aggregate(
     source_filter: MergedTrackSourceFilter = "all",
     rank_by: MergedTrackRankBy = "all_time",
     as_of_iso: str | None = None,
+    user_id: str | None = None,
 ) -> list[MergedTrackAggregateItem]:
     return get_merged_track_aggregate(
         limit=limit,
@@ -347,4 +428,5 @@ def list_merged_track_aggregate(
         source_filter=source_filter,
         rank_by=rank_by,
         as_of_iso=as_of_iso,
+        user_id=user_id,
     )["items"]

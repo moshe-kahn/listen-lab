@@ -34,6 +34,14 @@ type AlbumColumnProps = DashboardColumnBaseProps & {
 type PlaylistColumnProps = DashboardColumnBaseProps & {
   items: OwnedPlaylist[];
   paged?: boolean;
+  activePlaylistPlayback?: {
+    playlistId: string | null;
+    playlistName?: string | null;
+    trackId?: string | null;
+    trackUri?: string | null;
+    position?: number | null;
+    isPlaying: boolean;
+  } | null;
   onHidePlaylist?: (playlist: OwnedPlaylist) => void;
   onUnhidePlaylist?: (playlist: OwnedPlaylist) => void;
   onDeletePlaylist?: (playlist: OwnedPlaylist) => void;
@@ -200,6 +208,7 @@ export function DashboardPlaylistColumn({
   sectionPage,
   moveSectionPage,
   onSelectPreview,
+  activePlaylistPlayback = null,
   paged = true,
   onHidePlaylist,
   onUnhidePlaylist,
@@ -320,6 +329,7 @@ export function DashboardPlaylistColumn({
       <div className="item-list">
         {pageItems.map((playlist, index) => {
           const playlistId = playlist.playlist_id ?? spotifyPlaylistIdFromUrl(playlist.url);
+          const isActivePlaylist = Boolean(playlistId && activePlaylistPlayback?.playlistId === playlistId);
           const draftKey = playlistDraftKey(playlist, playlistId, index);
           const activeAction = openPlaylistAction?.key === draftKey ? openPlaylistAction.mode : null;
           const playlistDraft = playlistActionDrafts[draftKey] ?? draftFromCurrent(playlistId);
@@ -354,6 +364,13 @@ export function DashboardPlaylistColumn({
               tertiaryText={null}
               imageOverlay={(
                 <span className="card-playlist-image-hover">
+                  {isActivePlaylist ? (
+                    <span className={`card-playlist-now-playing${activePlaylistPlayback?.isPlaying ? " card-playlist-now-playing-active" : ""}`} aria-label={activePlaylistPlayback?.isPlaying ? "Playlist playing" : "Playlist paused"}>
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  ) : null}
                   {playlistOverlayRows.map((row, rowIndex) => (
                     <span
                       className={rowIndex >= fillerRows.length ? "card-playlist-hover-category" : undefined}
@@ -368,11 +385,17 @@ export function DashboardPlaylistColumn({
               muted={Boolean(playlist.hidden_by_user)}
               cardClassName={[
                 "dashboard-card-row-playlist",
+                isActivePlaylist ? "dashboard-card-row-playlist-now-playing" : null,
                 playlistEditMode ? "dashboard-card-row-playlist-editing" : null,
                 activeAction ? "dashboard-card-row-playlist-action-open" : null,
               ].filter(Boolean).join(" ")}
               previewKind="playlist"
               previewTrackUri={null}
+              previewOverrides={isActivePlaylist ? {
+                focusPlaylistPosition: activePlaylistPlayback?.position ?? null,
+                focusSpotifyTrackId: activePlaylistPlayback?.trackId ?? null,
+                trackUri: activePlaylistPlayback?.trackUri ?? null,
+              } : undefined}
               onSelectPreview={onSelectPreview}
               rowAction={playlistEditMode ? (
                 <span

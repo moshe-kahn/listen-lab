@@ -130,6 +130,43 @@ def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
+def _member_artist_keys(member: RecordingTrackCandidateMember) -> set[str]:
+    artist_keys = {
+        _normalize_text(artist.get("name"))
+        for artist in member.get("artists", [])
+        if _normalize_text(artist.get("name"))
+    }
+    if artist_keys:
+        return artist_keys
+    return {
+        key
+        for key in (_normalize_text(part) for part in str(member.get("artist") or "").replace(";", ",").split(","))
+        if key
+    }
+
+
+def _has_corroborated_artist_credit_bridge(members: list[RecordingTrackCandidateMember]) -> bool:
+    artist_sets = [_member_artist_keys(member) for member in members]
+    artist_sets = [artist_set for artist_set in artist_sets if artist_set]
+    if len(artist_sets) != len(members) or len(artist_sets) < 2:
+        return False
+    if not any(len(artist_set) > 1 for artist_set in artist_sets):
+        return False
+
+    connected_artist_keys = set(artist_sets[0])
+    remaining = artist_sets[1:]
+    changed = True
+    while changed:
+        changed = False
+        for artist_set in list(remaining):
+            if not (connected_artist_keys & artist_set):
+                continue
+            connected_artist_keys.update(artist_set)
+            remaining.remove(artist_set)
+            changed = True
+    return not remaining
+
+
 def _split_aggregate(value: Any) -> list[str]:
     if value is None:
         return []
@@ -538,6 +575,7 @@ def classify_recording_track_candidate_group(
     duration_delta_ms = max(durations) - min(durations) if len(durations) > 1 else None
     normalized_titles = {_base_title(member["title"], member["album"]) for member in sorted_members}
     artists = {_normalize_text(member["artist"]) for member in sorted_members if _normalize_text(member["artist"])}
+    has_corroborated_artist_bridge = _has_corroborated_artist_credit_bridge(sorted_members)
     album_contexts = {_album_context(_split_aggregate(member["album"].replace(", ", "|"))) for member in sorted_members if member["album"]}
     album_count = len({album for member in sorted_members for album in _split_aggregate(member["album"].replace(", ", "|"))})
 
@@ -546,7 +584,7 @@ def classify_recording_track_candidate_group(
     near_duration = duration_delta_ms is not None and duration_delta_ms <= NEAR_DURATION_MS
     review_duration = duration_delta_ms is None or duration_delta_ms <= REVIEW_DURATION_MS
     same_base_title = len(normalized_titles) == 1
-    same_artist = len(artists) <= 1
+    same_artist = len(artists) <= 1 or (same_base_title and has_corroborated_artist_bridge)
     has_recording_distinct_variant_mismatch = _has_recording_distinct_variant_mismatch(sorted_members)
     has_mixed_live_variant = _has_mixed_family_variant(sorted_members, "live")
     has_recording_variant = bool(RECORDING_VERSION_FAMILIES & families or album_contexts & {"single", "compilation", "soundtrack", "rerelease"})
@@ -561,7 +599,7 @@ def classify_recording_track_candidate_group(
     if same_base_title:
         why_grouped.append("normalized base title matches")
     if same_artist:
-        why_grouped.append("primary artist matches")
+        why_grouped.append("primary artist matches" if len(artists) <= 1 else "primary artists corroborated across release credits")
     if same_isrc:
         why_grouped.append("same ISRC")
     if near_duration:
@@ -1217,6 +1255,9 @@ def _build_candidate_items_from_rows(rows: list[sqlite3.Row]) -> list[dict[str, 
             if len(artist_signatures) > 1 and len(variant_signatures) > 1:
                 family_key = f"family:{base_title}:{'|'.join(sorted(component_artist_names))}"
                 add_candidate(family_key, component)
+            elif len(artist_signatures) > 1 and _has_corroborated_artist_credit_bridge(component):
+                bridge_key = f"artist_bridge:{base_title}:{'|'.join(sorted(component_artist_names))}"
+                add_candidate(bridge_key, component)
 
     items.sort(key=lambda item: (item["candidate_type"], item["safety_status"], item["candidate_key"]))
     return items
