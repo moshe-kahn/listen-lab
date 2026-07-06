@@ -5,6 +5,7 @@ import { LikedBadge } from "../common/LikedBadge";
 import { NewTrackBadge } from "../common/NewTrackBadge";
 import { PlaybackActionMenu, type PlaybackAction } from "../playback/PlaybackActionMenu";
 import { mergeRowsBySharedRecordingIdentity, recordingIdentityTokens } from "../../utils/recordingIdentity";
+import { spotifyUserDisplayName } from "../../utils/playlistDisplay";
 import { trackRelationTags } from "../../utils/trackRelationTags";
 import { displayTrackArtistName, displayTrackName } from "../../utils/trackDisplayName";
 
@@ -56,10 +57,13 @@ function playlistTrackPreviewKey(track: RecentTrack, rowTrackUri: string | null)
 }
 
 function playlistTrackAddedBy(track: RecentTrack) {
-  return track.playlist_added_by?.display_name
-    || track.playlist_added_by?.user_id
-    || track.playlist_added_by?.id
-    || "-";
+  if (!track.playlist_added_by) {
+    return "-";
+  }
+  return spotifyUserDisplayName(
+    track.playlist_added_by.display_name,
+    track.playlist_added_by.user_id || track.playlist_added_by.id,
+  );
 }
 
 export type PlaylistGroupMode = "none" | "artist" | "album" | "liked" | "listened" | "added_by";

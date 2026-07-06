@@ -91,6 +91,8 @@ Current note:
   - a local track metadata worker can run bounded one-shot or looped batches with cooldown, JSONL logging, and rolling request-budget protection
   - catalog enrichment remains evidence-only and must not create, merge, promote, or apply identity decisions
 - artist identity repair now has a backend-owned audit and safe repair flow for text-only history artists vs Spotify/provider-backed artists:
+  - artist ingest and repair share `backend/app/artist_resolution.py` and its resolver evidence labels
+  - resolver outcomes are `matched_existing`, `created_new_text_backed`, `created_new_provider_backed`, and `ambiguous_review`
   - automatic repair requires exact normalized artist name, exactly one provider-backed artist, text-only duplicates, and album/track or strict shared-album-title evidence
   - same-name-only, stylization, similar-name same-album, orphan placeholder, and multiple-provider groups remain review-only
   - raw composite history credits such as `Dave Harrington, Tim Mislock` are classified separately and must not be treated as similar-name same-album duplicates

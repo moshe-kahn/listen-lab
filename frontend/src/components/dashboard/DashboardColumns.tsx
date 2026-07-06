@@ -336,7 +336,6 @@ export function DashboardPlaylistColumn({
           const playlistCategoryLabels = playlistLists
             .filter((list) => list.playlistIds.includes(playlistId ?? ""))
             .map((list) => list.name);
-          const playlistSaveLabel = playlistSaveCountLabel(playlist.followers_total);
           const maxPlaylistOverlayRows = 4;
           const privateRows = playlist.is_public === false ? ["Private"] : [];
           const categoryRowLimit = Math.max(0, maxPlaylistOverlayRows - privateRows.length);
@@ -345,11 +344,7 @@ export function DashboardPlaylistColumn({
               ? `${label} +${playlistCategoryLabels.length - categoryRowLimit}`
               : label
           ));
-          const fillerRows = [
-            playlistTrackCountLabel(playlist.track_count),
-            playlistSaveLabel,
-          ].filter((label): label is string => Boolean(label)).slice(0, Math.max(0, maxPlaylistOverlayRows - privateRows.length - categoryRows.length));
-          const playlistOverlayRows = [...privateRows, ...fillerRows, ...categoryRows];
+          const playlistOverlayRows = [...privateRows, ...categoryRows];
           return (
             <DashboardListCard
               key={playlistId ?? `${playlist.name}-${index}-${section}`}
@@ -373,7 +368,7 @@ export function DashboardPlaylistColumn({
                   ) : null}
                   {playlistOverlayRows.map((row, rowIndex) => (
                     <span
-                      className={rowIndex >= fillerRows.length ? "card-playlist-hover-category" : undefined}
+                      className={rowIndex >= privateRows.length ? "card-playlist-hover-category" : undefined}
                       key={`${row}-${rowIndex}`}
                     >
                       {row}
@@ -598,7 +593,7 @@ export function DashboardPlaylistColumn({
                   {playlist.is_collaborative ? (
                     <span
                       className="card-playlist-collab-marker"
-                      title="collaborative playlist"
+                      title="Collaborative playlist"
                     >
                       👥
                     </span>

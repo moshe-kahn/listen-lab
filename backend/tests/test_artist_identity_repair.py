@@ -11,6 +11,16 @@ from backend.app.artist_identity_repair import (
     repair_composite_artist_credits,
     repair_duplicate_artists,
 )
+from backend.app.artist_resolution import (
+    EVIDENCE_COMPOSITE_CREDIT_CONTEXT,
+    EVIDENCE_SHARED_NORMALIZED_ALBUM_TITLE_WITH_PROVIDER_CONTEXT,
+    EVIDENCE_SHARED_RELEASE_ALBUM_ID,
+    EVIDENCE_SHARED_RELEASE_TRACK_ID,
+    REVIEW_REASON_AMBIGUOUS_TEXT_ONLY_ARTIST,
+    REVIEW_REASON_EVIDENCED_COMPOSITE_ARTIST_CREDIT,
+    REVIEW_REASON_MISSING_ALBUM_TRACK_EVIDENCE,
+    resolve_artist,
+)
 from backend.app.db import (
     _normalize_name,
     apply_pending_migrations,
@@ -191,6 +201,184 @@ class ArtistIdentityRepairTests(unittest.TestCase):
         self.assertEqual(2, by_id[text_artist_id]["track_artist_link_count"])
         self.assertEqual("spotify", by_id[spotify_artist_id]["source_artist_maps"][0]["source_name"])
 
+    def test_artist_resolver_reports_explicit_outcomes(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+
+            text_result = resolve_artist(
+                connection,
+                source_name="history_raw",
+                artist_name="Outcome Artist",
+            )
+            repeated_text_result = resolve_artist(
+                connection,
+                source_name="history_raw",
+                artist_name="Outcome Artist",
+            )
+            provider_result = resolve_artist(
+                connection,
+                source_name="spotify",
+                external_id="spotify-outcome-artist",
+                external_uri="spotify:artist:spotify-outcome-artist",
+                artist_name="Provider Outcome Artist",
+                raw_payload_json=json.dumps({"id": "spotify-outcome-artist", "name": "Provider Outcome Artist"}),
+            )
+            repeated_provider_result = resolve_artist(
+                connection,
+                source_name="spotify",
+                external_id="spotify-outcome-artist",
+                external_uri="spotify:artist:spotify-outcome-artist",
+                artist_name="Provider Outcome Artist",
+                raw_payload_json=json.dumps({"id": "spotify-outcome-artist", "name": "Provider Outcome Artist"}),
+            )
+
+        self.assertEqual("created_new_text_backed", text_result.outcome)
+        self.assertEqual("matched_existing", repeated_text_result.outcome)
+        self.assertEqual(text_result.artist_id, repeated_text_result.artist_id)
+        self.assertEqual("created_new_provider_backed", provider_result.outcome)
+        self.assertEqual("matched_existing", repeated_provider_result.outcome)
+        self.assertEqual(provider_result.artist_id, repeated_provider_result.artist_id)
+
+    def test_artist_resolver_reports_shared_track_promotion_evidence(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            text_artist_id = self._insert_artist(connection, "Shared Artist")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=text_artist_id,
+                source_name="history_raw",
+                external_id="history-shared-artist",
+                match_method="history_raw_text",
+            )
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES ('Shared Song', 'shared song')"
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', 0)",
+                (release_track_id, text_artist_id),
+            )
+
+            result = resolve_artist(
+                connection,
+                source_name="spotify",
+                external_id="spotify-shared-artist",
+                external_uri="spotify:artist:spotify-shared-artist",
+                artist_name="Shared Artist",
+                raw_payload_json=json.dumps({"id": "spotify-shared-artist", "name": "Shared Artist"}),
+                release_track_id=release_track_id,
+            )
+
+        self.assertEqual("matched_existing", result.outcome)
+        self.assertEqual(text_artist_id, result.artist_id)
+        self.assertEqual((EVIDENCE_SHARED_RELEASE_TRACK_ID,), result.evidence)
+
+    def test_artist_resolver_reports_review_reasons_for_unpromoted_provider_matches(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            text_artist_id = self._insert_artist(connection, "No Evidence Artist")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=text_artist_id,
+                source_name="history_raw",
+                external_id="history-no-evidence-artist",
+                match_method="history_raw_text",
+            )
+
+            missing_evidence_result = resolve_artist(
+                connection,
+                source_name="spotify",
+                external_id="spotify-no-evidence-artist",
+                external_uri="spotify:artist:spotify-no-evidence-artist",
+                artist_name="No Evidence Artist",
+                raw_payload_json=json.dumps({"id": "spotify-no-evidence-artist", "name": "No Evidence Artist"}),
+            )
+
+            ambiguous_artist_1 = self._insert_artist(connection, "Ambiguous Artist")
+            ambiguous_artist_2 = self._insert_artist(connection, "Ambiguous Artist")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=ambiguous_artist_1,
+                source_name="history_raw",
+                external_id="history-ambiguous-artist-1",
+                match_method="history_raw_text",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=ambiguous_artist_2,
+                source_name="history_raw",
+                external_id="history-ambiguous-artist-2",
+                match_method="history_raw_text",
+            )
+            ambiguous_result = resolve_artist(
+                connection,
+                source_name="spotify",
+                external_id="spotify-ambiguous-artist",
+                external_uri="spotify:artist:spotify-ambiguous-artist",
+                artist_name="Ambiguous Artist",
+                raw_payload_json=json.dumps({"id": "spotify-ambiguous-artist", "name": "Ambiguous Artist"}),
+            )
+
+        self.assertEqual("created_new_provider_backed", missing_evidence_result.outcome)
+        self.assertEqual(REVIEW_REASON_MISSING_ALBUM_TRACK_EVIDENCE, missing_evidence_result.review_reason)
+        self.assertNotEqual(text_artist_id, missing_evidence_result.artist_id)
+        self.assertEqual("created_new_provider_backed", ambiguous_result.outcome)
+        self.assertEqual(REVIEW_REASON_AMBIGUOUS_TEXT_ONLY_ARTIST, ambiguous_result.review_reason)
+
+    def test_artist_resolver_reports_composite_credit_review(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            brian_artist_id = self._insert_artist(connection, "Brian Eno")
+            byrne_artist_id = self._insert_artist(connection, "David Byrne")
+            self._insert_source_artist_map(
+                connection,
+                artist_id=brian_artist_id,
+                source_name="spotify",
+                external_id="spotify-brian-eno",
+                match_method="provider_identity",
+            )
+            self._insert_source_artist_map(
+                connection,
+                artist_id=byrne_artist_id,
+                source_name="spotify",
+                external_id="spotify-david-byrne",
+                match_method="provider_identity",
+            )
+            release_album_id = int(
+                connection.execute(
+                    "INSERT INTO release_album (primary_name, normalized_name) VALUES ('Composite Album', 'composite album')"
+                ).lastrowid
+            )
+            release_track_id = int(
+                connection.execute(
+                    "INSERT INTO release_track (primary_name, normalized_name) VALUES ('Composite Song', 'composite song')"
+                ).lastrowid
+            )
+            connection.execute("INSERT INTO album_track (release_album_id, release_track_id) VALUES (?, ?)", (release_album_id, release_track_id))
+            for billing_index, artist_id in enumerate([brian_artist_id, byrne_artist_id]):
+                connection.execute(
+                    "INSERT INTO album_artist (release_album_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', ?)",
+                    (release_album_id, artist_id, billing_index),
+                )
+                connection.execute(
+                    "INSERT INTO track_artist (release_track_id, artist_id, role, billing_index) VALUES (?, ?, 'primary', ?)",
+                    (release_track_id, artist_id, billing_index),
+                )
+
+            result = resolve_artist(
+                connection,
+                source_name="history_raw",
+                artist_name="Brian Eno, David Byrne",
+                release_album_id=release_album_id,
+                release_track_id=release_track_id,
+            )
+
+        self.assertEqual("ambiguous_review", result.outcome)
+        self.assertIsNone(result.artist_id)
+        self.assertEqual(REVIEW_REASON_EVIDENCED_COMPOSITE_ARTIST_CREDIT, result.review_reason)
+        self.assertEqual((EVIDENCE_COMPOSITE_CREDIT_CONTEXT,), result.evidence)
+
     def test_dry_run_repair_does_not_mutate_database(self) -> None:
         self._seed_safe_duplicate_group()
         before = self._counts()
@@ -325,8 +513,8 @@ class ArtistIdentityRepairTests(unittest.TestCase):
         self.assertEqual([spotify_artist_id, spotify_artist_id], source_map_artist_ids)
         self.assertEqual([spotify_artist_id, spotify_artist_id], album_artist_ids)
         self.assertEqual([spotify_artist_id, spotify_artist_id], track_artist_ids)
-        self.assertIn("shared_release_album_id", result["evidence_type_counts"])
-        self.assertIn("shared_release_track_id", result["evidence_type_counts"])
+        self.assertIn(EVIDENCE_SHARED_RELEASE_ALBUM_ID, result["evidence_type_counts"])
+        self.assertIn(EVIDENCE_SHARED_RELEASE_TRACK_ID, result["evidence_type_counts"])
 
     def test_shared_normalized_album_title_with_provider_context_repairs(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -372,7 +560,7 @@ class ArtistIdentityRepairTests(unittest.TestCase):
 
         self.assertEqual(1, len(result["safe_groups"]))
         self.assertEqual("exact_name_album_title_provider_context_safe_repair", result["safe_groups"][0]["category"])
-        self.assertEqual({"shared_normalized_album_title_with_provider_context": 1}, result["evidence_type_counts"])
+        self.assertEqual({EVIDENCE_SHARED_NORMALIZED_ALBUM_TITLE_WITH_PROVIDER_CONTEXT: 1}, result["evidence_type_counts"])
         with closing(sqlite3.connect(self.db_path)) as connection:
             artist_ids = [row[0] for row in connection.execute("SELECT id FROM artist ORDER BY id ASC").fetchall()]
             album_artist_ids = [
@@ -454,7 +642,7 @@ class ArtistIdentityRepairTests(unittest.TestCase):
         result = repair_duplicate_artists(dry_run=False)
 
         self.assertEqual(1, len(result["safe_groups"]))
-        self.assertIn("shared_release_track_id", result["evidence_type_counts"])
+        self.assertIn(EVIDENCE_SHARED_RELEASE_TRACK_ID, result["evidence_type_counts"])
 
     def test_two_provider_backed_artists_with_same_name_are_skipped(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:

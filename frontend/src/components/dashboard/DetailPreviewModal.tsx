@@ -274,6 +274,7 @@ type DetailPreviewModalProps = {
   openSelectedTrackArtistPreview: (artist?: TrackArtistEntry) => void;
   openPlaylistMembershipPreview: (membership: PlaylistMembership) => void;
   onAddSelectedTrackToPlaylists: (playlistIds: string[], removePlaylistIds: string[], newPlaylistName: string | null) => Promise<void>;
+  playlistAddRequestNonce: number;
   pausedTimeFlashOn: boolean;
   playbackDurationMs: number;
   playbackPaused: boolean;
@@ -435,6 +436,7 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     openSelectedTrackArtistPreview,
     openPlaylistMembershipPreview,
     onAddSelectedTrackToPlaylists,
+    playlistAddRequestNonce,
     pausedTimeFlashOn,
     playbackDurationMs,
     playbackPaused,
@@ -813,6 +815,13 @@ export function DetailPreviewModal(props: DetailPreviewModalProps) {
     setPlaylistAddInitialSelectedIds(membershipIds);
     setPlaylistAddError(null);
   }, [playlistAddOverlayOpen, selectedPreviewPlaylistMemberships]);
+  useEffect(() => {
+    if (selectedPreview?.kind !== "track" || playlistAddRequestNonce <= 0) {
+      return;
+    }
+    setPlaylistAddSortMode("recent");
+    setPlaylistAddOverlayOpen(true);
+  }, [playlistAddRequestNonce, selectedPreview]);
   useEffect(() => {
     if (!playlistAddOverlayOpen) {
       return;

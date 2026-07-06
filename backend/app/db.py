@@ -11,6 +11,7 @@ import re
 from typing import Any, Iterator
 
 from backend.app.config import get_settings
+from backend.app.artist_resolution import resolve_artist
 from backend.app.track_variant_policy import classify_label_families
 
 logger = logging.getLogger("listenlabs.db")
@@ -1682,6 +1683,85 @@ CREATE INDEX IF NOT EXISTS idx_playlist_category_member_playlist
     41: """
 ALTER TABLE spotify_playlist_cache ADD COLUMN followers_total INTEGER;
 """,
+    42: """
+CREATE TABLE IF NOT EXISTS personal_library_track_cache (
+  user_id TEXT NOT NULL,
+  spotify_track_id TEXT NOT NULL,
+  track_name TEXT NOT NULL,
+  artist_name TEXT,
+  album_name TEXT,
+  album_id TEXT,
+  image_url TEXT,
+  uri TEXT,
+  url TEXT,
+  duration_ms INTEGER,
+  artists_json TEXT,
+  strength TEXT NOT NULL CHECK (strength IN ('primary', 'contextual', 'potential', 'ephemeral')),
+  reasons_json TEXT NOT NULL,
+  play_count INTEGER NOT NULL DEFAULT 0,
+  first_played_at TEXT,
+  last_played_at TEXT,
+  playlist_count INTEGER NOT NULL DEFAULT 0,
+  liked_at TEXT,
+  is_liked INTEGER NOT NULL DEFAULT 0,
+  source_playlist_id TEXT,
+  source_playlist_name TEXT,
+  source_album_id TEXT,
+  source_album_name TEXT,
+  evidence_first_seen_at TEXT,
+  evidence_last_seen_at TEXT,
+  rule_version INTEGER NOT NULL,
+  rebuilt_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, spotify_track_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_personal_library_track_cache_user_strength
+  ON personal_library_track_cache(user_id, strength);
+
+CREATE INDEX IF NOT EXISTS idx_personal_library_track_cache_user_recent
+  ON personal_library_track_cache(user_id, last_played_at DESC, evidence_last_seen_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_personal_library_track_cache_user_name
+  ON personal_library_track_cache(user_id, track_name, artist_name);
+
+CREATE TABLE IF NOT EXISTS personal_library_rebuild_state (
+  user_id TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('missing', 'running', 'complete', 'error')),
+  rule_version INTEGER NOT NULL,
+  stale INTEGER NOT NULL DEFAULT 1,
+  started_at TEXT,
+  completed_at TEXT,
+  row_count INTEGER NOT NULL DEFAULT 0,
+  latest_error TEXT,
+  updated_at TEXT NOT NULL
+);
+""",
+    43: """
+ALTER TABLE personal_library_track_cache
+  ADD COLUMN release_track_id INTEGER;
+
+ALTER TABLE personal_library_track_cache
+  ADD COLUMN recording_representative_release_track_id INTEGER;
+
+CREATE INDEX IF NOT EXISTS idx_personal_library_track_cache_user_release
+  ON personal_library_track_cache(user_id, release_track_id);
+
+CREATE INDEX IF NOT EXISTS idx_personal_library_track_cache_user_recording_rep
+  ON personal_library_track_cache(user_id, recording_representative_release_track_id);
+""",
+    44: """
+ALTER TABLE source_track_play_count_cache
+  ADD COLUMN track_name TEXT;
+
+ALTER TABLE source_track_play_count_cache
+  ADD COLUMN artist_name TEXT;
+
+ALTER TABLE source_track_play_count_cache
+  ADD COLUMN album_name TEXT;
+
+ALTER TABLE source_track_play_count_cache
+  ADD COLUMN album_id TEXT;
+""",
 }
 
 
@@ -2068,7 +2148,7 @@ def insert_raw_play_event(
               offline,
               conn_country,
               spotify_track_uri,
-              fact_play_event.spotify_track_id,
+              spotify_track_id,
               track_name_raw,
               artist_name_raw,
               album_name_raw,
@@ -4187,128 +4267,6 @@ def _normalize_fallback_artist_text(raw: str | None) -> str:
     return canonical_parts[0]
 
 
-def _comma_artist_credit_parts(raw: str | None) -> list[tuple[str, str]]:
-    if raw is None or "," not in str(raw):
-        return []
-    seen: set[str] = set()
-    parts: list[tuple[str, str]] = []
-    raw_parts = str(raw).split(",")
-    for index, raw_part in enumerate(raw_parts):
-        display = " ".join(raw_part.strip().split())
-        if index == len(raw_parts) - 1:
-            display = re.sub(r"\s+(?:&|and)\s+friends\.?$", "", display, flags=re.IGNORECASE).strip()
-        normalized = _normalize_name(display)
-        if not display or not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        parts.append((display, normalized))
-    return parts
-
-
-def _normalized_history_artist_label(raw: str | None) -> str | None:
-    if raw is None:
-        return None
-    parts = _comma_artist_credit_parts(raw)
-    if len(parts) == 1:
-        return parts[0][0]
-    artist_label = " ".join(str(raw).strip().split())
-    return artist_label or None
-
-
-def _single_provider_artist_for_normalized_name(connection: sqlite3.Connection, normalized_name: str | None) -> int | None:
-    if not normalized_name:
-        return None
-    rows = connection.execute(
-        """
-        SELECT DISTINCT a.id
-        FROM artist a
-        JOIN source_artist_map sam
-          ON sam.artist_id = a.id
-        JOIN source_artist sa
-          ON sa.id = sam.source_artist_id
-         AND sa.source_name != 'history_raw'
-        WHERE COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
-        ORDER BY a.id ASC
-        """,
-        (normalized_name,),
-    ).fetchall()
-    return int(rows[0][0]) if len(rows) == 1 else None
-
-
-def _has_provider_artist_linked_to_context(
-    connection: sqlite3.Connection,
-    *,
-    normalized_name: str,
-    release_album_id: int | None,
-    release_track_id: int | None,
-) -> bool:
-    if release_track_id is not None:
-        row = connection.execute(
-            """
-            SELECT 1
-            FROM track_artist ta
-            JOIN artist a
-              ON a.id = ta.artist_id
-            JOIN source_artist_map sam
-              ON sam.artist_id = a.id
-            JOIN source_artist sa
-              ON sa.id = sam.source_artist_id
-             AND sa.source_name != 'history_raw'
-            WHERE ta.release_track_id = ?
-              AND COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
-            LIMIT 1
-            """,
-            (release_track_id, normalized_name),
-        ).fetchone()
-        if row is not None:
-            return True
-    if release_album_id is not None:
-        row = connection.execute(
-            """
-            SELECT 1
-            FROM album_artist aa
-            JOIN artist a
-              ON a.id = aa.artist_id
-            JOIN source_artist_map sam
-              ON sam.artist_id = a.id
-            JOIN source_artist sa
-              ON sa.id = sam.source_artist_id
-             AND sa.source_name != 'history_raw'
-            WHERE aa.release_album_id = ?
-              AND COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
-            LIMIT 1
-            """,
-            (release_album_id, normalized_name),
-        ).fetchone()
-        if row is not None:
-            return True
-    return False
-
-
-def _is_evidenced_composite_history_artist_credit(
-    connection: sqlite3.Connection,
-    *,
-    artist_name_raw: str | None,
-    release_album_id: int | None,
-    release_track_id: int | None,
-) -> bool:
-    parts = _comma_artist_credit_parts(artist_name_raw)
-    if len(parts) <= 1:
-        return False
-    full_normalized_name = _normalize_name(artist_name_raw)
-    if _single_provider_artist_for_normalized_name(connection, full_normalized_name) is not None:
-        return False
-    return all(
-        _has_provider_artist_linked_to_context(
-            connection,
-            normalized_name=normalized_part,
-            release_album_id=release_album_id,
-            release_track_id=release_track_id,
-        )
-        for _display_part, normalized_part in parts
-    )
-
-
 def _stable_text_key(*parts: str | None) -> str:
     payload = "|".join("" if part is None else str(part).strip() for part in parts)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -4539,26 +4497,6 @@ def _extract_spotify_artist_refs(
     ]
 
 
-def _create_artist_with_connection(
-    connection: sqlite3.Connection,
-    *,
-    artist_name: str | None,
-) -> int:
-    canonical_name = artist_name.strip() if artist_name and artist_name.strip() else "Unknown artist"
-    normalized_name = _normalize_name(canonical_name)
-    cursor = connection.execute(
-        """
-        INSERT INTO artist (
-          canonical_name,
-          sort_name
-        )
-        VALUES (?, ?)
-        """,
-        (canonical_name, normalized_name),
-    )
-    return int(cursor.lastrowid)
-
-
 def _artist_promotion_skip_signature(
     *,
     reason: str,
@@ -4711,160 +4649,6 @@ def query_artist_promotion_skip_log(limit: int = 100) -> dict[str, Any]:
     }
 
 
-def _find_safe_text_only_artist_for_spotify_promotion(
-    connection: sqlite3.Connection,
-    *,
-    artist_name: str | None,
-    release_album_id: int | None,
-    release_track_id: int | None,
-) -> int | None:
-    canonical_name = artist_name.strip() if artist_name and artist_name.strip() else None
-    if canonical_name is None:
-        return None
-    normalized_name = _normalize_name(canonical_name)
-    if not normalized_name:
-        return None
-
-    rows = connection.execute(
-        """
-        SELECT
-          a.id AS artist_id,
-          count(sam.id) AS source_map_count,
-          sum(CASE WHEN sa.source_name != 'history_raw' THEN 1 ELSE 0 END) AS provider_map_count
-        FROM artist a
-        LEFT JOIN source_artist_map sam
-          ON sam.artist_id = a.id
-        LEFT JOIN source_artist sa
-          ON sa.id = sam.source_artist_id
-        WHERE COALESCE(a.sort_name, lower(trim(a.canonical_name))) = ?
-        GROUP BY a.id
-        ORDER BY a.id ASC
-        """,
-        (normalized_name,),
-    ).fetchall()
-    text_only_artist_ids = [
-        int(row["artist_id"])
-        for row in rows
-        if int(row["source_map_count"] or 0) > 0 and int(row["provider_map_count"] or 0) == 0
-    ]
-    provider_artist_ids = [
-        int(row["artist_id"])
-        for row in rows
-        if int(row["provider_map_count"] or 0) > 0
-    ]
-    if provider_artist_ids:
-        logger.warning(
-            "event=spotify_artist_text_promotion_skipped reason=provider_backed_name_collision normalized_name=%s provider_artist_ids=%s text_only_artist_ids=%s",
-            normalized_name,
-            provider_artist_ids,
-            text_only_artist_ids,
-        )
-        record_artist_promotion_skip(
-            connection,
-            reason="provider_backed_name_collision",
-            normalized_name=normalized_name,
-            release_album_id=release_album_id,
-            release_track_id=release_track_id,
-            provider_artist_ids=provider_artist_ids,
-            text_only_artist_ids=text_only_artist_ids,
-        )
-        return None
-    if len(text_only_artist_ids) == 1:
-        artist_id = text_only_artist_ids[0]
-        has_track_evidence = release_track_id is not None and connection.execute(
-            """
-            SELECT 1
-            FROM track_artist
-            WHERE artist_id = ?
-              AND release_track_id = ?
-            LIMIT 1
-            """,
-            (artist_id, release_track_id),
-        ).fetchone() is not None
-        has_album_evidence = release_album_id is not None and connection.execute(
-            """
-            SELECT 1
-            FROM album_artist
-            WHERE artist_id = ?
-              AND release_album_id = ?
-            LIMIT 1
-            """,
-            (artist_id, release_album_id),
-        ).fetchone() is not None
-        if has_track_evidence or has_album_evidence:
-            return artist_id
-        has_album_title_provider_context = release_album_id is not None and connection.execute(
-            """
-            SELECT 1
-            FROM release_album provider_album
-            JOIN release_album text_album
-              ON text_album.id != provider_album.id
-             AND text_album.normalized_name = provider_album.normalized_name
-            JOIN album_artist text_album_artist
-              ON text_album_artist.release_album_id = text_album.id
-             AND text_album_artist.artist_id = ?
-            WHERE provider_album.id = ?
-              AND provider_album.normalized_name IS NOT NULL
-              AND (
-                EXISTS (
-                  SELECT 1
-                  FROM source_album_map provider_album_map
-                  JOIN source_album provider_source_album
-                    ON provider_source_album.id = provider_album_map.source_album_id
-                   AND provider_source_album.source_name != 'history_raw'
-                  WHERE provider_album_map.release_album_id = provider_album.id
-                )
-                OR EXISTS (
-                  SELECT 1
-                  FROM album_track provider_album_track
-                  JOIN source_track_map provider_track_map
-                    ON provider_track_map.release_track_id = provider_album_track.release_track_id
-                  JOIN source_track provider_source_track
-                    ON provider_source_track.id = provider_track_map.source_track_id
-                   AND provider_source_track.source_name != 'history_raw'
-                  WHERE provider_album_track.release_album_id = provider_album.id
-                )
-              )
-            LIMIT 1
-            """,
-            (artist_id, release_album_id),
-        ).fetchone() is not None
-        if has_album_title_provider_context:
-            return artist_id
-        logger.info(
-            "event=spotify_artist_text_promotion_skipped reason=missing_album_track_evidence normalized_name=%s artist_id=%s release_album_id=%s release_track_id=%s",
-            normalized_name,
-            artist_id,
-            release_album_id,
-            release_track_id,
-        )
-        record_artist_promotion_skip(
-            connection,
-            reason="missing_album_track_evidence",
-            normalized_name=normalized_name,
-            artist_id=artist_id,
-            release_album_id=release_album_id,
-            release_track_id=release_track_id,
-            text_only_artist_ids=[artist_id],
-        )
-        return None
-    if len(text_only_artist_ids) > 1:
-        logger.warning(
-            "event=spotify_artist_text_promotion_skipped reason=ambiguous_text_only_artist normalized_name=%s artist_ids=%s",
-            normalized_name,
-            text_only_artist_ids,
-        )
-        record_artist_promotion_skip(
-            connection,
-            reason="ambiguous_text_only_artist",
-            normalized_name=normalized_name,
-            release_album_id=release_album_id,
-            release_track_id=release_track_id,
-            text_only_artist_ids=text_only_artist_ids,
-        )
-    return None
-
-
 def _ensure_source_artist_mapping_with_connection(
     connection: sqlite3.Connection,
     *,
@@ -4875,96 +4659,19 @@ def _ensure_source_artist_mapping_with_connection(
     release_album_id: int | None = None,
     release_track_id: int | None = None,
 ) -> int:
-    existing = connection.execute(
-        """
-        SELECT
-          sa.id AS source_artist_id,
-          sam.artist_id AS artist_id
-        FROM source_artist sa
-        LEFT JOIN source_artist_map sam
-          ON sam.source_artist_id = sa.id
-        WHERE sa.source_name = 'spotify'
-          AND sa.external_id = ?
-        ORDER BY sam.id ASC, sa.id ASC
-        LIMIT 1
-        """,
-        (external_id,),
-    ).fetchone()
-    if existing is not None and existing["artist_id"] is not None:
-        return int(existing["artist_id"])
-
-    source_artist_id: int
-    if existing is None:
-        cursor = connection.execute(
-            """
-            INSERT INTO source_artist (
-              source_name,
-              external_id,
-              external_uri,
-              source_name_raw,
-              raw_payload_json
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            ("spotify", external_id, external_uri, artist_name, raw_payload_json),
-        )
-        source_artist_id = int(cursor.lastrowid)
-    else:
-        source_artist_id = int(existing["source_artist_id"])
-        connection.execute(
-            """
-            UPDATE source_artist
-            SET
-              external_uri = COALESCE(external_uri, ?),
-              source_name_raw = COALESCE(source_name_raw, ?),
-              raw_payload_json = COALESCE(raw_payload_json, ?),
-              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-            WHERE id = ?
-            """,
-            (external_uri, artist_name, raw_payload_json, source_artist_id),
-        )
-
-    promoted_artist_id = _find_safe_text_only_artist_for_spotify_promotion(
+    result = resolve_artist(
         connection,
+        source_name="spotify",
+        external_id=external_id,
+        external_uri=external_uri,
         artist_name=artist_name,
+        raw_payload_json=raw_payload_json,
         release_album_id=release_album_id,
         release_track_id=release_track_id,
     )
-    if promoted_artist_id is not None:
-        artist_id = promoted_artist_id
-        connection.execute(
-            """
-            UPDATE artist
-            SET
-              canonical_name = COALESCE(NULLIF(?, ''), canonical_name),
-              sort_name = COALESCE(NULLIF(?, ''), sort_name),
-              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-            WHERE id = ?
-            """,
-            (
-                artist_name.strip() if artist_name and artist_name.strip() else None,
-                _normalize_name(artist_name) if artist_name else None,
-                artist_id,
-            ),
-        )
-    else:
-        artist_id = _create_artist_with_connection(connection, artist_name=artist_name)
-    connection.execute(
-        """
-        INSERT OR IGNORE INTO source_artist_map (
-          source_artist_id,
-          artist_id,
-          match_method,
-          confidence,
-          status,
-          is_user_confirmed,
-          explanation
-        )
-        VALUES (?, ?, 'provider_identity', 1.0, 'accepted', 0, 'Exact Spotify artist ID backfill')
-        """,
-        (source_artist_id, artist_id),
-    )
-    return artist_id
+    if result.artist_id is None:
+        raise ValueError(f"Unable to resolve provider artist: source_name=spotify external_id={external_id!r}")
+    return result.artist_id
 
 
 def _ensure_history_text_artist_mapping_with_connection(
@@ -4974,93 +4681,14 @@ def _ensure_history_text_artist_mapping_with_connection(
     release_album_id: int | None = None,
     release_track_id: int | None = None,
 ) -> int | None:
-    if _is_evidenced_composite_history_artist_credit(
+    result = resolve_artist(
         connection,
-        artist_name_raw=artist_name_raw,
+        source_name="history_raw",
+        artist_name=artist_name_raw,
         release_album_id=release_album_id,
         release_track_id=release_track_id,
-    ):
-        logger.warning(
-            "event=history_text_artist_mapping_skipped reason=evidenced_composite_artist_credit artist_name_raw=%s release_album_id=%s release_track_id=%s",
-            artist_name_raw,
-            release_album_id,
-            release_track_id,
-        )
-        return None
-
-    artist_label = _normalized_history_artist_label(artist_name_raw)
-    if artist_label is None:
-        return None
-
-    external_id = _stable_text_key("history_raw_artist", artist_label)
-    existing = connection.execute(
-        """
-        SELECT
-          sa.id AS source_artist_id,
-          sam.artist_id AS artist_id
-        FROM source_artist sa
-        LEFT JOIN source_artist_map sam
-          ON sam.source_artist_id = sa.id
-        WHERE sa.source_name = 'history_raw'
-          AND sa.external_id = ?
-        ORDER BY sam.id ASC, sa.id ASC
-        LIMIT 1
-        """,
-        (external_id,),
-    ).fetchone()
-    if existing is not None and existing["artist_id"] is not None:
-        return int(existing["artist_id"])
-
-    provider_artist_id = _single_provider_artist_for_normalized_name(connection, _normalize_name(artist_label))
-
-    if existing is None:
-        cursor = connection.execute(
-            """
-            INSERT INTO source_artist (
-              source_name,
-              external_id,
-              external_uri,
-              source_name_raw,
-              raw_payload_json
-            )
-            VALUES (?, ?, NULL, ?, NULL)
-            """,
-            ("history_raw", external_id, artist_label),
-        )
-        source_artist_id = int(cursor.lastrowid)
-    else:
-        source_artist_id = int(existing["source_artist_id"])
-
-    if provider_artist_id is not None:
-        artist_id = provider_artist_id
-    else:
-        cursor = connection.execute(
-            """
-            INSERT INTO artist (
-              canonical_name,
-              sort_name
-            )
-            VALUES (?, ?)
-            """,
-            (artist_label, _normalize_name(artist_label)),
-        )
-        artist_id = int(cursor.lastrowid)
-    connection.execute(
-        """
-        INSERT OR IGNORE INTO source_artist_map (
-          source_artist_id,
-          artist_id,
-          match_method,
-          confidence,
-          status,
-          is_user_confirmed,
-          explanation
-        )
-        VALUES (?, ?, 'history_raw_text', 0.6, 'accepted', 0, 'Backfilled from raw artist_name_raw')
-        """,
-        (source_artist_id, artist_id),
     )
-    return artist_id
+    return result.artist_id
 
 
 def _ensure_source_album_mapping_with_connection(
@@ -6651,6 +6279,10 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
               play_count INTEGER NOT NULL DEFAULT 0,
               first_played_at TEXT,
               last_played_at TEXT,
+              track_name TEXT,
+              artist_name TEXT,
+              album_name TEXT,
+              album_id TEXT,
               updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             )
             """
@@ -6663,6 +6295,10 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
               play_count,
               first_played_at,
               last_played_at,
+              track_name,
+              artist_name,
+              album_name,
+              album_id,
               updated_at
             )
             WITH album_track_durations AS (
@@ -6684,6 +6320,10 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
                 fact_play_event.canonical_ended_at,
                 fact_play_event.canonical_ms_played,
                 fact_play_event.timing_source,
+                fact_play_event.track_name_canonical,
+                fact_play_event.artist_name_canonical,
+                fact_play_event.album_name_canonical,
+                fact_play_event.spotify_album_id,
                 COALESCE(recent.track_duration_ms, player.track_duration_ms, catalog.duration_ms, album_track_durations.duration_ms, 0) AS duration_ms
               FROM fact_play_event
               LEFT JOIN fact_play_event_recent_link recent_link
@@ -6793,16 +6433,49 @@ def refresh_source_track_play_count_cache(connection: sqlite3.Connection | None 
                 max(canonical_ended_at) AS last_played_at
               FROM base_events
               GROUP BY spotify_track_id
+            ),
+            latest_track_metadata AS (
+              SELECT
+                spotify_track_id,
+                NULLIF(trim(track_name_canonical), '') AS track_name,
+                NULLIF(trim(artist_name_canonical), '') AS artist_name,
+                NULLIF(trim(album_name_canonical), '') AS album_name,
+                NULLIF(trim(spotify_album_id), '') AS album_id
+              FROM (
+                SELECT
+                  base_events.*,
+                  row_number() OVER (
+                    PARTITION BY spotify_track_id
+                    ORDER BY
+                      CASE
+                        WHEN NULLIF(trim(COALESCE(track_name_canonical, '')), '') IS NOT NULL
+                          OR NULLIF(trim(COALESCE(artist_name_canonical, '')), '') IS NOT NULL
+                          OR NULLIF(trim(COALESCE(album_name_canonical, '')), '') IS NOT NULL
+                        THEN 0
+                        ELSE 1
+                      END,
+                      canonical_ended_at DESC,
+                      id DESC
+                  ) AS metadata_rank
+                FROM base_events
+              )
+              WHERE metadata_rank = 1
             )
             SELECT
               all_track_events.spotify_track_id,
               COALESCE(counted_track_totals.play_count, 0) AS play_count,
               counted_track_totals.first_played_at AS first_played_at,
               all_track_events.last_played_at AS last_played_at,
+              latest_track_metadata.track_name,
+              latest_track_metadata.artist_name,
+              latest_track_metadata.album_name,
+              latest_track_metadata.album_id,
               strftime('%Y-%m-%dT%H:%M:%fZ','now') AS updated_at
             FROM all_track_events
             LEFT JOIN counted_track_totals
               ON counted_track_totals.spotify_track_id = all_track_events.spotify_track_id
+            LEFT JOIN latest_track_metadata
+              ON latest_track_metadata.spotify_track_id = all_track_events.spotify_track_id
             """
         )
         row_count = int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)

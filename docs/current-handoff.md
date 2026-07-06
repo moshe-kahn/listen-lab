@@ -16,19 +16,59 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- pending commit: homepage Saved/Charts/Discover dashboard layout and docs
+- pending commit: personal Library/Catalog, enhanced playlist navigation, and player/home UI organization
 
 Worktree at handoff:
-- current dirty scope is intentionally narrow and is the commit candidate:
-  - homepage playback/dashboard UI moves Saved out of the player into a standalone full-width box
-  - Saved uses a left navigation/filter/sort rail and a right item pane with four visible rows before scrolling
-  - Discover is a separate full-width box at the bottom
-  - former `Top` label is now `Charts`, grouping tracks/artists/albums
-  - dashboard and sticky top-bar order is Saved, Activity, Playlists, Charts, Discover
-  - docs updated for this UI batch
+- current dirty scope is the commit candidate:
+  - personal Library/Catalog cache, search, overlay, strength/reason model, and unavailable-track hiding
+  - homepage Saved playlists navigation and full playlist overlay with category/editor/size/sort/group controls
+  - playlist contributor/owner display cleanup, including opaque Spotify user ids rendered as `Unknown`
+  - player top-bar link, player layout boxes, queue/album/playlist membership organization, and plus/minus action row
+  - `Charts` label changed to `Vault` in the top/header surfaces
+  - artist identity resolver centralization and related docs
+  - docs updated for this batch
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. `frontend/src/App.tsx` is currently about 15,032 lines / 681,959 bytes. Future UI work should extract focused components and local-storage helpers instead of growing `App.tsx` further.
+
+## Latest Completed: Personal Library And Playlist Navigation
+
+Backend:
+- Added personal Library/Catalog support in `backend/app/library.py`.
+- Library entries are derived from liked/saved items, owned playlists, observed listening, followed playlists, cached Spotify track catalog rows, and cached album tracklist context.
+- Library strength levels are `primary`, `contextual`, `potential`, and `ephemeral`.
+  - one-off / very low-listen observations are ephemeral/contextual instead of primary
+  - followed playlists are potential unless favorite/liked category rules promote them
+  - owned playlists can make tracks primary
+- Metadata-empty unavailable tracks with no listening evidence are hidden from default library results.
+- Library search returns mixed track/artist/album/playlist result sets plus track dedupe/version metadata.
+- Playlist contributor summaries are derived from cached playlist track `added_by` data.
+
+Frontend:
+- Library now has a homepage search surface plus a full overlay.
+- Library overlay supports mixed `All` results, track/artist/album/playlist tabs, result counts, sort, strength tags, and combined-version popups for tracks.
+- Playlist navigation moved into the Saved box and a full playlist overlay; the old separate home playlist box can be removed.
+- Playlist category navigation supports all/categories/uncategorized/hidden, multi-select check behavior, edit mode, and SQL-backed category membership.
+- Playlist filters now support editor selection, public/private toggles for yours/collabs, track-count size filters, sort, and grouping by editor/category/track count.
+- Saved home playlist grouping and the full overlay share owner/editor display cleanup. Opaque Spotify owner ids such as `2254CC4L33TLFTXQQ437ZPVYI` render as `Unknown`.
+- Playlist overlay backdrop now covers the viewport and locks page scroll while open.
+- Player/home UI was reorganized:
+  - top nav includes Player and Saved/Library/Vault ordering work
+  - player sections are boxed consistently
+  - album and playlist membership context is shown near track navigation
+  - plus/minus action row replaces separate star/bookmark/loop buttons
+
+Docs updated:
+- `docs/reference/drafts/library-personal-catalog-plan.md`
+- `docs/reference/drafts/entity-model-draft.md`
+- `docs/reference/raw-ingest.md`
+- `docs/overview/context.md`
+- `docs/current-handoff.md`
+
+Latest checks:
+- `./.venv/bin/python -m unittest backend.tests.test_personal_library backend.tests.test_artist_identity_repair` passed, 37 tests.
+- `cd frontend && npm run build` passed; existing large-chunk warning remains.
+- `git diff --check` passed.
 
 ## Latest Completed: Playlist Tracklists And Album Overlay
 
@@ -211,39 +251,25 @@ Latest checks:
 
 ## Immediate Next Task
 After this commit, restart backend, hard refresh, and manually QA:
-- Drive soundtrack album overlay:
-  - tracks with skip/preview-only history show `Last` but `listens=0`
-  - `Nightcall`, `Under Your Spell`, `A Real Hero`, `Oh My Love`, and `Tick of the Clock` show recording-level listens in recording view
-  - release view still shows exact-source history
-- Playlist overlay:
-  - paginated tracklists load additional pages from `offset` / `next_offset`
-  - all user playlists are categorized (`created`, `private`, `collaborative`, `added`)
-  - opening a playlist after cold start uses cache if present and Spotify fallback if missing
-  - background playlist index fills `spotify_playlist_track_cache` without blocking page load
-  - `In playlists` appears on track overlays after the background index has cached memberships
-  - clicking an `In playlists` row opens the playlist overlay and highlights the exact cached occurrence
-  - collaborative playlists show `Added by` and `Added` columns when Spotify returns those fields
-  - playlists by followed Spotify users show a filled star; non-followed/unknown owners show no empty star
-- Player dashboard:
-  - Saved panel, Charts group, Discover box, and home album appearance strip render correctly after hard refresh
-  - sticky top bar order matches page order: Saved, Activity, Playlists, Charts, Discover
-  - saved queue restore preserves grouped queue contexts and active cursor
-  - track/entity bookmarks survive refresh, open the expected overlay, and remove cleanly
-  - long-press next/previous jumps between queued contexts without breaking normal click skip behavior
-- Activity updates immediately after recent sync inserts rows.
-- KID A / Amnesiac / KID A MNESIA edition switching:
-  - Kid A shows Kid A + Extended Edition only.
-  - Amnesiac shows Amnesiac + Extended Edition only.
-  - KID A MNESIA shows Kid A + Amnesiac + Extended Edition.
-  - Kid A -> Extended jumps to Disc 1.
-  - Amnesiac -> Extended jumps to Disc 2.
-  - Extended -> Kid A or Amnesiac does not force a stale disc jump.
-  - disc labels are Kid A, Amnesiac, and Extra Content.
-- Artist preview:
-  - artist image appears beside artist name at top.
-  - All Tracks appears before Albums / Appears On.
-  - artist tracks open normal track detail.
-- album rows missing cached tracklists may still be absent from All Tracks.
+- Library:
+  - homepage Library search and full overlay open/close behavior
+  - default mixed `All` results include tracks/artists/albums/playlists with correct counts
+  - track versions popup appears only for combined track variants
+  - metadata-empty unavailable tracks stay hidden by default
+- Saved playlists:
+  - category rail all/category/uncategorized/hidden behavior
+  - editor dropdown counts update after category changes
+  - public/private toggles show only for yours/collabs
+  - size filter, sort, and grouping work in home box and overlay
+  - grouping by editor renders opaque Spotify owner ids as `Unknown`
+  - playlist overlay covers the viewport and outside scroll does not move the page
+- Player:
+  - top bar routes to Player/Saved/Library/Vault correctly
+  - queue height and player boxes remain stable across viewport sizes
+  - album + playlist membership context appears for the current track when cached
+  - plus/minus action row opens expected actions
+- Artist identity:
+  - existing duplicate audit/repair tests still pass after resolver centralization
 
 ## Latest Completed: Play-Count Cache Last/Count Semantics
 The user clarified that tracklist `Last` should mean last observed interaction, while the adjacent listen count should indicate meaningful/qualified listens.

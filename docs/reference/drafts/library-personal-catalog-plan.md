@@ -32,8 +32,13 @@ Use these strength levels:
 - Favorite followed playlist tracks are `contextual`, not `primary`.
 - Normal followed/added playlist tracks are `potential`.
 - Own-playlist tracks are `primary` because the user intentionally placed them there.
+- Metadata-empty unavailable tracks with no listening evidence are hidden from the default Library cache.
 - Album-neighbor rows are included only when the album tracklist is already cached; v1 does not crawl Spotify to complete Library.
 - Spotify-wide Catalog remains search/backfill only, not scrollable and not inserted into Library unless evidence makes it personal.
+
+## Short-Term Todo
+
+- Add an explicit show/hide control for unavailable tracks, including metadata-empty playlist items and tracks Spotify can identify but no longer play.
 
 ## Test Plan
 

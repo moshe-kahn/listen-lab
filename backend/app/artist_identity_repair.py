@@ -8,6 +8,14 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from backend.app.db import _normalize_name, sqlite_connection
+from backend.app.artist_resolution import (
+    EVIDENCE_RECONCILED_SOURCE_ALBUM,
+    EVIDENCE_RECONCILED_SOURCE_TRACK,
+    EVIDENCE_SHARED_NORMALIZED_ALBUM_TITLE_WITH_PROVIDER_CONTEXT,
+    EVIDENCE_SHARED_RELEASE_ALBUM_ID,
+    EVIDENCE_SHARED_RELEASE_TRACK_ID,
+    IDENTITY_EVIDENCE_TYPES,
+)
 
 
 TEXT_ONLY_SOURCE_NAMES = {"history_raw"}
@@ -492,7 +500,7 @@ def _classify_exact_name_group(connection: sqlite3.Connection, group: dict[str, 
 
     evidence_types = sorted({item["type"] for items in evidence_by_duplicate.values() for item in items})
     has_identity_evidence = any(
-        evidence_type in {"shared_release_album_id", "shared_release_track_id", "reconciled_source_album", "reconciled_source_track"}
+        evidence_type in IDENTITY_EVIDENCE_TYPES
         for evidence_type in evidence_types
     )
     category = (
@@ -561,7 +569,7 @@ def _shared_release_album_evidence(connection: sqlite3.Connection, canonical_art
     ).fetchall()
     return [
         {
-            "type": "shared_release_album_id",
+            "type": EVIDENCE_SHARED_RELEASE_ALBUM_ID,
             "release_album_id": int(row["release_album_id"]),
             "album_name": row["primary_name"],
             "normalized_album_title": row["normalized_name"],
@@ -591,7 +599,7 @@ def _shared_release_track_evidence(connection: sqlite3.Connection, canonical_art
     ).fetchall()
     return [
         {
-            "type": "shared_release_track_id",
+            "type": EVIDENCE_SHARED_RELEASE_TRACK_ID,
             "release_track_id": int(row["release_track_id"]),
             "track_name": row["primary_name"],
             "normalized_track_title": row["normalized_name"],
@@ -633,7 +641,7 @@ def _reconciled_source_album_evidence(connection: sqlite3.Connection, canonical_
     ).fetchall()
     return [
         {
-            "type": "reconciled_source_album",
+            "type": EVIDENCE_RECONCILED_SOURCE_ALBUM,
             "release_album_id": int(row["release_album_id"]),
             "album_name": row["primary_name"],
             "text_source_album_id": row["text_source_album_id"],
@@ -677,7 +685,7 @@ def _reconciled_source_track_evidence(connection: sqlite3.Connection, canonical_
     ).fetchall()
     return [
         {
-            "type": "reconciled_source_track",
+            "type": EVIDENCE_RECONCILED_SOURCE_TRACK,
             "release_track_id": int(row["release_track_id"]),
             "track_name": row["primary_name"],
             "text_source_track_id": row["text_source_track_id"],
@@ -738,7 +746,7 @@ def _shared_normalized_album_title_provider_context_evidence(
     ).fetchall()
     return [
         {
-            "type": "shared_normalized_album_title_with_provider_context",
+            "type": EVIDENCE_SHARED_NORMALIZED_ALBUM_TITLE_WITH_PROVIDER_CONTEXT,
             "normalized_album_title": row["normalized_album_title"],
             "text_release_album_id": int(row["text_release_album_id"]),
             "text_album_name": row["text_album_name"],

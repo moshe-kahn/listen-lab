@@ -16,6 +16,11 @@ import type {
   IdentityAuditSavedSubmissionListResponse,
   IdentityAuditSavedSubmissionReadResponse,
   IdentityAuditSubmissionDryRunResponse,
+  LibraryKind,
+  LibraryStatusResponse,
+  LibraryStrength,
+  LibraryTracksResponse,
+  LibraryRebuildResponse,
   LikedTracksResponse,
   ListeningLogResponse,
   LikedTracksSyncResponse,
@@ -125,6 +130,103 @@ export async function fetchAllLikedTracks(pageLimit: number = 200): Promise<Like
       metadata,
     };
   }
+
+export async function fetchLibraryStatus(): Promise<LibraryStatusResponse> {
+  const response = await fetch(`${apiBaseUrl}/me/library/status`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    let detail = "Failed to load Library status.";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      detail = payload.detail || detail;
+    } catch {
+      // Keep fallback detail.
+    }
+    throw new Error(`Library Status (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as LibraryStatusResponse;
+}
+
+export async function fetchLibraryTracks(params: {
+  strength?: LibraryStrength | "all";
+  q?: string;
+  sort?: "recent" | "name" | "listen_count" | "playlist_count";
+  limit?: number;
+  offset?: number;
+} = {}): Promise<LibraryTracksResponse> {
+  const searchParams = new URLSearchParams({
+    strength: params.strength ?? "all",
+    q: params.q ?? "",
+    sort: params.sort ?? "recent",
+    limit: String(params.limit ?? 50),
+    offset: String(params.offset ?? 0),
+  });
+  const response = await fetch(`${apiBaseUrl}/me/library/tracks?${searchParams.toString()}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    let detail = "Failed to load Library.";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      detail = payload.detail || detail;
+    } catch {
+      // Keep fallback detail.
+    }
+    throw new Error(`Library (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as LibraryTracksResponse;
+}
+
+export async function fetchLibraryItems(params: {
+  kind?: LibraryKind;
+  strength?: LibraryStrength | "all";
+  q?: string;
+  sort?: "recent" | "name" | "listen_count" | "playlist_count";
+  limit?: number;
+  offset?: number;
+} = {}): Promise<LibraryTracksResponse> {
+  const searchParams = new URLSearchParams({
+    kind: params.kind ?? "all",
+    strength: params.strength ?? "all",
+    q: params.q ?? "",
+    sort: params.sort ?? "recent",
+    limit: String(params.limit ?? 50),
+    offset: String(params.offset ?? 0),
+  });
+  const response = await fetch(`${apiBaseUrl}/me/library/items?${searchParams.toString()}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    let detail = "Failed to load Library.";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      detail = payload.detail || detail;
+    } catch {
+      // Keep fallback detail.
+    }
+    throw new Error(`Library (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as LibraryTracksResponse;
+}
+
+export async function postLibraryRebuild(): Promise<LibraryRebuildResponse> {
+  const response = await fetch(`${apiBaseUrl}/me/library/rebuild`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    let detail = "Failed to rebuild Library.";
+    try {
+      const payload = (await response.json()) as { detail?: string };
+      detail = payload.detail || detail;
+    } catch {
+      // Keep fallback detail.
+    }
+    throw new Error(`Library Rebuild (${response.status}): ${detail}`);
+  }
+  return (await response.json()) as LibraryRebuildResponse;
+}
 
 export async function fetchLikedTracksContains(spotifyTrackIds: string[]): Promise<{ items: Record<string, boolean> }> {
   const response = await fetch(`${apiBaseUrl}/me/liked-tracks/contains`, {

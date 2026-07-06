@@ -62,6 +62,13 @@ from backend.app.db import (
     upsert_spotify_follow_states,
 )
 from backend.app.history_analysis import get_history_signature, load_history_insights
+from backend.app.library import (
+    LIBRARY_STRENGTHS,
+    list_personal_library_items,
+    list_personal_library_tracks,
+    personal_library_status,
+    rebuild_personal_library,
+)
 from backend.app.play_event_projector import (
     audit_eligible_unlinked_history_rows,
     reconcile_fact_play_events_for_ingest_run,
@@ -75,6 +82,7 @@ from backend.app.playlist_index import (
     mark_playlist_sync_completed,
     mark_playlist_sync_started,
     playlist_categories_for_user,
+    playlist_contributor_summaries_for_user,
     playlist_index_status_for_user,
     playlist_memberships_for_track,
     playlist_needs_track_sync,
@@ -179,6 +187,7 @@ def _utc_now() -> str:
 app = FastAPI(title="ListenLab API", version="0.1.0")
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 PLAYLIST_INDEX_SYNC_USERS: set[str] = set()
+PERSONAL_LIBRARY_REBUILD_USERS: set[str] = set()
 LOCAL_PROFILE_PAYLOAD_CACHE_TTL_SECONDS = 15.0
 LOCAL_PROFILE_PAYLOAD_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 
@@ -624,6 +633,7 @@ async def _fetch_user_playlists(
 
     cached_playlist_metadata = cached_playlist_metadata_for_user(str(spotify_user_id))
     hidden_playlist_ids = hidden_playlist_ids_for_user(str(spotify_user_id))
+    contributor_summaries = playlist_contributor_summaries_for_user(str(spotify_user_id))
     for playlist in results:
         playlist_id = str(playlist.get("playlist_id") or "").strip()
         cached_metadata = cached_playlist_metadata.get(playlist_id, {})
@@ -631,6 +641,8 @@ async def _fetch_user_playlists(
         if isinstance(cached_followers_total, int):
             playlist["followers_total"] = cached_followers_total
         playlist["hidden_by_user"] = playlist_id in hidden_playlist_ids
+        if playlist_id in contributor_summaries:
+            playlist["contributor_summary"] = contributor_summaries[playlist_id]
 
     owner_ids = [
         str(playlist.get("owner_id") or "").strip()
@@ -643,6 +655,22 @@ async def _fetch_user_playlists(
         playlist["owner_followed_by_you"] = bool(owner_id and followed_owner_by_id.get(owner_id))
 
     return results, True
+
+
+def _enrich_playlists_with_cached_contributors(user_id: str | None, playlists: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not user_id or not playlists:
+        return playlists
+    contributor_summaries = playlist_contributor_summaries_for_user(str(user_id))
+    if not contributor_summaries:
+        return playlists
+    enriched: list[dict[str, Any]] = []
+    for playlist in playlists:
+        playlist_id = str(playlist.get("playlist_id") or "").strip()
+        if playlist_id and playlist_id in contributor_summaries:
+            enriched.append({**playlist, "contributor_summary": contributor_summaries[playlist_id]})
+        else:
+            enriched.append(playlist)
+    return enriched
 
 
 async def _fetch_playlist_tracks(
@@ -795,6 +823,31 @@ def _schedule_playlist_index_sync(access_token: str, spotify_user_id: str | None
         BACKGROUND_TASKS.discard(done_task)
 
     task.add_done_callback(_discard_playlist_sync)
+
+
+def _schedule_personal_library_rebuild(user_id: str | None) -> bool:
+    if not user_id:
+        return False
+    user_key = str(user_id)
+    if user_key in PERSONAL_LIBRARY_REBUILD_USERS:
+        return False
+    PERSONAL_LIBRARY_REBUILD_USERS.add(user_key)
+
+    async def _run() -> None:
+        try:
+            await asyncio.to_thread(rebuild_personal_library, user_key)
+        except Exception:
+            logger.exception("event=personal_library_rebuild_failed user_id=%s", user_key)
+
+    task = asyncio.create_task(_run())
+    BACKGROUND_TASKS.add(task)
+
+    def _discard_library_rebuild(done_task: asyncio.Task[Any]) -> None:
+        PERSONAL_LIBRARY_REBUILD_USERS.discard(user_key)
+        BACKGROUND_TASKS.discard(done_task)
+
+    task.add_done_callback(_discard_library_rebuild)
+    return True
 
 
 async def _fetch_recent_liked_tracks(access_token: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
@@ -2843,6 +2896,67 @@ async def me_liked_tracks(
     return payload
 
 
+@app.get("/me/library/status")
+async def me_library_status(request: Request) -> dict[str, Any]:
+    user_id = _require_local_data_session(request)
+    return personal_library_status(str(user_id))
+
+
+@app.get("/me/library/tracks")
+async def me_library_tracks(
+    request: Request,
+    strength: str = "all",
+    q: str = "",
+    sort: str = "recent",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    user_id = _require_local_data_session(request)
+    payload = list_personal_library_tracks(
+        str(user_id),
+        strength=strength,
+        q=q,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+    )
+    return payload
+
+
+@app.get("/me/library/items")
+async def me_library_items(
+    request: Request,
+    kind: str = "all",
+    strength: str = "all",
+    q: str = "",
+    sort: str = "recent",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    user_id = _require_local_data_session(request)
+    return list_personal_library_items(
+        str(user_id),
+        kind=kind,
+        strength=strength,
+        q=q,
+        sort=sort,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.post("/me/library/rebuild")
+async def me_library_rebuild(request: Request) -> dict[str, Any]:
+    user_id = _require_user_id(request)
+    scheduled = _schedule_personal_library_rebuild(str(user_id))
+    status_payload = personal_library_status(str(user_id))
+    return {
+        "scheduled": scheduled,
+        "strengths": list(LIBRARY_STRENGTHS),
+        "status": status_payload,
+    }
+
+
 @app.get("/me/liked-tracks/contains")
 async def me_liked_tracks_contains(
     request: Request,
@@ -3993,6 +4107,7 @@ async def me(
                 )
             if owned_playlists_available:
                 _schedule_playlist_index_sync(token, str(user_id))
+            playlists = _enrich_playlists_with_cached_contributors(str(user_id), playlists)
 
             cached_followed_artists = _get_short_cache(
                 "followed_artists_list",
@@ -4188,6 +4303,7 @@ async def me(
             )
         if owned_playlists_available:
             _schedule_playlist_index_sync(token, str(user_id))
+        playlists = _enrich_playlists_with_cached_contributors(str(user_id), playlists)
         if is_full_analysis:
             _set_load_progress(request, "liked tracks")
             recent_likes_tracks, recent_likes_available = await _fetch_recent_liked_tracks(token, item_limit)

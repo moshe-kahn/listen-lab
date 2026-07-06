@@ -153,6 +153,77 @@ def cached_playlist_metadata_for_user(user_id: str) -> dict[str, dict[str, Any]]
     }
 
 
+def _looks_like_spotify_user_id(value: str | None) -> bool:
+    text = str(value or "").strip()
+    return len(text) >= 18 and text.isalnum() and any(char.isdigit() for char in text) and any(char.isupper() for char in text)
+
+
+def playlist_contributor_summaries_for_user(user_id: str) -> dict[str, dict[str, Any]]:
+    with sqlite_connection(row_factory=sqlite3.Row) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+              pt.playlist_id,
+              pt.added_by_user_id,
+              pt.added_by_display_name,
+              pc.owner_id,
+              pc.owner_name,
+              pc.is_owned,
+              MIN(position) AS first_position,
+              COUNT(*) AS track_count
+            FROM spotify_playlist_track_cache pt
+            JOIN spotify_playlist_cache pc
+              ON pc.user_id = pt.user_id
+             AND pc.playlist_id = pt.playlist_id
+            WHERE pt.user_id = ?
+              AND (
+                pt.added_by_user_id IS NOT NULL
+                OR pt.added_by_display_name IS NOT NULL
+              )
+            GROUP BY pt.playlist_id, pt.added_by_user_id, pt.added_by_display_name, pc.owner_id, pc.owner_name, pc.is_owned
+            ORDER BY
+              pt.playlist_id,
+              CASE
+                WHEN pc.is_owned = 1 AND pt.added_by_user_id = ? THEN 0
+                WHEN pc.is_owned = 0 AND pc.owner_id IS NOT NULL AND pt.added_by_user_id = pc.owner_id THEN 0
+                ELSE 1
+              END,
+              first_position
+            """,
+            (str(user_id), str(user_id)),
+        ).fetchall()
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        playlist_id = str(row["playlist_id"] or "").strip()
+        if not playlist_id:
+            continue
+        contributor_user_id = str(row["added_by_user_id"] or "").strip()
+        display_name = str(row["added_by_display_name"] or "").strip()
+        label = "You" if contributor_user_id == str(user_id) else display_name or contributor_user_id
+        if label != "You" and _looks_like_spotify_user_id(label):
+            label = "Unknown"
+        owner_user_id = str(row["owner_id"] or "").strip()
+        owner_display_name = str(row["owner_name"] or "").strip()
+        owner_label = "You" if bool(row["is_owned"]) else owner_display_name or owner_user_id
+        if owner_label != "You" and _looks_like_spotify_user_id(owner_label):
+            owner_label = "Unknown"
+        summary = summaries.setdefault(
+            playlist_id,
+            {
+                "total": 0,
+                "names": [],
+                "track_counts": {},
+                "owner_user_id": owner_user_id or None,
+                "owner_display_name": owner_label or None,
+            },
+        )
+        if label not in summary["names"]:
+            summary["names"].append(label)
+            summary["total"] += 1
+        summary["track_counts"][label] = int(row["track_count"] or 0)
+    return summaries
+
+
 def set_playlist_hidden(user_id: str, playlist_id: str, hidden: bool) -> None:
     with sqlite_connection(write=True) as connection:
         connection.execute(

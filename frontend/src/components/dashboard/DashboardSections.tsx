@@ -144,7 +144,9 @@ type DashboardSectionsProps = {
   reloadTrackRankings: any;
   renderHomePlayerPanel: any;
   renderSavedPanel: any;
-  renderDiscoverPanel: any;
+  renderLibraryPanel: any;
+  playlistOverlayOpen: boolean;
+  playlistOverlayOptions: any;
   renderIdentityAuditPage: any;
   renderMergedTrackSourceFilterToggle: any;
   renderRankMovementFilterToggle: any;
@@ -178,6 +180,8 @@ type DashboardSectionsProps = {
   setLikedTracksShuffleEnabled: any;
   setLikedTracksShuffleNonce: any;
   setLikedTracksSortMode: any;
+  setPlaylistOverlayOpen: any;
+  setPlaylistOverlayOptions: any;
   setListeningLogError: any;
   setListeningLogHasMore: any;
   setListeningLogLastLoadedAt: any;
@@ -322,7 +326,9 @@ export function DashboardSections(props: DashboardSectionsProps) {
     reloadTrackRankings,
     renderHomePlayerPanel,
     renderSavedPanel,
-    renderDiscoverPanel,
+    renderLibraryPanel,
+    playlistOverlayOpen,
+    playlistOverlayOptions,
     renderIdentityAuditPage,
     renderMergedTrackSourceFilterToggle,
     renderRankMovementFilterToggle,
@@ -356,6 +362,8 @@ export function DashboardSections(props: DashboardSectionsProps) {
     setLikedTracksShuffleEnabled,
     setLikedTracksShuffleNonce,
     setLikedTracksSortMode,
+    setPlaylistOverlayOpen,
+    setPlaylistOverlayOptions,
     setListeningLogError,
     setListeningLogHasMore,
     setListeningLogLastLoadedAt,
@@ -551,6 +559,7 @@ export function DashboardSections(props: DashboardSectionsProps) {
             <div className="dashboard-grid">
               {renderHomePlayerPanel()}
               {renderSavedPanel()}
+              {renderLibraryPanel()}
               <DualSectionCard
                 title={renderSectionTitle("Activity", "recent_likes")}
                 section="recent"
@@ -735,12 +744,16 @@ export function DashboardSections(props: DashboardSectionsProps) {
                 onSelectPreview={setSelectedPreview}
               />
 
-              {profile ? (
+              {profile && playlistOverlayOpen ? (
                 <DashboardPlaylistsSection
                   ownedPlaylists={profile.owned_playlists}
                   ownedPlaylistsAvailable={profile.owned_playlists_available}
                   apiBaseUrl={apiBaseUrl}
-                  playlistsOpen={openSections.playlists}
+                  playlistOverlayOpen={playlistOverlayOpen}
+                  playlistOverlayOptions={playlistOverlayOptions}
+                  playlistsOpen={false}
+                  setPlaylistOverlayOpen={setPlaylistOverlayOpen}
+                  onConsumePlaylistOverlayOptions={() => setPlaylistOverlayOptions(null)}
                   toggleSection={toggleSection}
                   onSelectPreview={setSelectedPreview}
                   activePlaylistPlayback={activePlaylistPlayback}
@@ -911,8 +924,6 @@ export function DashboardSections(props: DashboardSectionsProps) {
               />
 
               </section>
-
-              {renderDiscoverPanel()}
             </div>
   ) : null;
 }

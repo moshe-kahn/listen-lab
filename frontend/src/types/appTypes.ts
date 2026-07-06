@@ -176,6 +176,103 @@ export type LikedTracksSyncResponse = {
   metadata: LikedTracksSyncMetadata | null;
 };
 
+export type LibraryStrength = "primary" | "contextual" | "potential" | "ephemeral";
+export type LibraryKind = "all" | "track" | "artist" | "album" | "playlist";
+
+export type LibraryReason = {
+  reason: string;
+  label: string;
+};
+
+export type LibraryTrackItem = RecentTrack & {
+  kind: "track";
+  spotify_track_id: string;
+  strength: LibraryStrength;
+  reasons: LibraryReason[];
+  playlist_count: number;
+  release_track_id?: number | null;
+  recording_representative_release_track_id?: number | null;
+  library_group_key?: string | null;
+  version_count?: number;
+  source_version_count?: number;
+  versions?: LibraryTrackVersion[];
+  source_playlist_id?: string | null;
+  source_playlist_name?: string | null;
+  source_album_id?: string | null;
+  source_album_name?: string | null;
+  evidence_first_seen_at?: string | null;
+  evidence_last_seen_at?: string | null;
+  rebuilt_at?: string | null;
+};
+
+export type LibraryTrackVersion = {
+  spotify_track_id: string;
+  track_id: string;
+  track_name: string | null;
+  artist_name: string | null;
+  album_name: string | null;
+  album_id: string | null;
+  image_url: string | null;
+  uri: string | null;
+  url: string | null;
+  release_track_id?: number | null;
+  strength: LibraryStrength;
+  reasons: LibraryReason[];
+  play_count: number;
+  last_played_at: string | null;
+};
+
+export type LibraryEntityItem = {
+  kind: "artist" | "album" | "playlist";
+  entity_id?: string | null;
+  artist_id?: string | null;
+  album_id?: string | null;
+  playlist_id?: string | null;
+  name: string;
+  label: string;
+  artist_name?: string | null;
+  image_url?: string | null;
+  url?: string | null;
+  strength: LibraryStrength;
+  reasons: LibraryReason[];
+  track_count: number;
+  play_count: number;
+  playlist_count: number;
+  last_played_at?: string | null;
+  evidence_last_seen_at?: string | null;
+};
+
+export type LibraryItem = LibraryTrackItem | LibraryEntityItem;
+
+export type LibraryStatusResponse = {
+  status: "missing" | "running" | "complete" | "error";
+  rule_version: number;
+  cache_rule_version: number | null;
+  stale: boolean;
+  row_count: number;
+  counts: Record<LibraryStrength, number>;
+  started_at: string | null;
+  completed_at: string | null;
+  latest_error: string | null;
+  updated_at: string | null;
+};
+
+export type LibraryTracksResponse = {
+  kind?: LibraryKind;
+  items: LibraryItem[];
+  limit: number;
+  offset: number;
+  total: number;
+  has_more: boolean;
+  status: LibraryStatusResponse;
+};
+
+export type LibraryRebuildResponse = {
+  scheduled: boolean;
+  strengths: LibraryStrength[];
+  status: LibraryStatusResponse;
+};
+
 export type ReleaseTrackMetadataItem = {
   release_track_id: number;
   release_track_name: string;
@@ -348,6 +445,13 @@ export type OwnedPlaylist = {
   owner_name?: string | null;
   owner_followed_by_you?: boolean | null;
   followers_total?: number | null;
+  contributor_summary?: {
+    total: number;
+    names: string[];
+    track_counts?: Record<string, number>;
+    owner_user_id?: string | null;
+    owner_display_name?: string | null;
+  } | null;
   hidden_by_user?: boolean | null;
   playlist_category?: "created" | "private" | "collaborative" | "added" | string | null;
   url: string | null;

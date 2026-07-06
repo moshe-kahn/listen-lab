@@ -73,12 +73,22 @@ That model is intentionally out of scope for current identity repair. Current re
 Fallback/history text paths can split identities from later provider-backed paths. History import may only know artist text, album text, and track text; Spotify API/catalog paths later provide stable Spotify IDs. If the later provider-backed source is inserted as a new canonical row instead of being reconciled to the text-backed row, the product can show duplicate artists or miss album/track metadata attached to the other row.
 
 Current artist status:
-- artist duplicate audit and evidence-gated repair exist
-- Spotify artist ingest first checks exact `source_artist_map`, then can promote one safe text-only artist by attaching the Spotify source map
+- artist resolution is centralized in `backend/app/artist_resolution.py`
+- resolver outcomes are explicit: `matched_existing`, `created_new_text_backed`, `created_new_provider_backed`, and `ambiguous_review`
+- artist duplicate audit and evidence-gated repair exist and share the resolver evidence labels
+- Spotify/provider artist ingest first checks exact `source_artist_map`, then can promote one safe text-only artist by attaching the provider source map
 - artist name alone is not enough for promotion or repair
 - safe automatic repair requires exact normalized name, exactly one provider-backed artist, text-only duplicates, and album/track identity evidence or strict shared-normalized-album-title evidence
 - same-name-only, stylization, similar-name same-album, orphan placeholder, and multiple-provider groups remain review-only
 - composite history credits are classified separately and excluded from automatic repair
+
+Current artist evidence labels shared by ingest prevention and repair:
+- `shared_release_album_id`
+- `shared_release_track_id`
+- `reconciled_source_album`
+- `reconciled_source_track`
+- `shared_normalized_album_title_with_provider_context`
+- `composite_credit_context`
 
 The same class applies to albums and tracks:
 - text-only `release_album` rows such as `Kid A` or `Amnesiac` can exist without Spotify album IDs, while Spotify catalog metadata is only attached to source/catalog rows
@@ -110,6 +120,7 @@ Current artist repair endpoints:
 
 Current artist repair invariant:
 - frontend de-duping and comma-display preservation are defensive display behavior only; backend identity repair owns durable artist identity.
+- raw ingest still exposes compatibility helpers from `backend/app/db.py`, but durable artist decisions route through `resolve_artist(...)`.
 
 ## Release Duplicate Diagnostics
 

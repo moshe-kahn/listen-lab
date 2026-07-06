@@ -38,6 +38,8 @@ Playlist note:
 
 Downstream entity backfill boundary:
 - history/recent projection may create source/release/artist rows conservatively after canonical music facts are projected
+- history/provider artist mapping routes through `resolve_artist(...)` in `backend/app/artist_resolution.py`; `backend/app/db.py` keeps compatibility wrappers for existing ingest callers
+- artist resolver outcomes are `matched_existing`, `created_new_text_backed`, `created_new_provider_backed`, and `ambiguous_review`
 - history text artist backfill must not split durable comma-bearing group names such as `Crosby, Stills, Nash & Young`
 - evidenced composite history credits such as `Brian Eno, David Byrne` should be skipped as fake single artist identities when structured/provider context proves the parts are separate credited artists
 - Spotify artist IDs can promote an existing text-only artist row only when exact-name and album/track evidence gates are satisfied

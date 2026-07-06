@@ -68,6 +68,27 @@ def _json_dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
+def _mark_personal_library_stale_with_connection(connection: sqlite3.Connection) -> None:
+    table = connection.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'personal_library_rebuild_state'
+        """
+    ).fetchone()
+    if table is None:
+        return
+    connection.execute(
+        """
+        UPDATE personal_library_rebuild_state
+        SET stale = 1,
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        WHERE status = 'complete'
+        """
+    )
+
+
 def _json_object(value: Any) -> dict[str, Any]:
     if not isinstance(value, str) or not value.strip():
         return {}
@@ -8836,6 +8857,8 @@ def _upsert_track_catalog(*, track: dict[str, Any], market: str, fetched_at: str
             last_status=last_status,
             last_error=last_error,
         )
+        if last_status == "ok" and spotify_track_id:
+            _mark_personal_library_stale_with_connection(connection)
 
 
 def _upsert_track_catalog_error(*, spotify_track_id: str, market: str, fetched_at: str, last_error: str) -> None:
@@ -8895,6 +8918,8 @@ def _upsert_album_catalog(*, album: dict[str, Any], market: str, fetched_at: str
                 last_error,
             ),
         )
+        if last_status == "ok" and str(album.get("id") or "").strip():
+            _mark_personal_library_stale_with_connection(connection)
 
 
 def _upsert_album_catalog_error(*, spotify_album_id: str, market: str, fetched_at: str, last_error: str) -> None:
@@ -9027,6 +9052,8 @@ def _upsert_album_track(*, album_id: str, track: dict[str, Any], market: str, fe
                 last_error,
             ),
         )
+        if last_status == "ok" and str(track.get("id") or "").strip():
+            _mark_personal_library_stale_with_connection(connection)
 
 
 def _compact_error_body(payload: dict[str, Any], raw_text: str | None) -> str:
