@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any
@@ -783,10 +784,64 @@ def _merge_reasons(left: list[Any], right: list[Any]) -> list[dict[str, Any]]:
     return [merged[key] for key in sorted(merged)]
 
 
-def _track_group_key(item: dict[str, Any]) -> str:
+FEATURE_PARENTHETICAL_RE = re.compile(r"\s*[\[(]\s*(?:feat\.?|featuring|ft\.?)\s+[^)\]]+[\])]\s*", re.IGNORECASE)
+
+
+def _normalize_library_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _feature_stripped_title(value: Any) -> tuple[str, bool]:
+    raw = _normalize_library_text(value)
+    stripped = _normalize_library_text(FEATURE_PARENTHETICAL_RE.sub(" ", raw))
+    return stripped, bool(stripped and stripped != raw)
+
+
+def _library_artist_signature(item: dict[str, Any]) -> str:
+    names: list[str] = []
+    for artist in item.get("artists") or []:
+        if not isinstance(artist, dict):
+            continue
+        name = _normalize_library_text(artist.get("name"))
+        if name:
+            names.append(name)
+    if not names:
+        names = [_normalize_library_text(part) for part in str(item.get("artist_name") or "").split(",")]
+    return "|".join(dict.fromkeys(name for name in names if name))
+
+
+def _feature_equivalence_seed(item: dict[str, Any]) -> tuple[str, bool] | None:
+    title, stripped = _feature_stripped_title(item.get("track_name"))
+    artist_signature = _library_artist_signature(item)
+    if not title or title == "unknown track" or not artist_signature:
+        return None
+    return f"{artist_signature}::{title}", stripped
+
+
+def _feature_equivalence_keys(items: list[dict[str, Any]]) -> set[str]:
+    grouped: dict[str, list[bool]] = {}
+    for item in items:
+        if item.get("recording_representative_release_track_id") is not None:
+            continue
+        seed = _feature_equivalence_seed(item)
+        if seed is None:
+            continue
+        key, stripped = seed
+        grouped.setdefault(key, []).append(stripped)
+    return {
+        key
+        for key, stripped_values in grouped.items()
+        if len(stripped_values) > 1 and any(stripped_values)
+    }
+
+
+def _track_group_key(item: dict[str, Any], feature_equivalence_keys: set[str] | None = None) -> str:
     recording_id = item.get("recording_representative_release_track_id")
     if recording_id is not None:
         return f"recording:{recording_id}"
+    seed = _feature_equivalence_seed(item)
+    if seed is not None and feature_equivalence_keys and seed[0] in feature_equivalence_keys:
+        return f"feature_equivalent:{seed[0]}"
     release_id = item.get("release_track_id")
     if release_id is not None:
         return f"release:{release_id}"
@@ -825,8 +880,9 @@ def _group_track_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     grouped_versions: dict[str, dict[int, dict[str, Any]]] = {}
     raw_versions: dict[str, list[dict[str, Any]]] = {}
+    feature_equivalence_keys = _feature_equivalence_keys(items)
     for item in items:
-        key = _track_group_key(item)
+        key = _track_group_key(item, feature_equivalence_keys)
         current = grouped.get(key)
         if current is None or _track_item_rank(item) > _track_item_rank(current):
             next_item = dict(item)
@@ -851,12 +907,15 @@ def _group_track_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raw_versions.setdefault(key, []).append(item)
     for key, item in grouped.items():
         release_versions = grouped_versions.get(key, {})
-        has_recording_group = str(key).startswith("recording:") and len(release_versions) > 1
-        item["version_count"] = len(release_versions) if has_recording_group else 0
+        has_version_group = (
+            (str(key).startswith("recording:") or str(key).startswith("feature_equivalent:"))
+            and len(release_versions) > 1
+        )
+        item["version_count"] = len(release_versions) if has_version_group else 0
         item["versions"] = [
             _version_entry(version)
             for version in sorted(release_versions.values(), key=_track_item_rank, reverse=True)
-        ] if has_recording_group else []
+        ] if has_version_group else []
         item["source_version_count"] = len(raw_versions.get(key, []))
     return list(grouped.values())
 
@@ -890,13 +949,14 @@ def _query_library_rows(
     *,
     strength: str,
     q: str,
+    deep: bool = False,
 ) -> list[dict[str, Any]]:
     clauses = ["user_id = ?"]
     params: list[Any] = [user_id]
     if strength != "all":
         clauses.append("strength = ?")
         params.append(strength)
-    if q:
+    if q and deep:
         clauses.append(
             """(
               (
@@ -925,6 +985,29 @@ def _query_library_rows(
             tuple(params),
         ).fetchall()
     return [_library_row_to_item(row) for row in rows]
+
+
+def _library_item_matches_query(item: dict[str, Any], q: str) -> bool:
+    normalized_query = str(q or "").strip().lower()
+    if not normalized_query:
+        return True
+    kind = str(item.get("kind") or "track")
+    if kind == "track":
+        title = str(item.get("track_name") or "").strip()
+        spotify_track_id = str(item.get("spotify_track_id") or "").strip()
+        if not title or _is_identifier_title(title, spotify_track_id) or title.lower() == "unknown track":
+            return False
+        return normalized_query in title.lower()
+    title = str(item.get("label") or item.get("name") or "").strip()
+    if not title:
+        return False
+    return normalized_query in title.lower()
+
+
+def _filter_library_items_for_query(items: list[dict[str, Any]], q: str, *, deep: bool) -> list[dict[str, Any]]:
+    if deep or not str(q or "").strip():
+        return items
+    return [item for item in items if _library_item_matches_query(item, q)]
 
 
 def _entity_strength(current: str | None, incoming: str | None) -> str:
@@ -1038,6 +1121,7 @@ def list_personal_library_tracks(
     sort: str = "recent",
     limit: int = 50,
     offset: int = 0,
+    deep: bool = False,
 ) -> dict[str, Any]:
     normalized_user_id = str(user_id or "").strip()
     normalized_strength = str(strength or "all").strip().lower()
@@ -1053,7 +1137,9 @@ def list_personal_library_tracks(
         normalized_user_id,
         strength=normalized_strength,
         q=normalized_query,
+        deep=deep,
     )), normalized_sort)
+    grouped_items = _filter_library_items_for_query(grouped_items, normalized_query, deep=deep)
     total = len(grouped_items)
     page_items = grouped_items[page_offset:page_offset + page_limit]
     return {
@@ -1076,6 +1162,7 @@ def list_personal_library_items(
     sort: str = "recent",
     limit: int = 50,
     offset: int = 0,
+    deep: bool = False,
 ) -> dict[str, Any]:
     normalized_kind = str(kind or "track").strip().lower()
     if normalized_kind not in {"all", "track", "artist", "album", "playlist"}:
@@ -1088,6 +1175,7 @@ def list_personal_library_items(
             sort=sort,
             limit=limit,
             offset=offset,
+            deep=deep,
         )
     normalized_user_id = str(user_id or "").strip()
     normalized_strength = str(strength or "all").strip().lower()
@@ -1099,8 +1187,12 @@ def list_personal_library_items(
         normalized_sort = "recent"
     page_limit = max(1, min(int(limit or 50), 100))
     page_offset = max(0, int(offset or 0))
-    raw_items = _query_library_rows(normalized_user_id, strength=normalized_strength, q=normalized_query)
-    library_items = _sort_items(_library_items_from_rows(raw_items, normalized_kind), normalized_sort)
+    raw_items = _query_library_rows(normalized_user_id, strength=normalized_strength, q=normalized_query, deep=deep)
+    library_items = _filter_library_items_for_query(
+        _sort_items(_library_items_from_rows(raw_items, normalized_kind), normalized_sort),
+        normalized_query,
+        deep=deep,
+    )
     total = len(library_items)
     page_items = library_items[page_offset:page_offset + page_limit]
     return {

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { PlayerQueueTrack } from "../../types/appTypes";
 import { LikedBadge } from "../common/LikedBadge";
 import { ReleaseSiblingBadge } from "../common/ReleaseSiblingBadge";
@@ -45,11 +45,12 @@ type PlayerQueuePanelProps = {
   onGroupModeChange: (mode: "custom" | "artist" | "album") => void;
   onJumpToGroup: (groupStartIndex: number, groupId: string) => void | Promise<void>;
   onMoveTrack: (fromIndex: number, toIndex: number) => void;
+  onMoveGroup: (fromGroupIndex: number, toGroupIndex: number) => void;
   onOpenTrack: (track: PlayerQueueTrack) => void;
   onOpenGroupIdsChange: (updater: (current: Set<string>) => Set<string>) => void;
   onPlayTrack: (index: number) => void | Promise<void>;
   onRemoveTrack: (index: number) => void;
-  onSaveQueue: () => void;
+  onSaveQueue: (name?: string) => void;
   onSettingsOpenChange: (open: boolean | ((current: boolean) => boolean)) => void;
   onHeaderMenuOpenChange: (open: boolean | ((current: boolean) => boolean)) => void;
   onPauseMenuOpenChange: (open: boolean | ((current: boolean) => boolean)) => void;
@@ -57,6 +58,8 @@ type PlayerQueuePanelProps = {
   onShuffle: () => void | Promise<void>;
   onSortModeChange: (mode: "custom" | "length" | "az" | "recent") => void;
   onToggleBookmark: (track: PlayerQueueTrack, context: PlayerQueueBookmarkContext | null) => void;
+  onToggleEdit: () => void;
+  onCancelEdit: () => void;
   onToggleLoop: () => void | Promise<void>;
   onUnloopCurrentTrack: () => void;
   openGroupIds: Set<string>;
@@ -122,6 +125,7 @@ export function PlayerQueuePanel(props: PlayerQueuePanelProps) {
     onGroupModeChange,
     onHeaderMenuOpenChange,
     onJumpToGroup,
+    onMoveGroup,
     onMoveTrack,
     onOpenGroupIdsChange,
     onOpenTrack,
@@ -134,6 +138,8 @@ export function PlayerQueuePanel(props: PlayerQueuePanelProps) {
     onShuffle,
     onSortModeChange,
     onToggleBookmark,
+    onToggleEdit,
+    onCancelEdit,
     onToggleLoop,
     onUnloopCurrentTrack,
     openGroupIds,
@@ -158,6 +164,9 @@ export function PlayerQueuePanel(props: PlayerQueuePanelProps) {
     transportPaused,
     variant = "inline",
   } = props;
+  const [dragGroupIndex, setDragGroupIndex] = useState<number | null>(null);
+  const [savePopoverOpen, setSavePopoverOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
 
   const renderTrackRow = (track: PlayerQueueTrack, index: number, bookmarkContext: PlayerQueueBookmarkContext | null) => {
     const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
@@ -267,8 +276,230 @@ export function PlayerQueuePanel(props: PlayerQueuePanelProps) {
     );
   };
 
+  if (variant === "overlay") {
+    const defaultSaveName = groups[0]?.label || title || "Saved queue";
+    const openSavePopover = () => {
+      setSaveName(defaultSaveName);
+      setSavePopoverOpen(true);
+    };
+    const confirmSave = () => {
+      onSaveQueue(saveName.trim() || defaultSaveName);
+      setSavePopoverOpen(false);
+    };
+
+    return (
+      <div className="player-queue-overlay" onMouseDown={onClose} role="presentation">
+        <section
+          aria-label="Queue overlay"
+          aria-modal="true"
+          className="player-queue-overlay-panel"
+          onMouseDown={(event) => event.stopPropagation()}
+          role="dialog"
+        >
+          <div className="player-queue-overlay-layout">
+            <nav className="player-queue-overlay-nav" aria-label="Queue contexts">
+              <div className="player-queue-overlay-nav-header">
+                <h3>Contexts</h3>
+                <div className="player-queue-overlay-save">
+                  <button className="player-queue-overlay-action-button" disabled={tracks.length === 0} onClick={openSavePopover} type="button">Save</button>
+                  {savePopoverOpen ? (
+                    <form
+                      className="player-queue-save-popover"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        confirmSave();
+                      }}
+                    >
+                      <label>
+                        <span>Name</span>
+                        <input
+                          autoFocus
+                          onChange={(event) => setSaveName(event.currentTarget.value)}
+                          value={saveName}
+                        />
+                      </label>
+                      <div className="player-queue-save-actions">
+                        <button type="button" onClick={() => setSavePopoverOpen(false)}>Cancel</button>
+                        <button type="submit">Save</button>
+                      </div>
+                    </form>
+                  ) : null}
+                </div>
+                {loading ? <span className="player-queue-overlay-loading">Loading</span> : null}
+              </div>
+              <div className="player-queue-overlay-context-list">
+                {groups.length > 0 ? groups.map((group, groupIndex) => {
+                  const groupStartIndex = groupStartIndexFor(groups, groupIndex);
+                  const activeInGroup = hasActiveQueueCursor && activeQueueCursor != null && activeQueueCursor >= groupStartIndex && activeQueueCursor < groupStartIndex + group.tracks.length;
+                  return (
+                    <button
+                      className={`player-queue-context-item${activeInGroup ? " player-queue-context-item-active" : ""}${organizeMode ? " player-queue-context-item-draggable" : ""}${dragGroupIndex === groupIndex ? " player-queue-context-item-dragging" : ""}`}
+                      draggable={organizeMode}
+                      key={group.id}
+                      onDragEnd={() => setDragGroupIndex(null)}
+                      onDragOver={(event) => {
+                        if (organizeMode) {
+                          event.preventDefault();
+                        }
+                      }}
+                      onDragStart={() => setDragGroupIndex(groupIndex)}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        if (dragGroupIndex != null) {
+                          onMoveGroup(dragGroupIndex, groupIndex);
+                          setDragGroupIndex(null);
+                        }
+                      }}
+                      onClick={() => void onJumpToGroup(groupStartIndex, group.id)}
+                      type="button"
+                    >
+                      {group.imageUrl ? (
+                        <img alt="" className="player-queue-context-image" src={group.imageUrl} />
+                      ) : (
+                        <span className="player-queue-context-image player-queue-context-image-fallback" aria-hidden="true">{group.label.slice(0, 1).toUpperCase()}</span>
+                      )}
+                      <span className="player-queue-context-copy">
+                        <span className="single-line-ellipsis">{group.label}</span>
+                        <span className="single-line-ellipsis">{playerQueueGroupMeta(group, groupStartIndex, activeQueueCursor, hasActiveQueueCursor, queueSource)}</span>
+                      </span>
+                      {activeInGroup ? <span className="player-queue-current-dot" aria-label="Current queue context" /> : null}
+                    </button>
+                  );
+                }) : (
+                  <span className="player-queue-context-empty">No queue contexts</span>
+                )}
+              </div>
+              <div className="player-queue-overlay-nav-actions" aria-label="Queue controls">
+                <div className="player-queue-overlay-nav-divider" aria-hidden="true" />
+                <div className="player-queue-overlay-button-row">
+                  <button
+                    aria-label={loopEnabled ? "Stop looping queue" : "Loop queue"}
+                    aria-pressed={loopEnabled}
+                    className={`player-queue-header-button${loopEnabled ? " player-queue-header-button-active player-queue-header-toggle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                    disabled={tracks.length === 0}
+                    onClick={() => void onToggleLoop()}
+                    title={loopEnabled ? "Stop looping queue" : "Loop queue"}
+                    type="button"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M7 7h9.2l-1.8-1.8L15.8 3.8 20 8l-4.2 4.2-1.4-1.4L16.2 9H7a3 3 0 0 0 0 6h1v2H7A5 5 0 0 1 7 7Zm10 10H7.8l1.8 1.8-1.4 1.4L4 16l4.2-4.2 1.4 1.4L7.8 15H17a3 3 0 0 0 0-6h-1V7h1a5 5 0 0 1 0 10Z" />
+                    </svg>
+                  </button>
+                  {queueDelayControl}
+                  <button
+                    aria-label={shuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                    aria-pressed={shuffleEnabled}
+                    className={`player-queue-header-button${shuffleEnabled ? " player-queue-header-button-active player-queue-shuffle-active" : ""}${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                    disabled={!shuffleAvailable && !shuffleEnabled}
+                    onClick={() => void onShuffle()}
+                    title={shuffleEnabled ? "Restore queue order" : "Shuffle unplayed queue"}
+                    type="button"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <path d="M16.8 3.9 21 8.1l-4.2 4.2-1.4-1.4 1.8-1.8h-1.6c-2 0-3.4.8-4.5 2.4l-1.2 1.8c-1.4 2.1-3.4 3.2-5.9 3.2H3v-2h1c1.9 0 3.3-.8 4.3-2.4l1.2-1.8c1.5-2.1 3.5-3.2 6.1-3.2h1.6l-1.8-1.8 1.4-1.4ZM3 7.5h1c2.1 0 3.7.8 5 2.5l-1.2 1.8C6.8 10.3 5.6 9.5 4 9.5H3v-2Zm9.7 5.9c.8 1 1.8 1.6 3.1 1.6h1.4l-1.8-1.8 1.4-1.4L21 16l-4.2 4.2-1.4-1.4 1.8-1.8h-1.4c-2 0-3.6-.8-4.8-2.3l1.1-1.7.6.4Z" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </nav>
+            <aside className="player-recent-column player-queue-column player-home-queue-column player-queue-overlay-column" aria-label={queueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
+              <div className="player-recent-header">
+                <h3>Tracks</h3>
+                <div className="player-queue-header-actions">
+                  <button className={`player-queue-overlay-action-button${liveReadOnlyMode ? " player-control-readonly" : ""}`} disabled={tracks.length === 0} onClick={() => void onClearQueue()} type="button">Clear</button>
+                  {organizeMode ? (
+                    <button className="player-queue-overlay-action-button" onClick={onCancelEdit} type="button">Cancel</button>
+                  ) : null}
+                  <button
+                    aria-label={organizeMode ? "Done editing queue" : "Edit queue"}
+                    aria-pressed={organizeMode}
+                    className={`player-queue-header-button${organizeMode ? " player-queue-header-button-active" : ""}`}
+                    onClick={onToggleEdit}
+                    title={organizeMode ? "Done editing queue" : "Edit queue"}
+                    type="button"
+                  >
+                    {organizeMode ? (
+                      <svg aria-hidden="true" viewBox="0 0 24 24">
+                        <path d="M9.2 16.6 4.9 12.3 3.5 13.7l5.7 5.7L21 7.6l-1.4-1.4L9.2 16.6Z" />
+                      </svg>
+                    ) : (
+                      <svg aria-hidden="true" viewBox="0 0 24 24">
+                        <path d="m4 16.8-.8 4 4-.8L18.6 8.6l-3.2-3.2L4 16.8Zm13.2-12.8 2.8 2.8 1.3-1.3a1.9 1.9 0 0 0 0-2.7l-.1-.1a1.9 1.9 0 0 0-2.7 0L17.2 4Z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+              {organizeMode ? (
+                <div className="player-queue-organize-bar">
+                  <label>
+                    <span>Sort</span>
+                    <select value={sortMode} onChange={(event) => onSortModeChange(event.currentTarget.value as typeof sortMode)}>
+                      <option value="custom">Custom</option>
+                      <option value="length">Length</option>
+                      <option value="az">A-Z</option>
+                      <option value="recent">Recently played</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Group by</span>
+                    <select value={groupMode} onChange={(event) => onGroupModeChange(event.currentTarget.value as typeof groupMode)}>
+                      <option value="custom">Custom</option>
+                      <option value="artist">Artist</option>
+                      <option value="album">Album</option>
+                    </select>
+                  </label>
+                </div>
+              ) : null}
+              <div className="player-recent-list">
+                {groups.map((group, groupIndex) => {
+                  const groupStartIndex = groupStartIndexFor(groups, groupIndex);
+                  const groupEndIndex = groupStartIndex + group.tracks.length - 1;
+                  const groupIsOpen = openGroupIds.has(group.id);
+                  const activeInGroup = hasActiveQueueCursor && activeQueueCursor != null && activeQueueCursor >= groupStartIndex && activeQueueCursor <= groupEndIndex;
+                  return (
+                    <div className="player-queue-group-wrap" key={group.id}>
+                      <div className="player-queue-group">
+                        <button
+                          aria-expanded={groupIsOpen}
+                          className="player-queue-group-header"
+                          onClick={() => onOpenGroupIdsChange((current) => {
+                            const next = new Set(current);
+                            if (next.has(group.id)) {
+                              next.delete(group.id);
+                            } else {
+                              next.add(group.id);
+                            }
+                            return next;
+                          })}
+                          type="button"
+                        >
+                          <span className="player-queue-group-toggle" aria-hidden="true">{groupIsOpen ? "⌄" : "›"}</span>
+                          <span className="player-queue-group-copy">
+                            <span className="single-line-ellipsis">{group.label}</span>
+                            <span className="player-queue-group-meta single-line-ellipsis">{playerQueueGroupMeta(group, groupStartIndex, activeQueueCursor, hasActiveQueueCursor, queueSource)}</span>
+                          </span>
+                          {activeInGroup ? <span className="player-queue-current-dot" aria-label="Current queue context" /> : null}
+                        </button>
+                      </div>
+                      {groupIsOpen ? group.tracks.map((track, groupTrackIndex) => (
+                        renderTrackRow(track, groupStartIndex + groupTrackIndex, bookmarkContextFromQueueGroup(group, groupTrackIndex))
+                      )) : null}
+                    </div>
+                  );
+                })}
+                {!loading && tracks.length === 0 ? <p className="empty-copy player-recent-empty">No queued songs were returned.</p> : null}
+                {queueError ? <p className="empty-copy player-recent-empty">{queueError}</p> : null}
+              </div>
+            </aside>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   const panel = (
-    <aside className={`player-recent-column player-queue-column player-home-queue-column${variant === "overlay" ? " player-queue-overlay-column" : ""}`} aria-label={queueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
+    <aside className="player-recent-column player-queue-column player-home-queue-column" aria-label={queueSource === "listenlab" ? "ListenLab queue" : "Spotify queue"}>
       <div className="player-recent-header">
         <div className="player-queue-heading-menu">
           <button
@@ -310,7 +541,7 @@ export function PlayerQueuePanel(props: PlayerQueuePanelProps) {
                       }} type="button">
                         {organizeMode ? "Done organizing" : "Organize"}
                       </button>
-                      <button disabled={tracks.length === 0} onClick={onSaveQueue} type="button">
+                      <button disabled={tracks.length === 0} onClick={() => onSaveQueue()} type="button">
                         Save current queue
                       </button>
                       <button className={liveReadOnlyMode ? "player-control-readonly" : undefined} disabled={tracks.length === 0} onClick={() => void onClearQueue()} type="button">
@@ -377,9 +608,6 @@ export function PlayerQueuePanel(props: PlayerQueuePanelProps) {
               <path d="M16.8 3.9 21 8.1l-4.2 4.2-1.4-1.4 1.8-1.8h-1.6c-2 0-3.4.8-4.5 2.4l-1.2 1.8c-1.4 2.1-3.4 3.2-5.9 3.2H3v-2h1c1.9 0 3.3-.8 4.3-2.4l1.2-1.8c1.5-2.1 3.5-3.2 6.1-3.2h1.6l-1.8-1.8 1.4-1.4ZM3 7.5h1c2.1 0 3.7.8 5 2.5l-1.2 1.8C6.8 10.3 5.6 9.5 4 9.5H3v-2Zm9.7 5.9c.8 1 1.8 1.6 3.1 1.6h1.4l-1.8-1.8 1.4-1.4L21 16l-4.2 4.2-1.4-1.4 1.8-1.8h-1.4c-2 0-3.6-.8-4.8-2.3l1.1-1.7.6.4Z" />
             </svg>
           </button>
-          {onClose ? (
-            <button aria-label="Close queue overlay" className="player-queue-header-button" onClick={onClose} title="Close" type="button">X</button>
-          ) : null}
         </div>
       </div>
       {organizeMode ? (
@@ -446,21 +674,5 @@ export function PlayerQueuePanel(props: PlayerQueuePanelProps) {
     </aside>
   );
 
-  if (variant !== "overlay") {
-    return panel;
-  }
-
-  return (
-    <div className="player-queue-overlay" onMouseDown={onClose} role="presentation">
-      <section
-        aria-label="Queue overlay"
-        aria-modal="true"
-        className="player-queue-overlay-panel"
-        onMouseDown={(event) => event.stopPropagation()}
-        role="dialog"
-      >
-        {panel}
-      </section>
-    </div>
-  );
+  return panel;
 }

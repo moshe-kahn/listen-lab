@@ -10,7 +10,14 @@ type LibraryStrengthFilter = LibraryStrength | "all";
 type LibrarySearchPanelProps = {
   overlayOpen: boolean;
   onOpenItem: (item: LibraryItem) => void;
+  onPlayTrack: (track: LibraryTrackItem) => void;
   onOverlayOpenChange: (open: boolean) => void;
+};
+
+type LibraryResultGroup = {
+  key: string;
+  title: string;
+  items: LibraryItem[];
 };
 
 const kindOptions: Array<{ value: LibraryKind; label: string }> = [
@@ -71,21 +78,92 @@ function itemTitle(item: LibraryItem) {
   return item.kind === "track" ? item.track_name || "Unknown track" : item.label || item.name;
 }
 
-function itemSubtitle(item: LibraryItem) {
+function itemSubtitle(item: LibraryItem, compact = false) {
   if (item.kind === "track") {
+    if (compact) {
+      return item.artist_name || "Unknown artist";
+    }
     return `${item.artist_name || "Unknown artist"}${item.album_name ? ` · ${item.album_name}` : ""}`;
   }
   if (item.kind === "album") {
-    return `${item.artist_name || "Unknown artist"} · ${item.track_count.toLocaleString()} track${item.track_count === 1 ? "" : "s"}`;
+    return item.artist_name || "Unknown artist";
   }
   if (item.kind === "playlist") {
     return `${item.track_count.toLocaleString()} track${item.track_count === 1 ? "" : "s"} in Library`;
   }
-  return `${item.track_count.toLocaleString()} track${item.track_count === 1 ? "" : "s"} in Library`;
+  return compact ? "" : `${item.track_count.toLocaleString()} track${item.track_count === 1 ? "" : "s"} in Library`;
 }
 
 function itemImage(item: LibraryItem) {
   return item.kind === "track" ? item.image_url : item.image_url ?? null;
+}
+
+function normalizeLibraryGroupTitle(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s*[\[(]\s*(feat\.?|featuring|ft\.?)\s+[^)\]]+[\])]\s*/g, " ")
+    .replace(/[()[\]{}"']/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function libraryGroupItemRank(item: LibraryItem) {
+  if (item.kind === "artist") {
+    return 0;
+  }
+  if (item.kind === "album") {
+    return 1;
+  }
+  if (item.kind === "track") {
+    return 2;
+  }
+  return 3;
+}
+
+function groupedLibraryResults(items: LibraryItem[], kind: LibraryKind): Array<LibraryItem | LibraryResultGroup> {
+  if (kind !== "all") {
+    return items;
+  }
+  const groups = new Map<string, LibraryResultGroup>();
+  const groupableKinds = new Set<LibraryKind>(["artist", "album", "track"]);
+  items.forEach((item) => {
+    if (!groupableKinds.has(item.kind)) {
+      return;
+    }
+    const title = itemTitle(item);
+    const key = normalizeLibraryGroupTitle(title);
+    if (!key || title.toLowerCase() === "unknown track") {
+      return;
+    }
+    const group = groups.get(key) ?? { key, title, items: [] };
+    group.items.push(item);
+    group.items.sort((left, right) => libraryGroupItemRank(left) - libraryGroupItemRank(right));
+    groups.set(key, group);
+  });
+  const groupedKeys = new Set(Array.from(groups.values())
+    .filter((group) => new Set(group.items.map((item) => item.kind)).size > 1)
+    .map((group) => group.key));
+  if (groupedKeys.size === 0) {
+    return items;
+  }
+  const emittedGroups = new Set<string>();
+  const output: Array<LibraryItem | LibraryResultGroup> = [];
+  items.forEach((item) => {
+    const key = normalizeLibraryGroupTitle(itemTitle(item));
+    if (!groupedKeys.has(key)) {
+      output.push(item);
+      return;
+    }
+    if (emittedGroups.has(key)) {
+      return;
+    }
+    emittedGroups.add(key);
+    const group = groups.get(key);
+    if (group) {
+      output.push(group);
+    }
+  });
+  return output;
 }
 
 function GearIcon() {
@@ -118,30 +196,50 @@ function versionToTrack(track: LibraryTrackItem, version: LibraryTrackVersion): 
 }
 
 function LibraryResultRow({
+  compact,
   item,
   onOpenItem,
+  onPlayTrack,
   onShowVersions,
 }: {
+  compact: boolean;
   item: LibraryItem;
   onOpenItem: (item: LibraryItem) => void;
+  onPlayTrack: (track: LibraryTrackItem) => void;
   onShowVersions: (track: LibraryTrackItem) => void;
 }) {
   const image = itemImage(item);
   const title = itemTitle(item);
+  const subtitle = itemSubtitle(item, compact);
+  const showImage = !(compact && item.kind === "track");
   const versionCount = item.kind === "track" ? item.version_count ?? 0 : 0;
   return (
-    <div className="library-track-row">
-      <button className="library-track-main" onClick={() => onOpenItem(item)} type="button">
-        <span className="library-track-art" aria-hidden="true">
-          {image ? <img alt="" src={image} /> : <span>{(title || "?").slice(0, 1).toUpperCase()}</span>}
-        </span>
+    <div className={`library-track-row${compact ? " library-track-row-compact" : ""}`}>
+      <button className={`library-track-main${showImage ? "" : " library-track-main-no-art"}`} onClick={() => onOpenItem(item)} type="button">
+        {showImage ? (
+          <span className="library-track-art" aria-hidden="true">
+            {image ? <img alt="" src={image} /> : <span>{(title || "?").slice(0, 1).toUpperCase()}</span>}
+          </span>
+        ) : null}
         <span className="library-track-copy">
           <strong className="single-line-ellipsis">{title}</strong>
-          <span className="single-line-ellipsis">{itemSubtitle(item)}</span>
-          <span className="library-track-reasons single-line-ellipsis">{reasonLabel(item)}</span>
+          {subtitle ? <span className="single-line-ellipsis">{subtitle}</span> : null}
+          {compact ? null : <span className="library-track-reasons single-line-ellipsis">{reasonLabel(item)}</span>}
         </span>
       </button>
       <span className={`library-strength-pill library-strength-${item.strength}`}>{item.strength}</span>
+      {item.kind === "track" ? (
+        <button
+          aria-label={`Play ${title}`}
+          className="library-track-play-button"
+          disabled={!item.uri}
+          onClick={() => onPlayTrack(item)}
+          type="button"
+        >
+          <span className="library-track-play-icon" aria-hidden="true">▶</span>
+          <span>{formatLibraryDuration(item.duration_ms)}</span>
+        </button>
+      ) : null}
       {item.kind === "track" && versionCount > 0 ? (
         <button className="library-versions-button" onClick={() => onShowVersions(item)} type="button">
           {versionCount} versions
@@ -151,19 +249,31 @@ function LibraryResultRow({
   );
 }
 
-export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChange }: LibrarySearchPanelProps) {
+function formatLibraryDuration(durationMs: number | null | undefined) {
+  const totalSeconds = Math.max(0, Math.round(Number(durationMs ?? 0) / 1000));
+  if (!totalSeconds) {
+    return "?:??";
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+export function LibrarySearchPanel({ overlayOpen, onOpenItem, onPlayTrack, onOverlayOpenChange }: LibrarySearchPanelProps) {
   const [status, setStatus] = useState<LibraryStatusResponse | null>(null);
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [kind, setKind] = useState<LibraryKind>("all");
   const [query, setQuery] = useState("");
   const [strength, setStrength] = useState<LibraryStrengthFilter>("all");
   const [sort, setSort] = useState<LibrarySort>("recent");
+  const [deepSearch, setDeepSearch] = useState(false);
   const [versionTrack, setVersionTrack] = useState<LibraryTrackItem | null>(null);
   const [loading, setLoading] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
   const [error, setError] = useState("");
   const [kindCounts, setKindCounts] = useState<Partial<Record<LibraryKind, number>>>({});
   const limit = overlayOpen ? 50 : 6;
+  const effectiveDeepSearch = overlayOpen && deepSearch;
 
   useEffect(() => {
     let cancelled = false;
@@ -188,7 +298,7 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
     const handle = window.setTimeout(() => {
       setLoading(true);
       setError("");
-      fetchLibraryItems({ kind, q: query, strength, sort, limit, offset: 0 })
+      fetchLibraryItems({ kind, q: query, strength, sort, limit, offset: 0, deep: effectiveDeepSearch })
         .then((payload) => {
           if (cancelled) {
             return;
@@ -213,14 +323,14 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [kind, limit, query, sort, strength]);
+  }, [effectiveDeepSearch, kind, limit, query, sort, strength]);
 
   useEffect(() => {
     let cancelled = false;
     const handle = window.setTimeout(() => {
       void Promise.all(
         kindOptions.map((option) => (
-          fetchLibraryItems({ kind: option.value, q: query, strength, sort: "recent", limit: 1, offset: 0 })
+          fetchLibraryItems({ kind: option.value, q: query, strength, sort: "recent", limit: 1, offset: 0, deep: effectiveDeepSearch })
             .then((payload) => [option.value, payload.total ?? 0] as const)
         )),
       )
@@ -236,7 +346,7 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [query, strength]);
+  }, [effectiveDeepSearch, query, strength]);
 
   useEffect(() => {
     if (!rebuilding) {
@@ -248,7 +358,7 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
           setStatus(payload);
           if (payload.status !== "running") {
             setRebuilding(false);
-            void fetchLibraryItems({ kind, q: query, strength, sort, limit, offset: 0 }).then((tracksPayload) => {
+            void fetchLibraryItems({ kind, q: query, strength, sort, limit, offset: 0, deep: effectiveDeepSearch }).then((tracksPayload) => {
               setItems(tracksPayload.items ?? []);
               setStatus(tracksPayload.status);
               setKindCounts((current) => ({ ...current, [kind]: tracksPayload.total ?? 0 }));
@@ -258,7 +368,7 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
         .catch(() => undefined);
     }, 1500);
     return () => window.clearInterval(handle);
-  }, [kind, limit, query, rebuilding, sort, strength]);
+  }, [effectiveDeepSearch, kind, limit, query, rebuilding, sort, strength]);
 
   async function rebuildLibrary() {
     setRebuilding(true);
@@ -282,9 +392,11 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
   }
 
   function renderBody({ showFooter }: { showFooter: boolean }) {
+    const compact = !showFooter;
+    const resultItems = groupedLibraryResults(items, kind);
     return (
       <>
-        <div className="library-search-controls">
+        <div className={`library-search-controls${showFooter ? " library-search-controls-full" : ""}`}>
           <label className="library-search-field">
             <input
               aria-label="Search"
@@ -301,6 +413,17 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
               ))}
             </select>
           </label>
+          {showFooter ? (
+            <button
+              aria-pressed={deepSearch}
+              className={`library-deep-toggle${deepSearch ? " library-deep-toggle-active" : ""}`}
+              onClick={() => setDeepSearch((current) => !current)}
+              title="Include matches from related tracks, albums, and playlists"
+              type="button"
+            >
+              Deep
+            </button>
+          ) : null}
         </div>
         <div className="library-kind-tabs" role="tablist" aria-label="Library result type">
           {kindOptions.map((option) => (
@@ -322,13 +445,30 @@ export function LibrarySearchPanel({ overlayOpen, onOpenItem, onOverlayOpenChang
           ))}
         </div>
         <div className="library-track-list">
-          {items.map((item) => (
-            <LibraryResultRow
-              item={item}
-              key={`${item.kind}-${item.kind === "track" ? item.library_group_key ?? item.spotify_track_id : item.entity_id ?? item.label}`}
-              onOpenItem={onOpenItem}
-              onShowVersions={setVersionTrack}
-            />
+          {resultItems.map((item) => (
+            "items" in item ? (
+              <div className="library-result-group" key={`group-${item.key}`}>
+                {item.items.map((groupItem) => (
+                  <LibraryResultRow
+                    compact={compact}
+                    item={groupItem}
+                    key={`${groupItem.kind}-${groupItem.kind === "track" ? groupItem.library_group_key ?? groupItem.spotify_track_id : groupItem.entity_id ?? groupItem.label}`}
+                    onOpenItem={onOpenItem}
+                    onPlayTrack={onPlayTrack}
+                    onShowVersions={setVersionTrack}
+                  />
+                ))}
+              </div>
+            ) : (
+              <LibraryResultRow
+                compact={compact}
+                item={item}
+                key={`${item.kind}-${item.kind === "track" ? item.library_group_key ?? item.spotify_track_id : item.entity_id ?? item.label}`}
+                onOpenItem={onOpenItem}
+                onPlayTrack={onPlayTrack}
+                onShowVersions={setVersionTrack}
+              />
+            )
           ))}
           {!loading && items.length === 0 ? <p className="empty-copy">No matching results.</p> : null}
           {loading ? <p className="empty-copy">Loading...</p> : null}

@@ -2910,6 +2910,7 @@ async def me_library_tracks(
     sort: str = "recent",
     limit: int = 50,
     offset: int = 0,
+    deep: bool = False,
 ) -> dict[str, Any]:
     user_id = _require_local_data_session(request)
     payload = list_personal_library_tracks(
@@ -2919,6 +2920,7 @@ async def me_library_tracks(
         sort=sort,
         limit=limit,
         offset=offset,
+        deep=deep,
     )
     return payload
 
@@ -2932,6 +2934,7 @@ async def me_library_items(
     sort: str = "recent",
     limit: int = 50,
     offset: int = 0,
+    deep: bool = False,
 ) -> dict[str, Any]:
     user_id = _require_local_data_session(request)
     return list_personal_library_items(
@@ -2942,6 +2945,7 @@ async def me_library_items(
         sort=sort,
         limit=limit,
         offset=offset,
+        deep=deep,
     )
 
 

@@ -389,6 +389,15 @@ const SAVED_PLAYER_QUEUES_STORAGE_KEY = "listenlab.savedQueues";
 const TRACK_BOOKMARKS_STORAGE_KEY = "listenlab.trackBookmarks";
 const ENTITY_BOOKMARKS_STORAGE_KEY = "listenlab.entityBookmarks";
 type TrackBookmarkContext = NonNullable<SavedTrackBookmark["context"]>;
+type PlayerQueueEditSnapshot = {
+  tracks: PlayerQueueTrack[];
+  groups: PlayerQueueGroup[];
+  groupCursors: Record<string, number>;
+  cursor: number | null;
+  openGroupIds: Set<string>;
+  sortMode: "custom" | "length" | "az" | "recent";
+  groupMode: "custom" | "artist" | "album";
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -704,9 +713,13 @@ export function App() {
   const [playerQueueOrganizeMode, setPlayerQueueOrganizeMode] = useState(false);
   const [homeQueueOpenGroupIds, setHomeQueueOpenGroupIds] = useState<Set<string>>(() => new Set());
   const [homeQueueHeaderMenuOpen, setHomeQueueHeaderMenuOpen] = useState(false);
+  const [homeQueueSavePopoverOpen, setHomeQueueSavePopoverOpen] = useState(false);
+  const [homeQueueSaveName, setHomeQueueSaveName] = useState("");
+  const [homeQueueClearConfirmOpen, setHomeQueueClearConfirmOpen] = useState(false);
   const [playerQueueSortMode, setPlayerQueueSortMode] = useState<"custom" | "length" | "az" | "recent">("custom");
   const [playerQueueGroupMode, setPlayerQueueGroupMode] = useState<"custom" | "artist" | "album">("custom");
   const [playerQueueDragIndex, setPlayerQueueDragIndex] = useState<number | null>(null);
+  const [playerQueueEditSnapshot, setPlayerQueueEditSnapshot] = useState<PlayerQueueEditSnapshot | null>(null);
   const [playerQueueCleared, setPlayerQueueCleared] = useState(false);
   const [playerQueueLoopEnabled, setPlayerQueueLoopEnabled] = useState(false);
   const [playerTrackLoopEnabled, setPlayerTrackLoopEnabled] = useState(false);
@@ -6168,6 +6181,95 @@ export function App() {
     setPlayerQueueGroupMode("custom");
   }
 
+  function moveQueueGroup(fromGroupIndex: number, toGroupIndex: number) {
+    const currentGroups = playerQueueGroupsForNavigation();
+    if (
+      fromGroupIndex === toGroupIndex
+      || fromGroupIndex < 0
+      || toGroupIndex < 0
+      || fromGroupIndex >= currentGroups.length
+      || toGroupIndex >= currentGroups.length
+    ) {
+      return;
+    }
+    const nextGroups = [...currentGroups];
+    const [movedGroup] = nextGroups.splice(fromGroupIndex, 1);
+    if (!movedGroup) {
+      return;
+    }
+    nextGroups.splice(toGroupIndex, 0, movedGroup);
+    const nextTracks = nextGroups.flatMap((group) => group.tracks);
+    const currentIdentity = queueTrackIdentity(currentTrack);
+    const nextCursor = currentIdentity
+      ? nextTracks.findIndex((track) => queueTrackIdentity(track) === currentIdentity)
+      : playerQueueCursor;
+    setPlayerQueueGroups(nextGroups);
+    setPlayerQueueTracks(nextTracks);
+    setPlayerQueueGroupCursors((current) => {
+      const next: Record<string, number> = {};
+      for (const group of nextGroups) {
+        const previousCursor = current[group.id] ?? 0;
+        next[group.id] = Math.min(Math.max(0, previousCursor), group.tracks.length - 1);
+      }
+      return next;
+    });
+    if (playerQueueSource === "listenlab") {
+      setPlayerQueueCursor(nextCursor != null && nextCursor >= 0 ? nextCursor : null);
+    }
+    setPlayerQueueSortMode("custom");
+    setPlayerQueueGroupMode("custom");
+    setPlayerQueueShuffleEnabled(false);
+    setPlayerQueueShuffleBaseTracks(null);
+  }
+
+  function beginPlayerQueueEdit() {
+    setPlayerQueueEditSnapshot({
+      tracks: playerQueueTracks,
+      groups: playerQueueGroups,
+      groupCursors: playerQueueGroupCursors,
+      cursor: playerQueueCursor,
+      openGroupIds: new Set(homeQueueOpenGroupIds),
+      sortMode: playerQueueSortMode,
+      groupMode: playerQueueGroupMode,
+    });
+    setPlayerQueueOrganizeMode(true);
+  }
+
+  function commitPlayerQueueEdit() {
+    setPlayerQueueOrganizeMode(false);
+    setPlayerQueueDragIndex(null);
+    setPlayerQueueEditSnapshot(null);
+  }
+
+  function togglePlayerQueueEdit() {
+    if (playerQueueOrganizeMode) {
+      commitPlayerQueueEdit();
+      return;
+    }
+    beginPlayerQueueEdit();
+  }
+
+  function cancelPlayerQueueEdit() {
+    const snapshot = playerQueueEditSnapshot;
+    if (!snapshot) {
+      setPlayerQueueOrganizeMode(false);
+      setPlayerQueueDragIndex(null);
+      return;
+    }
+    setPlayerQueueTracks(snapshot.tracks);
+    setPlayerQueueGroups(snapshot.groups);
+    setPlayerQueueGroupCursors(snapshot.groupCursors);
+    setPlayerQueueCursor(snapshot.cursor);
+    setHomeQueueOpenGroupIds(new Set(snapshot.openGroupIds));
+    setPlayerQueueSortMode(snapshot.sortMode);
+    setPlayerQueueGroupMode(snapshot.groupMode);
+    setPlayerQueueShuffleEnabled(false);
+    setPlayerQueueShuffleBaseTracks(null);
+    setPlayerQueueOrganizeMode(false);
+    setPlayerQueueDragIndex(null);
+    setPlayerQueueEditSnapshot(null);
+  }
+
   function sortPlayerQueue(mode: "custom" | "length" | "az" | "recent") {
     setPlayerQueueSortMode(mode);
     if (mode === "custom") {
@@ -6854,11 +6956,18 @@ export function App() {
     });
   }
 
-  function saveCurrentQueueSnapshot() {
+  function saveCurrentQueueSnapshot(name?: string) {
+    const trimmedName = name?.trim();
+    const snapshotContext = trimmedName
+      ? {
+        label: trimmedName,
+        url: playerQueueContext?.url ?? null,
+      }
+      : playerQueueContext;
     const snapshot: SavedPlayerQueueSnapshot = {
       id: crypto.randomUUID(),
       savedAt: new Date().toISOString(),
-      context: playerQueueContext,
+      context: snapshotContext,
       source: playerQueueSource,
       activeCursor: hasActiveQueueCursor ? activeQueueCursor : null,
       playedKeys: Array.from(playerQueuePlayedKeys),
@@ -6889,7 +6998,7 @@ export function App() {
     }
     persistSavedPlayerQueues([snapshot, ...existing]);
     setHomeQueueHeaderMenuOpen(false);
-    setStatusMessage(`Saved queue "${snapshot.groups[0]?.label ?? "Current queue"}".`);
+    setStatusMessage(`Saved queue "${snapshot.context?.label || snapshot.groups[0]?.label || "Current queue"}".`);
   }
 
   function deleteSavedPlayerQueue(snapshotId: string) {
@@ -11984,6 +12093,7 @@ export function App() {
         onGroupModeChange={groupPlayerQueue}
         onHeaderMenuOpenChange={setHomeQueueHeaderMenuOpen}
         onJumpToGroup={jumpToQueueGroup}
+        onMoveGroup={moveQueueGroup}
         onMoveTrack={moveQueueTrack}
         onOpenGroupIdsChange={setHomeQueueOpenGroupIds}
         onOpenTrack={openQueuePlayerTrackDetails}
@@ -11996,6 +12106,8 @@ export function App() {
         onShuffle={handleQueueShuffleClick}
         onSortModeChange={sortPlayerQueue}
         onToggleBookmark={toggleTrackBookmark}
+        onToggleEdit={togglePlayerQueueEdit}
+        onCancelEdit={cancelPlayerQueueEdit}
         onToggleLoop={handleQueueLoopClick}
         onUnloopCurrentTrack={unloopCurrentTrack}
         openGroupIds={homeQueueOpenGroupIds}
@@ -12037,6 +12149,50 @@ export function App() {
     const homeQueueGroups = playerQueueGroups.length > 0
       ? playerQueueGroups
       : [fallbackHomeQueueGroup].filter((group): group is PlayerQueueGroup => Boolean(group));
+    const activeHomeQueueGroupMatch = hasActiveQueueCursor ? homeQueueGroupForCursor(activeQueueCursor) : null;
+    const activeHomeQueueGroup = activeHomeQueueGroupMatch?.group ?? homeQueueGroups[0] ?? null;
+    const activeHomeQueueGroupLabel = activeHomeQueueGroup?.label ?? playerQueueContext?.label ?? "Current";
+    const homeQueueDefaultSaveName = activeHomeQueueGroup?.label ?? playerQueueContext?.label ?? "Current queue";
+    const openHomeQueueSavePopover = () => {
+      setHomeQueueSaveName(homeQueueDefaultSaveName);
+      setHomeQueueSavePopoverOpen(true);
+      setHomeQueueClearConfirmOpen(false);
+    };
+    const confirmHomeQueueSave = () => {
+      saveCurrentQueueSnapshot(homeQueueSaveName.trim() || homeQueueDefaultSaveName);
+      setHomeQueueSavePopoverOpen(false);
+    };
+    const openHomeQueueEditOverlay = () => {
+      setHomeQueueHeaderMenuOpen(false);
+      setPlayerQueueSettingsOpen(false);
+      setPlayerQueuePauseMenuOpen(false);
+      setPlayerQueueOverlayOpen(true);
+      beginPlayerQueueEdit();
+    };
+    const recentFallbackPreviousTrack = recentTracksToPlayerQueueTracks(playerRecentTracks)
+      .find((track) => queueTrackIdentity(track) !== queueTrackIdentity(playerDisplayTrack)) ?? null;
+    const homeQueuePreviewRows = [
+      {
+        key: "previous",
+        label: "Previous",
+        track: recentFallbackPreviousTrack,
+        index: null,
+      },
+      {
+        key: "current",
+        label: "Current",
+        track: hasActiveQueueCursor
+          ? playerQueueTracks[activeQueueCursor] ?? currentPlayerQueueTrack()
+          : currentPlayerQueueTrack(),
+        index: hasActiveQueueCursor ? activeQueueCursor : null,
+      },
+      {
+        key: "up-next",
+        label: queuePauseAfterCurrentEnabled ? "Paused" : "Up next",
+        track: playerUpNextTrack,
+        index: hasActiveQueueCursor ? activeQueueCursor + 1 : null,
+      },
+    ];
     const homeQueueGroupMeta = (group: PlayerQueueGroup, groupStartIndex: number) => {
       const groupEndIndex = groupStartIndex + group.tracks.length - 1;
       const activeInGroup = hasActiveQueueCursor && activeQueueCursor >= groupStartIndex && activeQueueCursor <= groupEndIndex;
@@ -12046,7 +12202,7 @@ export function App() {
         activeInGroup ? `track ${activeQueueCursor - groupStartIndex + 1}` : null,
       ].filter(Boolean).join(" · ");
     };
-    const renderHomeQueueTrackRow = (track: PlayerQueueTrack, index: number, bookmarkContext: TrackBookmarkContext | null = null) => {
+    const renderHomeQueueTrackRow = (track: PlayerQueueTrack, index: number, bookmarkContext: TrackBookmarkContext | null = null, forcedStatus: string | null = null) => {
       const isCurrentQueueTrack = hasActiveQueueCursor && index === activeQueueCursor;
       const isLoopedQueueTrack = playerTrackLoopEnabled && isCurrentQueueTrack;
       const isPausedQueueTrack = queuePausedCursor === index && isCurrentQueueTrack && playerDisplayPaused;
@@ -12087,7 +12243,7 @@ export function App() {
               )}
             </span>
           ) : (
-            <button aria-label={`Play ${track.name}`} className="player-queue-cover-button" disabled={!track.uri} onClick={() => void playQueueTrackAtIndex(index)} type="button">
+            <button aria-label={`Play ${track.name}`} className="player-queue-cover-button" disabled={!track.uri || index < 0} onClick={() => void playQueueTrackAtIndex(index)} type="button">
               {track.image ? (
                 <img alt="" className="player-recent-cover" src={track.image} />
               ) : (
@@ -12149,7 +12305,8 @@ export function App() {
               </button>
             ) : null}
             {isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-next">{queuePauseAfterCurrentEnabled ? "Paused" : "Up next"}</span> : null}
-            {isPlayedQueueTrack && !isCurrentQueueTrack && !isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-played">Played</span> : null}
+            {forcedStatus ? <span className="player-queue-status player-queue-status-played">{forcedStatus}</span> : null}
+            {isPlayedQueueTrack && !forcedStatus && !isCurrentQueueTrack && !isUpNextQueueTrack ? <span className="player-queue-status player-queue-status-played">Played</span> : null}
           </span>
         </div>
       );
@@ -12415,44 +12572,65 @@ export function App() {
                     setHomeQueueHeaderMenuOpen((current) => !current);
                     setPlayerQueueSettingsOpen(false);
                     setPlayerQueuePauseMenuOpen(false);
+                    setHomeQueueSavePopoverOpen(false);
+                    setHomeQueueClearConfirmOpen(false);
                   }}
                   type="button"
                 >
-                  Queue
+                  <span className="player-queue-heading-main">Queue</span>
+                  <span className="player-queue-heading-context single-line-ellipsis">{activeHomeQueueGroupLabel}</span>
                 </button>
                 {homeQueueHeaderMenuOpen ? (
                   <div className="player-queue-settings-menu player-queue-context-menu">
                     <div className="player-queue-context-actions" aria-label="Queue controls">
-                      <div className="player-queue-settings">
+                      <button className="player-queue-context-action-button" disabled={playerQueueTracks.length === 0} onClick={openHomeQueueEditOverlay} type="button">Organize</button>
+                      <div className="player-queue-context-action-wrap">
+                        <button className="player-queue-context-action-button" disabled={playerQueueTracks.length === 0} onClick={openHomeQueueSavePopover} type="button">Save</button>
+                        {homeQueueSavePopoverOpen ? (
+                          <form
+                            className="player-queue-save-popover player-queue-home-popover"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              confirmHomeQueueSave();
+                            }}
+                          >
+                            <label>
+                              <span>Name</span>
+                              <input
+                                autoFocus
+                                onChange={(event) => setHomeQueueSaveName(event.currentTarget.value)}
+                                value={homeQueueSaveName}
+                              />
+                            </label>
+                            <div className="player-queue-save-actions">
+                              <button type="button" onClick={() => setHomeQueueSavePopoverOpen(false)}>Cancel</button>
+                              <button type="submit">Save</button>
+                            </div>
+                          </form>
+                        ) : null}
+                      </div>
+                      <div className="player-queue-context-action-wrap">
                         <button
-                          aria-expanded={playerQueueSettingsOpen}
-                          aria-label="Queue settings"
-                          className={`player-queue-header-button${liveReadOnlyMode ? " player-control-readonly" : ""}`}
+                          className="player-queue-context-action-button"
+                          disabled={playerQueueTracks.length === 0}
                           onClick={() => {
-                            setPlayerQueueSettingsOpen((current) => !current);
-                            setPlayerQueuePauseMenuOpen(false);
+                            setHomeQueueClearConfirmOpen((current) => !current);
+                            setHomeQueueSavePopoverOpen(false);
                           }}
-                          title="Queue settings"
                           type="button"
                         >
-                          <svg aria-hidden="true" viewBox="0 0 24 24">
-                            <path d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a7.8 7.8 0 0 0-2.6-1.5L14 2h-4l-.4 3a7.8 7.8 0 0 0-2.6 1.5l-2.4-1-2 3.5 2 1.5c-.1.5-.1 1-.1 1.5s0 1 .1 1.5l-2 1.5 2 3.5 2.4-1a7.8 7.8 0 0 0 2.6 1.5l.4 3h4l.4-3a7.8 7.8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" />
-                          </svg>
+                          Clear
                         </button>
-                        {playerQueueSettingsOpen ? (
-                          <div className="player-queue-settings-menu player-queue-context-settings-menu">
-                            <button onClick={() => {
-                              setPlayerQueueOrganizeMode((current) => !current);
-                              setPlayerQueueSettingsOpen(false);
-                            }} type="button">
-                              {playerQueueOrganizeMode ? "Done organizing" : "Organize"}
-                            </button>
-                            <button disabled={playerQueueTracks.length === 0} onClick={saveCurrentQueueSnapshot} type="button">
-                              Save current queue
-                            </button>
-                            <button className={liveReadOnlyMode ? "player-control-readonly" : undefined} disabled={playerQueueTracks.length === 0} onClick={() => void handleClearPlayerQueueClick()} type="button">
-                              Clear queue
-                            </button>
+                        {homeQueueClearConfirmOpen ? (
+                          <div className="player-queue-clear-popover player-queue-home-popover" role="dialog" aria-label="Clear queue">
+                            <p>Clear this queue?</p>
+                            <div className="player-queue-save-actions">
+                              <button type="button" onClick={() => setHomeQueueClearConfirmOpen(false)}>Cancel</button>
+                              <button type="button" onClick={() => {
+                                setHomeQueueClearConfirmOpen(false);
+                                void handleClearPlayerQueueClick();
+                              }}>Clear</button>
+                            </div>
                           </div>
                         ) : null}
                       </div>
@@ -12549,42 +12727,17 @@ export function App() {
               </div>
             ) : null}
             <div className="player-recent-list" ref={homeQueueListRef}>
-              {homeQueueGroups.map((group, groupIndex) => {
-                const groupStartIndex = homeQueueGroups.slice(0, groupIndex).reduce((total, item) => total + item.tracks.length, 0);
-                const groupEndIndex = groupStartIndex + group.tracks.length - 1;
-                const groupIsOpen = homeQueueOpenGroupIds.has(group.id);
-                const activeInGroup = hasActiveQueueCursor && activeQueueCursor >= groupStartIndex && activeQueueCursor <= groupEndIndex;
-                return (
-                  <div className="player-queue-group-wrap" key={group.id}>
-                    <div className="player-queue-group">
-                      <button
-                        aria-expanded={groupIsOpen}
-                        className="player-queue-group-header"
-                        onClick={() => setHomeQueueOpenGroupIds((current) => {
-                          const next = new Set(current);
-                          if (next.has(group.id)) {
-                            next.delete(group.id);
-                          } else {
-                            next.add(group.id);
-                          }
-                          return next;
-                        })}
-                        type="button"
-                      >
-                        <span className="player-queue-group-toggle" aria-hidden="true">{groupIsOpen ? "⌄" : "›"}</span>
-                        <span className="player-queue-group-copy">
-                          <span className="single-line-ellipsis">{group.label}</span>
-                          <span className="player-queue-group-meta single-line-ellipsis">{homeQueueGroupMeta(group, groupStartIndex)}</span>
-                        </span>
-                        {activeInGroup ? <span className="player-queue-current-dot" aria-label="Current queue context" /> : null}
-                      </button>
-                    </div>
-                    {groupIsOpen ? group.tracks.map((track, groupTrackIndex) => (
-                      renderHomeQueueTrackRow(track, groupStartIndex + groupTrackIndex, bookmarkContextFromQueueGroup(group, groupTrackIndex))
-                    )) : null}
+              {homeQueuePreviewRows.map((row) => (
+                row.track ? (
+                  <div className="player-home-queue-preview-row" key={row.key}>
+                    {renderHomeQueueTrackRow(row.track, row.index ?? -1, activePlayerBookmarkContext(), row.key === "previous" ? "Previous" : null)}
                   </div>
-                );
-              })}
+                ) : (
+                  <div className="player-home-queue-preview-row player-home-queue-preview-row-empty" key={row.key}>
+                    <p className="empty-copy player-recent-empty">{row.label}: No track</p>
+                  </div>
+                )
+              ))}
               {!playerQueueLoading && playerQueueTracks.length === 0 ? <p className="empty-copy player-recent-empty">No queued songs were returned.</p> : null}
               {playerQueueError ? <p className="empty-copy player-recent-empty">{playerQueueError}</p> : null}
             </div>
@@ -12700,6 +12853,21 @@ export function App() {
     });
   }
 
+  function playLibraryTrack(track: LibraryTrackItem) {
+    const trackUri = track.uri ?? (track.spotify_track_id ? `spotify:track:${track.spotify_track_id}` : null);
+    void handlePopupTrackPlayback(trackUri, {
+      optimisticTrack: {
+        name: track.track_name || "Unknown track",
+        artists: track.artist_name || "Unknown artist",
+        album: track.album_name || "Unknown album",
+        image: track.image_url ?? null,
+        uri: trackUri ?? "",
+        durationMs: Math.max(0, Number(track.duration_ms ?? 0)),
+      },
+      sourceTrack: track,
+    });
+  }
+
   function renderLibraryPanel() {
     return (
       <section className="player-library-panel" id="library" aria-labelledby="player-library-heading">
@@ -12720,6 +12888,7 @@ export function App() {
         <LibrarySearchPanel
           overlayOpen={libraryOverlayOpen}
           onOpenItem={openLibraryItemPreview}
+          onPlayTrack={playLibraryTrack}
           onOverlayOpenChange={setLibraryOverlayOpen}
         />
       </section>

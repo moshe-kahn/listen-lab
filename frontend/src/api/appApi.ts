@@ -154,6 +154,7 @@ export async function fetchLibraryTracks(params: {
   sort?: "recent" | "name" | "listen_count" | "playlist_count";
   limit?: number;
   offset?: number;
+  deep?: boolean;
 } = {}): Promise<LibraryTracksResponse> {
   const searchParams = new URLSearchParams({
     strength: params.strength ?? "all",
@@ -161,6 +162,7 @@ export async function fetchLibraryTracks(params: {
     sort: params.sort ?? "recent",
     limit: String(params.limit ?? 50),
     offset: String(params.offset ?? 0),
+    deep: params.deep ? "true" : "false",
   });
   const response = await fetch(`${apiBaseUrl}/me/library/tracks?${searchParams.toString()}`, {
     credentials: "include",
@@ -185,6 +187,7 @@ export async function fetchLibraryItems(params: {
   sort?: "recent" | "name" | "listen_count" | "playlist_count";
   limit?: number;
   offset?: number;
+  deep?: boolean;
 } = {}): Promise<LibraryTracksResponse> {
   const searchParams = new URLSearchParams({
     kind: params.kind ?? "all",
@@ -193,6 +196,7 @@ export async function fetchLibraryItems(params: {
     sort: params.sort ?? "recent",
     limit: String(params.limit ?? 50),
     offset: String(params.offset ?? 0),
+    deep: params.deep ? "true" : "false",
   });
   const response = await fetch(`${apiBaseUrl}/me/library/items?${searchParams.toString()}`, {
     credentials: "include",

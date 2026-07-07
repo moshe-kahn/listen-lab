@@ -4412,6 +4412,10 @@ h1 {
   margin-top: 12px;
 }
 
+.library-search-controls-full {
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 160px) auto;
+}
+
 .library-search-field,
 .library-sort-field {
   display: grid;
@@ -4424,7 +4428,8 @@ h1 {
 }
 
 .library-search-field input,
-.library-sort-field select {
+.library-sort-field select,
+.library-deep-toggle {
   width: 100%;
   min-width: 0;
   height: 36px;
@@ -4435,6 +4440,23 @@ h1 {
   color: #f7f8f2;
   font-size: 0.82rem;
   font-weight: 760;
+}
+
+.library-deep-toggle {
+  align-self: end;
+  width: auto;
+  min-width: 70px;
+  cursor: pointer;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.library-deep-toggle:hover,
+.library-deep-toggle:focus-visible,
+.library-deep-toggle-active {
+  border-color: rgba(30, 215, 96, 0.42);
+  background: rgba(30, 215, 96, 0.14);
+  outline: none;
 }
 
 .library-kind-tabs,
@@ -4533,7 +4555,7 @@ h1 {
 
 .library-track-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -4543,6 +4565,21 @@ h1 {
   background: rgba(255, 255, 255, 0.045);
   color: #dff8e8;
   text-align: left;
+}
+
+.library-result-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid rgba(125, 255, 172, 0.16);
+  border-radius: 9px;
+  background: rgba(30, 215, 96, 0.045);
+}
+
+.library-result-group .library-track-row {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.035);
 }
 
 .library-track-row:hover,
@@ -4563,6 +4600,10 @@ h1 {
   color: inherit;
   cursor: pointer;
   text-align: left;
+}
+
+.library-track-main-no-art {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .library-track-art {
@@ -4604,6 +4645,42 @@ h1 {
 
 .library-track-copy .library-track-reasons {
   color: #b8d7c2;
+}
+
+.library-track-play-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 74px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid rgba(148, 211, 162, 0.2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  color: #dff8e8;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.library-track-play-button:hover,
+.library-track-play-button:focus-visible {
+  border-color: rgba(30, 215, 96, 0.42);
+  background: rgba(30, 215, 96, 0.14);
+  outline: none;
+}
+
+.library-track-play-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.library-track-play-icon {
+  color: #1ed760;
+  font-size: 0.72rem;
+  line-height: 1;
 }
 
 .library-strength-pill {
@@ -5001,7 +5078,7 @@ h1 {
 .player-queue-overlay {
   position: fixed;
   inset: 0;
-  z-index: 95;
+  z-index: 140;
   display: grid;
   place-items: center;
   padding: 28px;
@@ -5009,8 +5086,8 @@ h1 {
 }
 
 .player-queue-overlay-panel {
-  width: min(760px, 100%);
-  max-height: min(760px, calc(100vh - 56px));
+  width: min(960px, calc(100vw - 56px));
+  height: min(720px, calc(100vh - 56px));
   display: grid;
   min-width: 0;
   min-height: 0;
@@ -5021,14 +5098,230 @@ h1 {
   box-shadow: 0 28px 70px rgba(0, 0, 0, 0.52);
 }
 
+.player-queue-overlay-layout {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.player-queue-overlay-nav {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 16px 14px;
+  border-right: 1px solid rgba(148, 211, 162, 0.16);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.player-queue-overlay-nav-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.player-queue-overlay-eyebrow,
+.player-queue-overlay-loading {
+  grid-column: 1 / -1;
+  color: #9cb7a6;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.player-queue-overlay-nav-header h3 {
+  margin: 0;
+  color: #f7f8f2;
+  font-size: 1rem;
+  line-height: 1.15;
+}
+
+.player-queue-overlay-context-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  align-items: start;
+  gap: 6px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.player-queue-overlay-context-list .player-queue-context-item {
+  width: 100%;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.player-queue-overlay-context-list .player-queue-context-item:hover,
+.player-queue-overlay-context-list .player-queue-context-item:focus-visible {
+  border-color: rgba(30, 215, 96, 0.28);
+  background: rgba(30, 215, 96, 0.08);
+}
+
+.player-queue-context-item-draggable {
+  cursor: grab;
+}
+
+.player-queue-context-item-draggable:active {
+  cursor: grabbing;
+}
+
+.player-queue-context-item-dragging {
+  opacity: 0.5;
+}
+
+.player-queue-overlay-nav-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.player-queue-overlay-nav-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.player-queue-overlay-button-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.player-queue-overlay-action-button {
+  min-width: 0;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #dff8e8;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.player-queue-overlay-action-button:hover,
+.player-queue-overlay-action-button:focus-visible {
+  border-color: rgba(30, 215, 96, 0.34);
+  background: rgba(30, 215, 96, 0.12);
+}
+
+.player-queue-overlay-action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.player-queue-overlay-save {
+  position: relative;
+}
+
+.player-queue-save-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 45;
+  width: 240px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(148, 211, 162, 0.22);
+  border-radius: 8px;
+  background: rgba(15, 24, 19, 0.98);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.36);
+}
+
+.player-queue-save-popover label {
+  display: grid;
+  gap: 6px;
+  color: #9cb7a6;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.player-queue-save-popover input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f7f8f2;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.player-queue-save-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.player-queue-save-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #dff8e8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.player-queue-save-actions button:hover,
+.player-queue-save-actions button:focus-visible {
+  border-color: rgba(30, 215, 96, 0.34);
+  background: rgba(30, 215, 96, 0.12);
+}
+
 .player-queue-overlay-column {
   height: 100%;
   min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  align-content: start;
   padding: 16px;
 }
 
 .player-queue-overlay-column .player-recent-list {
+  min-height: 0;
   max-height: none;
+  align-content: start;
+  align-items: start;
+  grid-auto-rows: max-content;
+}
+
+.player-queue-overlay-column .player-queue-group-wrap {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-self: start;
+  min-height: 0;
+}
+
+.player-queue-overlay-column .player-queue-group {
+  grid-column: 1 / -1;
+  align-self: start;
+}
+
+.player-queue-overlay-column .player-queue-row {
+  grid-column: 2;
+  width: 100%;
 }
 
 .player-recent-column,
@@ -5074,6 +5367,30 @@ h1 {
   line-height: 1.2;
 }
 
+.player-queue-heading-button {
+  max-width: 220px;
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.player-queue-heading-main {
+  color: #f7f8f2;
+  font-size: 0.86rem;
+  font-weight: 900;
+}
+
+.player-queue-heading-context {
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  color: #9cb7a6;
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: none;
+}
+
 .player-queue-heading-button:hover,
 .player-queue-heading-button:focus-visible {
   color: #dff8e8;
@@ -5088,11 +5405,68 @@ h1 {
 }
 
 .player-queue-context-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding: 4px 4px 8px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
   margin-bottom: 4px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.player-queue-context-action-wrap {
+  position: relative;
+}
+
+.player-queue-context-action-button {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 8px;
+  border: 1px solid rgba(148, 211, 162, 0.22);
+  border-radius: 8px;
+  background: rgba(30, 215, 96, 0.1);
+  color: #f7f8f2;
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.player-queue-context-action-button:hover,
+.player-queue-context-action-button:focus-visible {
+  border-color: rgba(30, 215, 96, 0.34);
+  background: rgba(30, 215, 96, 0.12);
+}
+
+.player-queue-context-action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.player-queue-home-popover {
+  right: auto;
+  left: 0;
+}
+
+.player-queue-clear-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  z-index: 45;
+  width: 190px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(148, 211, 162, 0.22);
+  border-radius: 8px;
+  background: rgba(15, 24, 19, 0.98);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.36);
+}
+
+.player-queue-clear-popover p {
+  margin: 0;
+  color: #f7f8f2;
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 .player-queue-context-actions .player-queue-settings {
@@ -5326,6 +5700,18 @@ h1 {
   max-height: 220px;
   overflow-y: auto;
   padding-right: 4px;
+}
+
+.player-home-queue-preview-row {
+  display: grid;
+}
+
+.player-home-queue-preview-row .player-queue-row {
+  padding-block: 6px;
+}
+
+.player-home-queue-preview-row-empty {
+  padding: 2px 0;
 }
 
 .player-queue-group {

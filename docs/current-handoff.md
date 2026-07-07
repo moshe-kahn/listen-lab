@@ -16,20 +16,52 @@ Avoid reading every doc by default.
 Active branch: `frontend-app-refactor`.
 
 Latest feature commit:
-- pending commit: personal Library/Catalog, enhanced playlist navigation, and player/home UI organization
+- latest commit: `e104687 Add personal library and playlist navigation`
 
 Worktree at handoff:
 - current dirty scope is the commit candidate:
-  - personal Library/Catalog cache, search, overlay, strength/reason model, and unavailable-track hiding
-  - homepage Saved playlists navigation and full playlist overlay with category/editor/size/sort/group controls
-  - playlist contributor/owner display cleanup, including opaque Spotify user ids rendered as `Unknown`
-  - player top-bar link, player layout boxes, queue/album/playlist membership organization, and plus/minus action row
-  - `Charts` label changed to `Vault` in the top/header surfaces
-  - artist identity resolver centralization and related docs
+  - Library simple search now matches entity titles only; full overlay has opt-in `Deep` search for related matches such as playlist contains-track hits
+  - Library homepage rows are compact: no reason/context line, track rows omit album art, albums do not show track counts, playlists still do
+  - Library `All` results visually group same-title artist/album/track results; order is artist, album, track
+  - Library track grouping has a narrow backend fallback for same-artist feature-parenthetical variants, e.g. `A Real Hero` and `A Real Hero (feat. Electric Youth)`
+  - Library track rows have a right-side play/time button wired to the existing player path
+  - Queue overlay/home queue organization work is also dirty: edit/organize controls, save naming, clear confirmation, group movement, and queue overlay styling
   - docs updated for this batch
 
 Important local instruction:
 - `AGENTS.md` says substantial frontend UI should not be added directly to `frontend/src/App.tsx`. This branch still has a large `App.tsx` integration surface from iterative UI work. `frontend/src/App.tsx` is currently about 15,032 lines / 681,959 bytes. Future UI work should extract focused components and local-storage helpers instead of growing `App.tsx` further.
+
+## Latest Completed: Library Search Semantics And Queue Overlay Polish
+
+Backend:
+- `GET /me/library/tracks` and `GET /me/library/items` accept `deep=true|false`.
+- Default/simple Library search filters after aggregation against each displayed entity title.
+  - tracks match track title only
+  - artists match artist name only
+  - albums match album title only
+  - playlists match playlist title only
+- Deep search keeps the broader relationship matching, so playlists/albums/artists can appear when related cached tracks match.
+- Library track grouping now combines same-artist feature-parenthetical title variants when no recording representative is available.
+  - scoped to `feat`, `featuring`, and `ft` parentheticals
+  - does not merge remixes/live/covers by broad title alone
+
+Frontend:
+- Homepage Library search always uses simple search.
+- Full Library overlay exposes a `Deep` toggle.
+- Homepage Library results are compact and suppress extra context/reason text.
+- Library `All` visually groups same-title artist/album/track rows and orders them artist, album, track.
+- Same-title track + album groups show the album above the track.
+- Track rows include a play button with duration and use the existing player playback path.
+- Queue overlay organization changes are present in the dirty worktree: organize/edit mode, group movement, save-name popover, clear confirmation, and related styling.
+
+Docs updated:
+- `docs/reference/drafts/library-personal-catalog-plan.md`
+- `docs/current-handoff.md`
+
+Latest checks:
+- `./.venv/bin/python -m unittest backend.tests.test_personal_library` passed, 11 tests.
+- `cd frontend && npm run build` passed; existing large-chunk warning remains.
+- `git diff --check` passed.
 
 ## Latest Completed: Personal Library And Playlist Navigation
 

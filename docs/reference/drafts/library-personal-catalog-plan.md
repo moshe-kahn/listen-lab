@@ -21,10 +21,22 @@ Use these strength levels:
 ## API / UI
 
 - Add `GET /me/library/tracks` with filters: `strength`, `q`, `limit`, `offset`, and sort options like `recent`, `name`, `listen_count`, `playlist_count`.
+- Add `GET /me/library/items` for mixed `all`, `track`, `artist`, `album`, and `playlist` results.
+- Search defaults to simple entity-title matching:
+  - tracks match track title
+  - artists match artist name
+  - albums match album title
+  - playlists match playlist title
+- Full Library overlay can pass `deep=true` to include related evidence matches, such as playlists that contain a matching track. Homepage Library search should not expose or use deep search.
 - Add `GET /me/library/status` so the UI can show stale/rebuilding state.
 - Add `POST /me/library/rebuild` to enqueue or run a background rebuild for the current user.
 - Add a `Library` dashboard surface as a focused component, not directly inside `App.tsx`, with strength tabs: `Primary`, `Contextual`, `Potential`, `Ephemeral`.
 - Each row should show why it is there, such as `Liked`, `Own playlist`, `2 listens`, `Favorite playlist`, or `Album context`.
+- Homepage Library rows should stay compact and omit row reason/context text.
+- In mixed `All` results, same-title entities may be visually grouped without merging durable identities:
+  - artist above album above track
+  - playlists remain separate
+  - same-artist feature-parenthetical track title variants can be grouped as versions when no recording representative is available
 
 ## Rebuild Rules
 

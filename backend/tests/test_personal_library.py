@@ -389,6 +389,23 @@ class PersonalLibraryTests(unittest.TestCase):
         self.assertEqual(4, mixed["total"])
         self.assertEqual({"track", "artist", "album", "playlist"}, {item["kind"] for item in mixed["items"]})
 
+    def test_simple_entity_search_matches_entity_title_not_related_tracks(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self._seed_playlist(connection, "regular-playlist", "Regular Mix", is_owned=False)
+            self._seed_playlist_track(connection, "regular-playlist", "hero-track", "Hero Song", position=0)
+            connection.commit()
+
+        rebuild_personal_library("user-1")
+
+        simple_playlists = list_personal_library_items("user-1", kind="playlist", q="hero", limit=10)
+        deep_playlists = list_personal_library_items("user-1", kind="playlist", q="hero", limit=10, deep=True)
+        simple_mixed = list_personal_library_items("user-1", kind="all", q="hero", limit=10)
+
+        self.assertEqual(0, simple_playlists["total"])
+        self.assertEqual(1, deep_playlists["total"])
+        self.assertEqual("Regular Mix", deep_playlists["items"][0]["name"])
+        self.assertEqual({"track"}, {item["kind"] for item in simple_mixed["items"]})
+
     def test_track_results_group_release_duplicates_without_versions(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
             self._seed_release_mapping(
@@ -449,6 +466,57 @@ class PersonalLibraryTests(unittest.TestCase):
 
         rebuild_personal_library("user-1")
         response = list_personal_library_tracks("user-1", limit=10)
+
+        self.assertEqual(1, response["total"])
+        self.assertEqual(2, response["items"][0]["version_count"])
+        self.assertEqual(2, len(response["items"][0]["versions"]))
+
+    def test_track_results_group_feature_parenthetical_title_variants(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.executemany(
+                """
+                INSERT INTO personal_library_track_cache (
+                  user_id, spotify_track_id, track_name, artist_name, album_name,
+                  album_id, image_url, uri, url, duration_ms, artists_json,
+                  strength, reasons_json, play_count, first_played_at,
+                  last_played_at, playlist_count, liked_at, is_liked,
+                  source_playlist_id, source_playlist_name, source_album_id,
+                  source_album_name, evidence_first_seen_at, evidence_last_seen_at,
+                  release_track_id, recording_representative_release_track_id,
+                  rule_version, rebuilt_at
+                )
+                VALUES (
+                  'user-1', ?, ?, 'College, Electric Youth', 'A Real Hero',
+                  'album-hero', NULL, ?, ?, 267000, ?,
+                  'primary', '[{"reason":"liked","label":"Liked"}]', 1,
+                  '2026-07-02T00:00:00Z', '2026-07-02T00:00:00Z',
+                  0, NULL, 1, NULL, NULL, 'album-hero', 'A Real Hero',
+                  '2026-07-02T00:00:00Z', '2026-07-02T00:00:00Z',
+                  ?, NULL, 1, '2026-07-04T00:00:00Z'
+                )
+                """,
+                [
+                    (
+                        "hero-feat",
+                        "A Real Hero (feat. Electric Youth)",
+                        "spotify:track:hero-feat",
+                        "https://open.spotify.com/track/hero-feat",
+                        json.dumps([{"id": "college", "name": "College"}, {"id": "electric-youth", "name": "Electric Youth"}]),
+                        301,
+                    ),
+                    (
+                        "hero-base",
+                        "A Real Hero",
+                        "spotify:track:hero-base",
+                        "https://open.spotify.com/track/hero-base",
+                        json.dumps([{"id": "college", "name": "College"}, {"id": "electric-youth", "name": "Electric Youth"}]),
+                        302,
+                    ),
+                ],
+            )
+            connection.commit()
+
+        response = list_personal_library_tracks("user-1", q="hero", limit=10)
 
         self.assertEqual(1, response["total"])
         self.assertEqual(2, response["items"][0]["version_count"])
