@@ -425,6 +425,10 @@ def playlist_needs_track_sync(user_id: str, playlist: dict[str, Any]) -> bool:
     return datetime.now(UTC) - cached_at > timedelta(seconds=PLAYLIST_INDEX_STALE_SECONDS)
 
 
+def playlist_allows_background_track_sync(playlist: dict[str, Any]) -> bool:
+    return bool(playlist.get("is_owned") or playlist.get("is_collaborative"))
+
+
 def mark_playlist_sync_started(user_id: str, playlist_id: str) -> None:
     now = _utc_now()
     with sqlite_connection(write=True) as connection:
@@ -893,7 +897,13 @@ def playlist_index_status_for_user(user_id: str) -> dict[str, Any]:
             """
             SELECT
               count(*) AS playlist_count,
-              sum(CASE WHEN tracks_cache_complete = 1 THEN 1 ELSE 0 END) AS complete_playlist_count
+              sum(
+                CASE
+                  WHEN tracks_cache_complete = 1 THEN 1
+                  WHEN is_owned = 0 AND is_collaborative = 0 THEN 1
+                  ELSE 0
+                END
+              ) AS complete_playlist_count
             FROM spotify_playlist_cache
             WHERE user_id = ?
             """,

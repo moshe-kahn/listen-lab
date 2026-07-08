@@ -85,6 +85,7 @@ from backend.app.playlist_index import (
     playlist_contributor_summaries_for_user,
     playlist_index_status_for_user,
     playlist_memberships_for_track,
+    playlist_allows_background_track_sync,
     playlist_needs_track_sync,
     set_playlist_hidden,
     set_playlist_category_membership,
@@ -741,7 +742,11 @@ async def _sync_playlist_index_for_user(access_token: str, spotify_user_id: str)
         upsert_playlist_metadata(str(spotify_user_id), playlists)
         for playlist in playlists:
             playlist_id = str(playlist.get("playlist_id") or "").strip()
-            if not playlist_id or not playlist_needs_track_sync(str(spotify_user_id), playlist):
+            if (
+                not playlist_id
+                or not playlist_allows_background_track_sync(playlist)
+                or not playlist_needs_track_sync(str(spotify_user_id), playlist)
+            ):
                 continue
             mark_playlist_sync_started(str(spotify_user_id), playlist_id)
             try:

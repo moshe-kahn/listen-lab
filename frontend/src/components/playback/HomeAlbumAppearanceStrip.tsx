@@ -139,6 +139,13 @@ export function HomeAlbumAppearanceStrip({
           <div className="player-home-playlist-strip">
             {uniquePlaylistMemberships.map((membership) => (
               <button className="player-home-playlist-card" key={membership.playlist_id} onClick={() => onPlaylistClick(membership)} type="button">
+                {membership.playlist_image_url ? (
+                  <img alt="" className="player-home-playlist-card-image" src={membership.playlist_image_url} />
+                ) : (
+                  <span className="player-home-playlist-card-image player-home-playlist-card-fallback" aria-hidden="true">
+                    {(membership.playlist_name ?? "P").slice(0, 1).toUpperCase()}
+                  </span>
+                )}
                 <span className="single-line-ellipsis">{membership.playlist_name ?? "Untitled playlist"}</span>
               </button>
             ))}

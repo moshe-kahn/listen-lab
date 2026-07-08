@@ -12311,10 +12311,90 @@ export function App() {
         </div>
       );
     };
+    const renderHomeHistoryTrackRow = (track: RecentTrack, index: number) => {
+      const isDisplayedTrack = Boolean(
+        playerDisplayTrack?.uri
+        && trackUriWithFallback(track.uri, track.track_id) === playerDisplayTrack.uri,
+      );
+      const durationMs = track.duration_ms ?? (isDisplayedTrack ? playerDisplayDurationMs || playerDisplayTrack?.durationMs : null);
+      const progressRatio = isDisplayedTrack && durationMs
+        ? Math.max(0, Math.min(1, playerDisplayPositionMs / durationMs))
+        : (
+          typeof track.estimated_completion_ratio === "number"
+            ? Math.max(0, Math.min(1, track.estimated_completion_ratio))
+            : null
+        );
+      return (
+        <button
+          className="player-recent-row player-home-history-row"
+          key={`${track.spotify_played_at ?? "recent"}-${track.track_id ?? track.uri ?? index}`}
+          onClick={() => openRecentPlayerTrackDetails(track)}
+          type="button"
+        >
+          {track.image_url ? (
+            <img alt="" className="player-recent-cover" src={track.image_url} />
+          ) : (
+            <span className="player-recent-cover player-recent-cover-fallback" aria-hidden="true">
+              {(track.track_name ?? "?").slice(0, 1).toUpperCase()}
+            </span>
+          )}
+          <span className="player-recent-copy">
+            <span className="player-recent-track single-line-ellipsis">
+              {recentTrackIsKnownLiked(track) ? <LikedBadge className="player-liked-badge" /> : null}
+              {recentTrackHasRelationTags(track) ? (
+                <ReleaseSiblingBadge
+                  className="player-release-sibling-badge"
+                  sourceCount={releaseSiblingSourceCountForTrackId(track.track_id)}
+                  duplicateSourceCount={track.release_track_duplicate_source_count ?? null}
+                  clusterCandidateType={track.release_track_cluster_candidate_type ?? null}
+                  clusterRelationshipKind={track.release_track_cluster_relationship_kind ?? null}
+                />
+              ) : null}
+              {track.track_name ?? "Unknown track"}
+              {Number(track.completed_play_count ?? 0) > 1 ? (
+                <span className="player-recent-repeat-count">x{track.completed_play_count}</span>
+              ) : null}
+            </span>
+            <span className="player-recent-artist single-line-ellipsis">
+              {track.artist_name ?? "Unknown artist"}
+            </span>
+            <span className="player-recent-completion" aria-hidden="true">
+              <span
+                className="player-recent-completion-fill"
+                style={{ width: `${Math.round((progressRatio ?? 0) * 100)}%` }}
+              />
+            </span>
+          </span>
+        </button>
+      );
+    };
 
     return (
       <section className="info-card info-card-wide player-home-panel" id="player" aria-label="Playback controls">
         <div className="player-home-layout">
+          <aside className="player-recent-column player-home-history-column" aria-label="Recently played songs">
+            <div className="player-recent-header">
+              <h3>History</h3>
+              {playerRecentTracksLoading ? <span>Loading</span> : null}
+            </div>
+            <div className="player-recent-list">
+              {playerRecentTracks.slice(0, 3).map(renderHomeHistoryTrackRow)}
+              {!playerRecentTracksLoading && playerRecentTracks.length === 0 ? (
+                <p className="empty-copy player-recent-empty">No recently played songs yet.</p>
+              ) : null}
+              {playerRecentTracksError ? (
+                <p className="empty-copy player-recent-empty">{playerRecentTracksError}</p>
+              ) : null}
+            </div>
+            <button
+              className="secondary-button player-menu-footer-button"
+              onClick={openListeningLogPage}
+              type="button"
+            >
+              complete listen log
+            </button>
+          </aside>
+
           <div className="player-current-column">
             <div className="player-home-control-box">
             <div className="player-menu-summary">
@@ -12537,26 +12617,6 @@ export function App() {
               </div>
             </div>
 
-            <div className="player-home-related">
-              <HomeAlbumAppearanceStrip
-                currentAlbum={{
-                  name: playerDisplayAlbumName,
-                  imageUrl: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
-                  year: playerDisplayAlbumYear,
-                  albumType: playerDisplayKnownTrack?.spotify_album_type ?? null,
-                  onClick: openPlayerTrackDetails,
-                }}
-                recordingMembers={(homeRecordingCandidate?.members ?? []).filter((member) => member.release_track_id !== playerDisplayReleaseTrackId)}
-                recordingMemberAlbumImageUrl={recordingMemberAlbumImageUrl}
-                recordingMemberAlbumName={recordingMemberAlbumName}
-                recordingMemberReleaseYear={recordingMemberReleaseYear}
-                onMemberClick={(member) => openRecordingCandidateReleaseTrack(member, "recording")}
-                onPlaylistClick={openPlaylistMembershipPreview}
-                playlistMemberships={playerPlaylistMemberships}
-                sourceTrack={playerDisplayKnownTrack}
-              />
-            </div>
-
             {usingLivePlaybackSnapshot && liveAwaitingNextTrack ? <p className="empty-copy">Track ended. Checking for the next song...</p> : null}
             {playerError ? <p className="empty-copy">{playerError}</p> : null}
             </div>
@@ -12742,6 +12802,26 @@ export function App() {
               {playerQueueError ? <p className="empty-copy player-recent-empty">{playerQueueError}</p> : null}
             </div>
           </aside>
+
+          <div className="player-home-related">
+            <HomeAlbumAppearanceStrip
+              currentAlbum={{
+                name: playerDisplayAlbumName,
+                imageUrl: playerDisplayTrack?.image ?? playerDisplayKnownTrack?.image_url ?? null,
+                year: playerDisplayAlbumYear,
+                albumType: playerDisplayKnownTrack?.spotify_album_type ?? null,
+                onClick: openPlayerTrackDetails,
+              }}
+              recordingMembers={(homeRecordingCandidate?.members ?? []).filter((member) => member.release_track_id !== playerDisplayReleaseTrackId)}
+              recordingMemberAlbumImageUrl={recordingMemberAlbumImageUrl}
+              recordingMemberAlbumName={recordingMemberAlbumName}
+              recordingMemberReleaseYear={recordingMemberReleaseYear}
+              onMemberClick={(member) => openRecordingCandidateReleaseTrack(member, "recording")}
+              onPlaylistClick={openPlaylistMembershipPreview}
+              playlistMemberships={playerPlaylistMemberships}
+              sourceTrack={playerDisplayKnownTrack}
+            />
+          </div>
         </div>
       </section>
     );
